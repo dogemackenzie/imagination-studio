@@ -196,6 +196,18 @@ Primary files: `spark/memory_guard.py`, `spark/comfy.sh`, `spark/spark_generate.
 
 **Acceptance:** simulated low host RAM, low cgroup headroom, low VRAM, occupied port, foreign lock, and missing telemetry all refuse safely. Guard tests stop only disposable owned processes. Ordinary image submissions remain disabled until Phase 5 produces a valid measured profile; a bounded calibration command may run the selected test workflow under every existing floor and runtime guard to establish that profile.
 
+Recorded 2026-10-21. Admission is `spark/rtx_admit.py`. `spark/memory_guard.py` and `spark/comfy.sh` are unchanged, including Spark `ESTIMATES`, `MEASURED_ROWS`, and the 8000 MB floor. `capabilities.reasons()` is unchanged: on this host, with the RTX 3060 visible, the lead reason stays `unmeasured_configuration`; inside the app container, with no `nvidia-smi`, it stays `unavailable_hardware`.
+
+Host RAM, cgroup headroom, and free VRAM are separate. Host RAM is not added to VRAM. A cgroup v2 mount root with no `memory.max` ends the walk. A chain of `max` up to that root is a known absence of a cap, and the host floor still applies. A missing `memory.max` below the root is a failed probe. `collect()` sets no measured profile, so a live admit is not ok. Image submissions stay disabled. No calibration workflow ran, and no job was sent to ComfyUI.
+
+`python3 spark/rtx_admit.py admit` returned `unmeasured_configuration` and exited 1. The same-time reading was host available 12562 MB of 15976 MB, floor 8000 MB, no numeric cgroup cap, free VRAM 11653 MiB, reserve 512 MiB. The "2–3 GB" sentence above is the load when this plan was written. The floor was not lowered.
+
+`spark_generate.call()` exits before any request on this machine. A Spark or Darwin path is unchanged (`RTX_ADMIT_SPARK=1` is the test seam). `stop_comfy` posts only after `rtx_admit.allow` matches a live owned renderer. Port 8188 stays protected. Tests stop only `sleep` processes they start.
+
+The published container was not rebuilt. It is still `imagination-studio-app:4718c9e` on `127.0.0.1:7870` and `192.168.50.22:7870`. Shared `comfyui.service` stayed active, MainPID 897018, NRestarts 0. `studio-studio-1` stayed healthy on `192.168.50.22:8190` and `:8443`.
+
+Full suite after the cgroup-root fix (`pytest tests`, pytest 9.1.1, `--timeout=240`): **662 passed, 8 skipped, 0 failed**, 160.88 s. Exit 0. Log `/tmp/phase4-suite-cgroup.log`. The 8 skips match Phase 1.
+
 ## Phase 5 Validate one existing image model
 
 **Outcome:** a prompt produces images and a scout sheet through the real app queue on the RTX 3060.
@@ -278,4 +290,4 @@ The first useful release is A–D plus the app-only parts of H. GPU validation m
 
 ## Immediate next work
 
-Phase 3 is done. Start Phase 4 (RTX host, cgroup, and VRAM admission, and renderer ownership). The app container is published on `127.0.0.1:7870` and `192.168.50.22:7870`. Preserve the shared ComfyUI service, its model files, and the container that publishes port 8190. Treat unmeasured hardware and the 8000 MB floor as rendering gates. Do not lower the floor. Local rendering stays off until a measured profile exists.
+Phase 4 is done. Start Phase 5 (validate the existing SDXL Turbo checkpoint under the guarded route, and record a measured profile before enabling it). Image submissions stay disabled until that profile exists. Do not lower the 8000 MB floor. Do not send a job to the shared ComfyUI. The app container stays `imagination-studio-app:4718c9e` on `127.0.0.1:7870` and `192.168.50.22:7870`. Preserve the shared ComfyUI service, its model files, and the container that publishes port 8190.

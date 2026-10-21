@@ -153,14 +153,29 @@ Projects, a Slate edit, an upload, a probe, and a 1-second ffmpeg export survive
 | --- | --- |
 | Full `pytest tests` with `--timeout=240` (pytest 9.1.1), after the container-mode edits | **643 passed, 8 skipped, 0 failed**, 156.14 s. Exit 0. Log `/tmp/phase3-build/suite3.log` |
 
-The 8 skips match Phase 1. In the browser, on the pre-commit image, Make image and Queue this clip were disabled with "No GPU is available for a local render on this machine." Home Generate, the Voice render control, and Music Generate were disabled. The credits "Built with Fish Audio" and "MiniMax-Music3" were still shown. Updates showed the container rebuild sentence. A fresh Create load reported no console errors. Shared `comfyui.service` stayed active, MainPID 897018, NRestarts 0. `studio-studio-1` stayed healthy on `192.168.50.22:8190` and `:8443`. Local rendering stays off. Phase 4 was not started.
+The 8 skips match Phase 1. In the browser, on the pre-commit image, Make image and Queue this clip were disabled with "No GPU is available for a local render on this machine." Home Generate, the Voice render control, and Music Generate were disabled. The credits "Built with Fish Audio" and "MiniMax-Music3" were still shown. Updates showed the container rebuild sentence. A fresh Create load reported no console errors. Shared `comfyui.service` stayed active, MainPID 897018, NRestarts 0. `studio-studio-1` stayed healthy on `192.168.50.22:8190` and `:8443`. Local rendering stays off.
+
+## Phase 4 RTX admission
+
+Recorded 2026-10-21. Admission is `spark/rtx_admit.py`. Spark measurements, `spark/memory_guard.py`, `spark/comfy.sh`, and `capabilities.reasons()` are unchanged. The host lead reason stays `unmeasured_configuration`. Inside the app container it stays `unavailable_hardware`. The 8000 MB floor was not lowered.
+
+Host RAM, cgroup headroom, and free VRAM are separate budgets. The cgroup v2 root on this machine has no `memory.max`. A chain of `max` up to that root is a known absence of a cap. A missing `memory.max` below the root is a failed probe. There is no measured profile, so a live admit is not ok. Image submissions stay disabled. No calibration workflow ran, and no job was sent to ComfyUI.
+
+`python3 spark/rtx_admit.py admit` returned `unmeasured_configuration` and exited 1. The same-time reading was host available 12562 MB of 15976 MB, floor 8000 MB, no numeric cgroup cap, free VRAM 11653 MiB, reserve 512 MiB. `spark_generate.call()` exits before any request on this machine. `stop_comfy` posts only for a live owned renderer. Port 8188 stays protected. Tests stop only `sleep` processes they start.
+
+The published container was not rebuilt. It is still `imagination-studio-app:4718c9e` on `127.0.0.1:7870` and `192.168.50.22:7870`. After the suite, `comfyui.service` was still active, MainPID 897018, NRestarts 0. `studio-studio-1` was still healthy on `192.168.50.22:8190` and `:8443`.
+
+| Run | Result |
+| --- | --- |
+| Full `pytest tests` with `--timeout=240` (pytest 9.1.1), after the cgroup-root fix | **662 passed, 8 skipped, 0 failed**, 160.88 s. Exit 0. Log `/tmp/phase4-suite-cgroup.log` |
+
+The 8 skips match Phase 1.
 
 ## Next steps
 
-1. Phase 4 of `docs/BUILD_PLAN.md`: host RAM, cgroup, and VRAM admission, plus renderer and lock ownership. Keep unsupported models disabled. Do not lower the 8000 MB floor. Keep the shared ComfyUI service, its models, and the container on port 8190 unchanged. The app container is published on `127.0.0.1:7870` and `192.168.50.22:7870`.
-2. Verify and benchmark the existing SDXL Turbo file under the guarded managed route once sufficient host RAM is available; establish limits from measurements before enabling it in the UI.
-3. Optionally implement controller-only support for eligible H3 video jobs on a capable worker. Keep other job types within their current execution constraints.
-4. Complete shutdown, persistence, backup/restore, rollback and documentation checks before calling a release ready.
+1. Phase 5 of `docs/BUILD_PLAN.md`: validate the existing SDXL Turbo checkpoint under the guarded route and record a measured profile before enabling it. Image submissions stay disabled until that profile exists. Do not lower the 8000 MB floor. Do not send a job to the shared ComfyUI. Keep its models and the container on port 8190 unchanged. The app container stays `imagination-studio-app:4718c9e` on `127.0.0.1:7870` and `192.168.50.22:7870`.
+2. Optionally implement controller-only support for eligible H3 video jobs on a capable worker. Keep other job types within their current execution constraints.
+3. Complete shutdown, persistence, backup/restore, rollback and documentation checks before calling a release ready.
 
 Phase 0 added `scripts/doctor.py` and ran it. At the end of that slice the only container was a disposable `nvidia-smi` probe. No model weights were downloaded, and the shared ComfyUI service was not changed. The app image arrived in Phase 3.
 

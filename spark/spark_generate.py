@@ -34,6 +34,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import memory_guard  # noqa: E402  (what a clip needs and whether this machine has it, beside this file)
+import rtx_admit  # noqa: E402  (RTX budgets and ownership; a Spark keeps memory_guard)
 PREFIX = Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-studio"))
 URL = os.environ.get("SPARK_COMFY_URL", "http://127.0.0.1:" + os.environ.get("SPARK_COMFY_PORT", "8190"))  # the port spark/comfy.sh starts it on
 
@@ -104,6 +105,9 @@ MOSS_NEGATIVE = "nsfw, worst quality, bad anatomy, watermark, jpeg artifact"
 
 
 def call(path, data=None):
+    blocked = rtx_admit.block_foreign_render()
+    if blocked:
+        sys.exit(blocked)
     request = urllib.request.Request(URL + path, data=json.dumps(data).encode() if data is not None else None,
                                      headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=120) as reply:

@@ -329,6 +329,8 @@ def finish(job_id: str):
 
 def test_cancel_on_a_spark_stops_only_this_jobs_prompt(comfy, monkeypatch):
     monkeypatch.setattr(server, "SPARK", True)
+    import rtx_admit
+    rtx_admit.claim(os.environ["SPARK_COMFY_URL"], os.getpid())
     job_id = running_job(log=f"[tensorfold] comfy prompt 00000000-1111-2222-3333-444444444444\nstep\n[tensorfold] comfy prompt {PROMPT}\n")
     reply = client.post(f"/api/jobs/{job_id}/cancel")
     assert reply.json()["status"] == "cancelled"
@@ -347,9 +349,44 @@ def test_cancel_before_comfyui_sends_nothing(comfy, monkeypatch):
     finish(job_id)
 
 
+def test_cancel_does_not_touch_a_renderer_this_studio_does_not_own(monkeypatch):
+    monkeypatch.setattr(server, "SPARK", True)
+    monkeypatch.setenv("SPARK_COMFY_URL", "http://10.9.8.7:9000")
+    called = []
+
+    def opened(*_args, **_kwargs):
+        called.append(True)
+        raise AssertionError("contacted a renderer")
+
+    monkeypatch.setattr(server.urllib.request, "urlopen", opened)
+    job_id = running_job()
+    reply = client.post(f"/api/jobs/{job_id}/cancel")
+    assert called == [] and reply.json()["status"] == "cancelled"
+    assert "does not own the renderer" in reply.json()["log"]
+    finish(job_id)
+
+
+def test_cancel_does_not_touch_the_protected_host_endpoint(monkeypatch):
+    monkeypatch.setattr(server, "SPARK", True)
+    monkeypatch.setenv("SPARK_COMFY_URL", "http://127.0.0.1:8188")
+    called = []
+
+    def opened(*_args, **_kwargs):
+        called.append(True)
+        raise AssertionError("contacted the protected renderer")
+
+    monkeypatch.setattr(server.urllib.request, "urlopen", opened)
+    job_id = running_job()
+    reply = client.post(f"/api/jobs/{job_id}/cancel")
+    assert called == [] and "protected" in reply.json()["log"]
+    finish(job_id)
+
+
 def test_cancel_says_so_when_comfyui_does_not_answer(monkeypatch):
     monkeypatch.setattr(server, "SPARK", True)
     monkeypatch.setenv("SPARK_COMFY_URL", "http://127.0.0.1:9")  # nothing listens there
+    import rtx_admit
+    rtx_admit.claim("http://127.0.0.1:9", os.getpid())
     job_id = running_job()
     began = time.time()
     reply = client.post(f"/api/jobs/{job_id}/cancel")

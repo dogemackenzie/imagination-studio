@@ -44,6 +44,7 @@ for name in ("projects", "uploads", "renders", "scouts", "exports"):
 import lengths  # noqa: E402  (which frame counts the model takes, beside this file)
 sys.path.insert(0, str(PACK / "spark"))
 import memory_guard  # noqa: E402  (a DGX Spark's memory: what a clip needs and whether this machine has it, in spark/)
+import rtx_admit  # noqa: E402  (RTX admission and which renderer this Studio may stop)
 import settings  # noqa: E402  (Settings: looks, layout, presets, settings.json, beside this file)
 
 FPS = 24
@@ -2106,6 +2107,10 @@ def stop_comfy(job: dict) -> bool:
         job["log"] = (job["log"] + "[studio] cancelled before it reached ComfyUI: nothing to stop there\n")[-20000:]
         return True
     prompt_id, base = found[-1], os.environ.get("SPARK_COMFY_URL", "http://127.0.0.1:" + os.environ.get("SPARK_COMFY_PORT", "8190"))
+    held = rtx_admit.allow(base)
+    if not held["ok"]:
+        job["log"] = (job["log"] + f"[studio] cancelled: {held['reason']}\n")[-20000:]
+        return False
 
     def post(path: str, body: dict) -> int:
         request = urllib.request.Request(base + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}, method="POST")
