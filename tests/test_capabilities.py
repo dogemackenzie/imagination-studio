@@ -96,8 +96,12 @@ def test_a_direct_generative_post_is_refused_and_not_queued(named_rtx):
     assert voice.json()["code"] == "unmeasured_configuration"
     song = client.post("/api/music/takes", json={"caption": "a warm song", "lyrics": "[Chorus]\nHello", "seconds": 30})
     assert song.status_code == 400 and song.json()["code"] == "unmeasured_configuration"
-    exported = client.post("/api/jobs", json={"kind": "export", "params": {"clips": []}})
+    # An export is not a generative route. A bad clip list is refused as an export, before it is queued,
+    # on a machine with ffmpeg and on one without.
+    exported = client.post("/api/jobs", json={"kind": "export", "params": {"clips": ["not-a-clip"]}})
+    assert exported.status_code == 400
     assert exported.json().get("code") != "unmeasured_configuration"
+    assert "clips" in exported.json()["error"]
     assert set(server.jobs) == before
 
 
