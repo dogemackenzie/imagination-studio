@@ -5,6 +5,7 @@ Import and collection do not start the queue or a model scan. The scan delay is 
 module imports the app: a positive delay walks this machine, including another application's model files. ``begin``
 runs once the app has been imported, including when a test imports it midway through the session.
 """
+import importlib.util
 import os
 import sys
 import tempfile
@@ -15,6 +16,14 @@ from pathlib import Path
 import pytest
 
 os.environ.setdefault("STUDIO_HOME", str(Path(tempfile.mkdtemp(prefix="studio-test-")) / "ImaginationStudio"))
+# A display GPU is nvidia-smi's first row. Read a compute GPU instead. A Spark ([N/A] memory) is left unset.
+_spec = importlib.util.spec_from_file_location("suite_gpu", Path(__file__).with_name("suite_gpu.py"))
+_suite_gpu = importlib.util.module_from_spec(_spec)
+sys.modules["suite_gpu"] = _suite_gpu
+_spec.loader.exec_module(_suite_gpu)
+_suite_gpu.pin_suite_gpu()
+# The scan delay is forced off: the app starts that scan 20 s after it is imported (app/discover.py), and a positive
+# delay walks this machine, including another application's model files.
 os.environ["STUDIO_DISCOVER_DELAY"] = "-1"
 # NVIDIA Nemotron 3.5 Bolt as the Studio's engine (app/bolt.py) is a stand-in in tests/test_bolt.py.
 # Everywhere else the brains' local server is the one a test names.

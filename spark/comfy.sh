@@ -17,8 +17,14 @@ set -euo pipefail
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"
 PORT="${SPARK_COMFY_PORT:-8190}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Native installs keep kind, log, and outputs beside PREFIX. STUDIO_COMFY_STATE names a writable Studio folder.
+# shellcheck disable=SC1091
+. "$HERE/gpu.sh"
+studio_pin_gpu
+# Native installs keep kind, log, and outputs beside PREFIX. Another port is a second studio.
+# STUDIO_COMFY_STATE names a writable Studio folder.
 STATE="${STUDIO_COMFY_STATE:-$PREFIX}"
+if [ "$PORT" = 8190 ]; then COMFY_LOG="$STATE/comfy.log"; COMFY_KIND="$STATE/comfy.kind"
+else COMFY_LOG="$STATE/comfy-$PORT.log"; COMFY_KIND="$STATE/comfy-$PORT.kind"; fi
 MATCH="[m]ain.py --listen 127.0.0.1 --port $PORT"
 refuse_container() {
   echo "this container does not start a renderer: nodes are staged at image build (${STUDIO_STAGED_NODES:-/opt/studio/staged-nodes}) and are not copied at runtime" >&2
@@ -27,7 +33,7 @@ refuse_container() {
 case "${1:-start}" in
   stop)
     if [ "${STUDIO_CONTAINER:-}" = 1 ]; then
-      rm -f "$STATE/comfy.kind"
+      rm -f "$COMFY_KIND"
       echo "not running"
       exit 0
     fi
@@ -38,7 +44,7 @@ case "${1:-start}" in
       for _ in $(seq 1 25); do pgrep -f "$MATCH" >/dev/null || break; sleep 1; done
       MATCH="^[^ ]+ main\.py --listen 127\.0\.0\.1 --port $PORT( |\$)"
     fi
-    pkill -f "$MATCH" 2>/dev/null && echo "stopped" || echo "not running"; rm -f "$STATE/comfy.kind";;
+    pkill -f "$MATCH" 2>/dev/null && echo "stopped" || echo "not running"; rm -f "$COMFY_KIND";;
   status) pgrep -f "$MATCH" >/dev/null && echo "running on 127.0.0.1:$PORT" || echo "not running";;
   run)
     if [ "${STUDIO_CONTAINER:-}" = 1 ]; then
@@ -52,16 +58,16 @@ case "${1:-start}" in
     fi
     # TensorFold's H3 engine as a ComfyUI node, when it has been built (spark/build-engine.sh)
     NODE="$PREFIX/ComfyUI/custom_nodes/tensorfold_h3"
-    rm -rf "$NODE"
     if [ -s "$PREFIX/tf-h3/libtf_h3.so" ]; then
-      mkdir -p "$NODE" && cp "$HERE/tensorfold_h3/__init__.py" "$NODE/"
+      mkdir -p "$NODE"
+      cp "$HERE/tensorfold_h3/__init__.py" "$NODE/__init__.py.$$" && mv -f "$NODE/__init__.py.$$" "$NODE/__init__.py"
       export TF_H3_LIB="$PREFIX/tf-h3/libtf_h3.so"
     fi
     # the Studio's MMAudio sampler (foley), beside kijai's ComfyUI-MMAudio when oneshot-setup-spark.sh --sound put it there
     NODE="$PREFIX/ComfyUI/custom_nodes/studio_mmaudio"
-    rm -rf "$NODE"
     if [ -f "$PREFIX/ComfyUI/custom_nodes/ComfyUI-MMAudio/nodes.py" ] && [ -f "$HERE/studio_mmaudio/__init__.py" ]; then
-      mkdir -p "$NODE" && cp "$HERE/studio_mmaudio/__init__.py" "$NODE/"
+      mkdir -p "$NODE"
+      cp "$HERE/studio_mmaudio/__init__.py" "$NODE/__init__.py.$$" && mv -f "$NODE/__init__.py.$$" "$NODE/__init__.py"
     fi
     cd "$PREFIX/ComfyUI"
     # --use-ck-attention: ComfyUI's own flash-attention kernel, 12% faster a pass than PyTorch's on a GB10
@@ -97,8 +103,8 @@ case "${1:-start}" in
     pgrep -f "$MATCH" >/dev/null && { echo "already running"; exit 0; }
     [ -x "$PREFIX/venv/bin/python" ] && [ -f "$PREFIX/ComfyUI/main.py" ] || { echo "run oneshot-setup-spark.sh first: nothing at $PREFIX" >&2; exit 1; }
     mkdir -p "$STATE"
-    rm -f "$STATE/comfy.kind"
-    nohup setsid bash "$0" run > "$STATE/comfy.log" 2>&1 < /dev/null &
-    echo "ComfyUI starting on 127.0.0.1:$PORT (log: $STATE/comfy.log)";;
+    rm -f "$COMFY_KIND"
+    nohup setsid bash "$0" run > "$COMFY_LOG" 2>&1 < /dev/null &
+    echo "ComfyUI starting on 127.0.0.1:$PORT (log: $COMFY_LOG)";;
   *) echo "usage: comfy.sh start|stop|status" >&2; exit 2;;
 esac

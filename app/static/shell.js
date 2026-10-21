@@ -174,7 +174,19 @@ function gpuSay(t) {
   }
   return g.name || "n/a";
 }
-const platName = () => !S ? "" : S.platform === "spark" ? "DGX Spark" : S.platform === "mac" ? "Mac" : "Linux";
+// The chip names this machine. Linux stays "Linux". A DGX Spark stays "DGX Spark". A CUDA workstation is its card
+// (platform_label is "CUDA · NVIDIA RTX PRO 6000 BLACKWELL … · H3-CUDA"), plus the nvidia-smi index.
+const platName = () => {
+  if (!S) return "";
+  if (S.platform === "mac") return "Mac";
+  if (S.platform !== "spark") return "Linux";
+  const label = S.platform_label || "";
+  if (!label || label.startsWith("DGX SPARK")) return "DGX Spark";
+  const raw = (label.split(" · ")[1] || "").replace(/^NVIDIA\s+/, "");
+  const card = raw.split(/\s+(?:BLACKWELL|ADA|AMPERE|MAX-Q|WORKSTATION)\b/)[0].trim();
+  if (!card) return "DGX Spark";
+  return S.gpu_index ? card + " · " + S.gpu_index : card;
+};
 function telApply(t) { SHELL.tel = t; SHELL.telAt = Date.now();
   SHELL.samples.push({ t: Date.now(), gpu: t.gpu ? t.gpu.util_pct : null, mem: t.memory ? 100 - pct(t.memory.available_mb, t.memory.total_mb) : null, temp: t.gpu ? t.gpu.temp_c : null, power: t.gpu ? t.gpu.power_w : null });
   if (SHELL.samples.length > 300) SHELL.samples.shift();

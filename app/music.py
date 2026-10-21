@@ -68,13 +68,16 @@ PREFIX = Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-stud
 
 
 def comfy_kind_path() -> Path:
-    """comfy.kind beside PREFIX, or under STUDIO_COMFY_STATE when that writable folder is named."""
+    """The loaded-model mark for this process's ComfyUI.
 
-    named = os.environ.get("STUDIO_COMFY_STATE", "").strip()
-    base = Path(named).expanduser() if named else PREFIX
-    return base / "comfy.kind"
+    Port 8190 keeps comfy.kind. Another port is comfy-<port>.kind. STUDIO_COMFY_STATE names a writable folder.
+    """
 
-
+    spark = str(Path(__file__).resolve().parent.parent / "spark")
+    if spark not in sys.path:
+        sys.path.insert(0, spark)
+    import memory_guard
+    return Path(memory_guard.comfy_file("kind"))
 SECONDS = (10, 300)  # the longest a song may be, as the app offers it (the model takes up to 360 s)
 CAPTION_LIMIT, LYRICS_LIMIT = 2000, 6000  # characters (the model reads 5000 tokens of caption and lyrics in all)
 SAMPLING = {"steps": (30, 8, 60), "dit_cfg": (1.7, 1.0, 5.0), "ar_cfg": (1.5, 1.0, 5.0), "top_k": (50, 1, 500)}

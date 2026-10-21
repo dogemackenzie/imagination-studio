@@ -13,6 +13,9 @@
 # written; NEGATIVE replaces its template's negative prompt.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$HERE/gpu.sh"
+studio_pin_gpu
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"
 # SDXL Turbo does not use the Spark venv or comfy.sh. It submits one prompt to the shared ComfyUI.
 if [ "${IMAGE_MODEL:-qwen}" = "sdxl-turbo" ]; then
