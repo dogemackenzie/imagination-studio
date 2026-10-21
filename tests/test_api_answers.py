@@ -19,8 +19,8 @@ client = TestClient(server.app)
 def test_the_state_never_waits_on_the_gpu_driver():
     """/api/state ran nvidia-smi twice a call with no time limit. It is asked once, with a limit, and kept."""
 
-    if not server.SPARK:
-        return
+    had_spark = server.SPARK
+    server.SPARK = True  # this assertion is the Spark path: one timed nvidia-smi, then the cached name
     real, calls = subprocess.run, []
 
     def stand_in(command, *args, **kwargs):
@@ -52,6 +52,7 @@ def test_the_state_never_waits_on_the_gpu_driver():
     finally:
         server.subprocess.run = real
         server.GPU_NAME[:] = had
+        server.SPARK = had_spark
 
 
 def test_no_request_runs_a_tool_without_a_time_limit():

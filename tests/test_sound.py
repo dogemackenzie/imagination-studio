@@ -56,6 +56,9 @@ def ffmpeg_is_present(monkeypatch):
 
 @pytest.fixture
 def ready(tmp_path, monkeypatch):
+    import capabilities
+
+    capabilities.use("mac")
     ffmpeg_is_present(monkeypatch)
     models = tmp_path / "models"
     (models / "stable-audio-open-1.0").mkdir(parents=True)
@@ -78,7 +81,8 @@ def ready(tmp_path, monkeypatch):
             raise RuntimeError(done.stderr[-300:] or "the runner failed")
         return True
     monkeypatch.setattr(server, "run", run)
-    return {"build": build, "models": models}
+    yield {"build": build, "models": models}
+    capabilities.use(None)
 
 
 def finish(job_id, seconds=30):

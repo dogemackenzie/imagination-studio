@@ -211,7 +211,11 @@ def install_stands():
     an import-time replacement of ``memory_of`` used to disable the guard for every later test.
     """
 
-    saved = (server.run, server.memory_of, server.media_tools, hub.shell, hub.copy, hub.dial, hub.spark)
+    import capabilities
+
+    capabilities.use("spark")
+    saved = (server.run, server.memory_of, server.media_tools, hub.shell, hub.copy, hub.dial, hub.spark, server.SPARK)
+    server.SPARK = True  # chosen Spark count and the live preset table; Linux alone is not this flag anymore
     local_render.now = local_render.most = 0
     flight.reset()
     server.run = local_render
@@ -228,6 +232,9 @@ def install_stands():
 
 
 def remove_stands(saved) -> None:
+    import capabilities
+
+    capabilities.use(None)
     hub.stop_loop()
     for worker in list(OPEN):
         try:
@@ -238,7 +245,7 @@ def remove_stands(saved) -> None:
     OPEN.clear()
     if hub.thread is not None and hub.thread.is_alive():
         hub.thread.join(timeout=5.0)  # a glance in flight has its own short timeout; don't restore real ssh under it
-    server.run, server.memory_of, server.media_tools, hub.shell, hub.copy, hub.dial, hub.spark = saved
+    server.run, server.memory_of, server.media_tools, hub.shell, hub.copy, hub.dial, hub.spark, server.SPARK = saved
     assert server.memory_of.__module__ == "server"
 
 

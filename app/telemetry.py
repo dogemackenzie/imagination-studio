@@ -26,12 +26,14 @@ import threading
 import time
 from pathlib import Path
 
+import hardware
+
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 import suite  # the same-computer check of the mutating routes, beside this file
 
-SPARK = sys.platform.startswith("linux")
+SPARK = hardware.is_spark()
 TICK = 2.0                      # seconds between the open stream's events (a page is watching)
 SAMPLE = 10.0                   # seconds between the history's samples, taken whether or not a page is open
 KEEP = int(600 / SAMPLE)        # ten minutes of samples

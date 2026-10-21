@@ -110,7 +110,7 @@ Doctor never enables a render route. Regenerate the inventory with `python3 scri
 
 ## Slice B test isolation
 
-Recorded 2026-10-21. Production `SPARK = linux` in `app/server.py` is unchanged. The 8000 MB floor is unchanged. Local rendering stays off. Doctor is still not hooked into the Mac or Spark installers. No `app/hardware.py`. RTX is only a test profile: `server.SPARK` is set only when the profile name is `spark`.
+Recorded 2026-10-21. At the end of this slice, production `SPARK` was still `sys.platform.startswith("linux")`. Phase 2 replaces that with `hardware.is_spark()`. The 8000 MB floor is unchanged. Local rendering stays off. Doctor is still not hooked into the Mac or Spark installers. RTX is only a test profile: `server.SPARK` is set only when the profile name is `spark`.
 
 The queue and discovery no longer start at import during pytest collection. `begin()` / `end()` own them. `tests/conftest.py` forces `STUDIO_DISCOVER_DELAY=-1` and starts the queue for the session. Spark stand-ins restore `server.run`, `server.memory_of`, and the hub methods, and close their fake servers on teardown.
 
@@ -125,14 +125,27 @@ Skips: `tests/test_shot.py` (PyAV is not installed; those tests were not collect
 
 After both runs, `comfyui.service` was still active, MainPID 897018, NRestarts 0. Container `studio-studio-1` (`40fe133a96d9`) was still healthy on `192.168.50.22:8190` and `:8443`. The suite log is `/tmp/suite-isolation-c.log`.
 
+## Phase 2 hardware and capability boundaries
+
+Recorded 2026-10-21. This machine is an NVIDIA GeForce RTX 3060, family `nvidia-rtx`, product Inspiron 620. It is not a DGX Spark. `app/hardware.py` and `app/capabilities.py` are the boundary. Production `SPARK` is `hardware.is_spark()`, so Linux alone does not select the Spark route. Mode on this host is `app-only`. The 8000 MB floor is unchanged. A live reading had about 13 GB available, so state cites `unmeasured_configuration` and does not cite `insufficient_memory`.
+
+`/api/state` reports engine `none`, an empty `image_models` list, and `local_render` false. Generative jobs (scout, video, studio, long, edit, actions, sound, voice, music) are refused before build, ffmpeg, or a Spark script. Export, soundtrack, project reads, and `POST /api/voice/cut` stay available. `scripts/require-route.sh` stops `image.sh`, `video.sh`, `edit.sh`, `turnaround.sh`, `studio.sh`, and `scout.sh` on this machine before they exec into `spark/`. A mode cannot invent a route: `STUDIO_MODE=spark` stays app-only here; `capabilities.use("spark")` or `use("mac")` opens the existing Mac or Spark behavior for tests. Managed RTX does not render.
+
+The page no longer titles this host as a Mac. Home Generate, Make image, and Queue this clip are disabled with the unmeasured-route reason. A direct `POST /api/jobs` for video returns 400 with code `unmeasured_configuration`. Voice still says "Built with Fish Audio" and Music still says "MiniMax-Music3"; both are unavailable. A saved picture-model id is shown as not on this machine.
+
+| Run | Result |
+| --- | --- |
+| Full `pytest tests` with `--timeout=240` (pytest 9.1.1) | **627 passed, 8 skipped, 0 failed**, 152.02 s. Exit 0. Log `/tmp/suite-phase2-b.log` |
+
+The 8 skips match Phase 1: `tests/test_shot.py` (PyAV), `test_mend_paints_over_dull_green_residue`, `test_frame_from_a_clip`, two motion-link tests, two music soundtrack tests, and `test_the_delivery_sound_is_resampled_only_when_asked`. Browser check on `http://127.0.0.1:7870` used a temporary `STUDIO_HOME` and `STUDIO_DISCOVER_DELAY=-1`. Shared ComfyUI and `studio-studio-1` were not restarted or given jobs. Local rendering stays off. Phase 3 was not started.
+
 ## Next steps
 
-1. Phase 2 of `docs/BUILD_PLAN.md`: hardware and capability detection, so Linux is not treated as a DGX Spark. Keep the shared ComfyUI service, its models, and the container on port 8190 unchanged. Do not lower the 8000 MB floor.
-2. Add an app-only runtime image and Compose configuration with persistent storage, loopback binding, health checks, and a reproducible dependency set.
-3. Add host-RAM, cgroup and VRAM admission plus renderer/lock ownership checks. Keep unsupported models disabled.
-4. Verify and benchmark the existing SDXL Turbo file under the guarded managed route once sufficient host RAM is available; establish limits from measurements before enabling it in the UI.
-5. Optionally implement controller-only support for eligible H3 video jobs on a capable worker. Keep other job types within their current execution constraints.
-6. Complete shutdown, persistence, backup/restore, rollback and documentation checks before calling a release ready.
+1. Phase 3 of `docs/BUILD_PLAN.md`: an app-only container on `127.0.0.1:7870`, with persistent storage, loopback binding, health checks, and a pinned dependency set. Do not enable a renderer. Keep the shared ComfyUI service, its models, and the container on port 8190 unchanged. Do not lower the 8000 MB floor.
+2. Add host-RAM, cgroup and VRAM admission plus renderer/lock ownership checks. Keep unsupported models disabled.
+3. Verify and benchmark the existing SDXL Turbo file under the guarded managed route once sufficient host RAM is available; establish limits from measurements before enabling it in the UI.
+4. Optionally implement controller-only support for eligible H3 video jobs on a capable worker. Keep other job types within their current execution constraints.
+5. Complete shutdown, persistence, backup/restore, rollback and documentation checks before calling a release ready.
 
 Phase 0 added `scripts/doctor.py` and ran it. The only container was a disposable `nvidia-smi` probe; the Studio app image was not built. No runtime packages were installed, no model weights were downloaded, and the shared ComfyUI service was not changed.
 

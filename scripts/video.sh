@@ -48,6 +48,8 @@
 # TEXT_ENCODER may be the path of another MiniMax H3 text encoder file (a ComfyUI int8 safetensors, decoded to
 # bfloat16 as it loads); unset or regular is MiniMax's own. With ENGINE=fasth3 it renders on the MLX engine.
 set -euo pipefail
+# App-only stops here. A Mac and a DGX Spark continue, and Linux that is a Spark still hands over below.
+bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/require-route.sh" video
 # On a DGX Spark (Linux, CUDA) the same interface is served by spark/video.sh.
 [ "$(uname -s)" != Linux ] || exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/spark/video.sh" "$@"
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"

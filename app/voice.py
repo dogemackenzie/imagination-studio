@@ -40,6 +40,8 @@ import threading
 import time
 from pathlib import Path
 
+import hardware
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
@@ -54,7 +56,7 @@ except ImportError:  # pragma: no cover - imported as app.voice from outside the
 router = APIRouter()
 HOME: Path = Path.home() / "ImaginationStudio"
 qa = None  # app/qa.py, given by attach
-SPARK = sys.platform.startswith("linux")
+SPARK = hardware.is_spark()
 FRAME_RATE = 21.5  # the Fish codec's frames per second of audio
 SAMPLING = {"temperature": (1.0, 0.1, 2.0), "top_p": (0.9, 0.1, 1.0), "top_k": (30, 1, 200)}  # Fish's defaults, then the range
 TEXT_LIMIT = 6000  # characters in one take (long text is split at sentence ends by the engine)
@@ -841,6 +843,14 @@ def backend():
 
 
 def state() -> dict:
+    import capabilities
+    if not capabilities.renders(SPARK):
+        detail = capabilities.refusal("voice", SPARK) or {"error": "", "code": "unmeasured_configuration"}
+        return {"available": False, "why": detail.get("error") or "", "code": detail.get("code"),
+                "backend": None, "label": None, "credit": CREDIT, "licence": LICENCE,
+                "defaults": {k: v[0] for k, v in SAMPLING.items()}, "ranges": {k: v[1:] for k, v in SAMPLING.items()},
+                "text_limit": TEXT_LIMIT, "reference_seconds": REFERENCE_SECONDS, "speakers": 16,
+                "live": False, "checks": False, "serves": False}
     one = backend()
     why = one.check()
     out = {"available": not why, "why": why, "backend": one.name, "label": one.label, "credit": CREDIT, "licence": LICENCE,
@@ -994,6 +1004,10 @@ def checked(body: dict) -> dict:
     bad = [n for n in SPEAKER.findall(text) if int(n) > 15]
     if bad:
         raise HTTPException(400, f"speakers are <|speaker:0|> to <|speaker:15|>, not <|speaker:{bad[0]}|>")
+    import capabilities
+    blocked = capabilities.refusal("voice", SPARK)
+    if blocked:
+        raise HTTPException(400, blocked)
     why = backend().check()
     if why:
         raise HTTPException(400, why)
@@ -1362,6 +1376,6 @@ def attach(home: Path, runner, queue, within, short, measure, gate) -> tuple[API
     global HOME, run, enqueue, inside, relative, media_seconds, qa
     HOME, run, enqueue, inside, relative, media_seconds, qa = home, runner, queue, within, short, measure, gate
     (HOME / "voice").mkdir(parents=True, exist_ok=True)
-    if not SPARK:
+    if sys.platform == "darwin" and not SPARK:
         threading.Thread(target=backend().check, daemon=True).start()  # the first look runs a process: not in a request
     return router, perform

@@ -52,6 +52,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+import hardware
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
@@ -60,7 +62,7 @@ import voice
 router = APIRouter()
 HOME: Path = Path.home() / "ImaginationStudio"
 PACK = Path(__file__).resolve().parent.parent
-SPARK = sys.platform.startswith("linux")
+SPARK = hardware.is_spark()
 MAC = sys.platform == "darwin"
 PREFIX = Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-studio")).expanduser()
 SECONDS = (10, 300)  # the longest a song may be, as the app offers it (the model takes up to 360 s)
@@ -747,6 +749,17 @@ def release(why: str) -> bool:
 
 
 def state() -> dict:
+    import capabilities
+    if not capabilities.renders(SPARK):
+        detail = capabilities.refusal("music", SPARK) or {"error": "", "code": "unmeasured_configuration"}
+        return {"available": False, "why": detail.get("error") or "", "code": detail.get("code"),
+                "route": None, "label": None, "credit": CREDIT, "licence": LICENCE,
+                "seconds": SECONDS, "defaults": {k: v[0] for k, v in SAMPLING.items()},
+                "ranges": {k: v[1:] for k, v in SAMPLING.items()}, "sections": SECTIONS,
+                "caption_limit": CAPTION_LIMIT, "lyrics_limit": LYRICS_LIMIT, "rtf": None,
+                "music_db": MUSIC_DB, "duck_db": DUCK_DB, "server": None, "stream": False,
+                "stream_lead": {"no_stall_s": dict(NO_STALL_S), "margin_s": HOLD_MARGIN_S, "first_audio_s": 7.6},
+                "fallback": None, "weights": None}
     one = engine()
     why = one.check()
     return {"available": not why, "why": why, "route": one.name, "label": one.label, "credit": CREDIT, "licence": LICENCE,
@@ -819,6 +832,10 @@ def checked(body: dict) -> dict:
             params[key] = value
     except (TypeError, ValueError):
         raise HTTPException(400, "seed, steps, dit_cfg, ar_cfg and top_k are numbers")
+    import capabilities
+    blocked = capabilities.refusal("music", SPARK)
+    if blocked:
+        raise HTTPException(400, blocked)
     why = engine().check()
     if why:
         raise HTTPException(400, why)
@@ -1067,6 +1084,6 @@ def attach(home: Path, runner, queue, within, short, measure, gate) -> tuple[API
     global HOME, run, enqueue, inside, relative, media_seconds, qa
     HOME, run, enqueue, inside, relative, media_seconds, qa = home, runner, queue, within, short, measure, gate
     (HOME / "music").mkdir(parents=True, exist_ok=True)
-    if not SPARK:
+    if sys.platform == "darwin" and not SPARK:
         threading.Thread(target=engine().check, daemon=True).start()  # the first look runs a process: not in a request
     return router, perform, soundtrack

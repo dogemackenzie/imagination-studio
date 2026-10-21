@@ -64,7 +64,7 @@ function viewFoley() {
     el("section", { class: "panel stack", style: "margin-top:14px" },
       !k.ready ? el("div", { class: "note vt-bad" }, k.why) : null,
       // the install command where installing is what is missing (on a Spark a kind may also wait for its memory measurement)
-      !k.ready && (!SFX.state.spark || /--sound/.test(k.why || "")) ? (() => {
+      !k.ready && (typeof localRender !== "function" || localRender()) && (!SFX.state.spark || /--sound/.test(k.why || "")) ? (() => {
         const cmd = SFX.state.spark ? "bash oneshot-setup-spark.sh --sound" : "bash scripts/setup-sound.sh";
         return el("div", { class: "signin-cmd" }, el("code", {}, cmd), el("button", { type: "button", class: "small", onclick: () => copyText(cmd, "Command") }, "Copy"));
       })() : null,

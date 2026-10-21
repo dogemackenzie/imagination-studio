@@ -5,6 +5,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 os.environ.setdefault("STUDIO_HOME", str(Path(tempfile.mkdtemp()) / "TensorFoldStudio"))
 sys.path.insert(0, str(ROOT / "app"))
@@ -16,6 +18,17 @@ from fastapi.testclient import TestClient  # noqa: E402
 client = TestClient(server.app)
 PRESET = "small" if server.SPARK else "draft"
 QUALITY = "fh8"
+
+
+@pytest.fixture(autouse=True)
+def mac_route():
+    """These checks need a render route. ``draft`` is bound at import on a machine that is not a Spark."""
+
+    import capabilities
+
+    capabilities.use("mac")
+    yield
+    capabilities.use(None)
 
 
 def refused(call) -> str:

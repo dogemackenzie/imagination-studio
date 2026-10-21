@@ -213,15 +213,23 @@ function ndField(node, key, kind, options) {
   const words = { image_model: "model", music_db: "song dB", look: "look", path: "file", project: "editor", count: "how many", index: "which" }[key] || ndSay(key);
   return el("div", { class: "nd-f" + (kind === "area" || kind === "library" || kind === "look" || kind === "project" || key === "image_model" ? " wide" : "") },
     kind === "area" ? null : el("span", {}, words), input); }
+function ndPictureModels(node) {
+  const saved = node && node.params && node.params.image_model;
+  if (typeof S !== "undefined" && S && Array.isArray(S.image_models)) {
+    const models = Object.fromEntries(S.image_models.map(m => [m.id, m.label]));
+    if (saved && !models[saved]) models[saved] = saved + " (not on this machine)";
+    return models;
+  }
+  return { qwen: "Qwen 2.1 Turbo", "qwen-full": "Qwen 2.1 Full", "flux3k-fast": "FLUX3-K Fast", "flux3k-full": "FLUX3-K Full", "moss-image": "MOSS-Image" };
+}
 function ndFields(node) {
-  const models = typeof S !== "undefined" && S && S.image_models && S.image_models.length ? Object.fromEntries(S.image_models.map(m => [m.id, m.label]))
-    : { qwen: "Qwen 2.1 Turbo", "qwen-full": "Qwen 2.1 Full", "flux3k-fast": "FLUX3-K Fast", "flux3k-full": "FLUX3-K Full", "moss-image": "MOSS-Image" };
+  const models = ndPictureModels(node);
   const f = (key, kind, options) => ndField(node, key, kind, options);
   return {
     text: () => [f("text", "area")], note: () => [f("text", "area")],
     picture: () => [f("image_model", "select", models), f("width", "num"), f("height", "num"), f("seed", "num"), f("count", "num")],
     pick: () => [f("index", "num")],
-    edit: () => [f("image_model", "select", ND_EDIT_MODELS), f("seed", "num")],
+    edit: () => [f("image_model", "select", (typeof S !== "undefined" && S && Array.isArray(S.image_models)) ? models : ND_EDIT_MODELS), f("seed", "num")],
     clip: () => [f("preset", "select", ND_PRESETS), f("quality", "select", ND_QUALITIES), f("seconds", "num"), f("seed", "num"), f("look", "look")],
     voice: () => [f("seed", "num")], song: () => [f("seconds", "num"), f("seed", "num")],
     reference: () => [f("kind", "select", ND_KINDS), f("path", "library")],

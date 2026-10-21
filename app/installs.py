@@ -70,6 +70,22 @@ def plan_of(item: dict) -> dict:
     return out
 
 
+# Weight installs. A test that substitutes `sh -c` does not match these names and still runs.
+WEIGHT_NAMES = ("oneshot-setup.sh", "oneshot-setup-spark.sh", "setup-music.sh", "setup-voice.sh",
+                "setup-flux3.sh", "setup-motion.sh", "setup-sound.sh")
+
+
+def weight_install(plan: dict) -> bool:
+    """True when this plan downloads model weights. plan_of itself stays honest on every machine."""
+
+    if plan.get("how") in ("oneshot", "hf"):
+        return True
+    if plan.get("how") != "script":
+        return False
+    blob = " ".join(str(part) for part in (plan.get("command") or [])) + " " + str(plan.get("shown") or "")
+    return any(name in blob for name in WEIGHT_NAMES)
+
+
 def free_gb(place: Path) -> float | None:
     place = Path(place)
     while not place.exists() and place != place.parent:
@@ -101,6 +117,10 @@ def start(item: dict, env: dict | None = None) -> dict:
     if plan["how"] in ("manual", "first_use", "lora") or not plan["command"]:
         raise ValueError({"first_use": "This one comes by itself the first time it is used.",
                           "lora": "Install LoRAs from the LoRA hub (Looks)."}.get(plan["how"], "This one is installed by hand: " + (plan["shown"] or "see the README")))
+    import capabilities
+    import hardware
+    if weight_install(plan) and not capabilities.renders(hardware.is_spark()):
+        raise ValueError(capabilities.install_requirements())
     if plan["how"] == "hf" and not shutil.which("hf"):
         raise ValueError("Hugging Face's `hf` command is not installed here: pip install -U huggingface_hub")
     need_gb, have_gb = plan["size_gb"], free_gb(Path(item["expected"]))

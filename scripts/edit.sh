@@ -16,6 +16,8 @@
 # or QUANTIZE there), FLUX3_MODEL_DIR (default ~/flux3-models) and UPSAMPLE=0 (FLUX3-K: the prompt as written).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# App-only stops here. A Mac and a DGX Spark continue, and Linux that is a Spark still hands over below.
+bash "$HERE/require-route.sh" edit
 # On a DGX Spark (Linux, CUDA) the same interface is served by spark/edit.sh.
 [ "$(uname -s)" != Linux ] || exec bash "$HERE/../spark/edit.sh" "$@"
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"

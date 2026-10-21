@@ -75,6 +75,7 @@ function dscInstall(node, n) { const p = n.install || {}, job = DSC.data.install
   if (p.how === "first_use") return el("div", { class: "note" }, "Comes by itself the first time it is used.");
   if (!p.how) return n.download ? el("div", { class: "note" }, "Download: " + n.download) : null;  // a server without Install
   if (p.how === "manual") return n.download ? el("div", { class: "note" }, "Installed by hand: " + n.download) : null;
+  if (p.how === "unsupported") return el("div", { class: "note" }, p.shown || p.requirements || "This install is not available on this machine.");
   if (p.how === "lora") { const r = (typeof LORAS !== "undefined" ? LORAS : []).find(x => x.id === p.lora) || { id: p.lora, name: n.label };
     return el("div", { class: "dsc-cand" }, el("button", { class: "small on", onclick: async () => { try { const out = typeof loraInstallOne === "function" ? await loraInstallOne(r) : await api("/api/loras/" + p.lora + "/install", {});
       if (!(out && out.gate)) toast("Installing " + (r.name || n.label)); setTimeout(() => dscLoad(node), 1500); } catch (e) { toast(e.message, 6000); } } }, "Install"), el("span", { class: "note" }, "from its author's page, through the LoRA hub")); }

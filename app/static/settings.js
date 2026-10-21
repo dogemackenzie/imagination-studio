@@ -94,7 +94,9 @@ function setLayout() { const lay = prefs().layout, hidden = new Set(lay.hidden |
 
 /* ---------- 3. Presets & preferences ---------- */
 function setPresets() { const p = prefs().presets, put1 = patch => settingsSave({ presets: patch }, true);
-  const models = S && S.image_models && S.image_models.length ? S.image_models : [{ id: "qwen", label: "Qwen 2.1 Turbo" }];
+  const models = (S && Array.isArray(S.image_models))
+    ? S.image_models.concat(p.image_model && !S.image_models.some(m => m.id === p.image_model) ? [{ id: p.image_model, label: p.image_model + " (not on this machine)" }] : [])
+    : [{ id: "qwen", label: "Qwen 2.1 Turbo" }];
   const lengths = Object.keys((S && S.durations) || { 3: 0, 5: 0, 8: 0, 10: 0 }).map(Number).filter(n => n >= 1 && n <= 15);
   const model = el("select", { "aria-label": "Default picture model", onchange: e => put1({ image_model: e.target.value }) }, models.map(m => el("option", { value: m.id, selected: m.id === p.image_model }, m.label)));
   const secs = el("select", { "aria-label": "Default clip length", onchange: e => put1({ seconds: Number(e.target.value) }) }, (lengths.length ? lengths : [5]).map(n => el("option", { value: n, selected: Number(p.seconds) === n }, n + " s")));

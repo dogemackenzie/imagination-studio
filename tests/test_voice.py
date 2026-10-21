@@ -9,6 +9,8 @@ import time
 import wave
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 os.environ.setdefault("STUDIO_HOME", str(Path(tempfile.mkdtemp()) / "TensorFoldStudio"))
 os.environ["STUDIO_GPU_LOCK"] = str(Path(tempfile.mkdtemp()) / "studio-gpu.lock.d")
@@ -20,6 +22,13 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 client = TestClient(server.app)
 voice.LOCK = Path(os.environ["STUDIO_GPU_LOCK"])
+
+
+@pytest.fixture(autouse=True)
+def spark_voice_route(monkeypatch):
+    """These tests were written when Linux selected the Spark voice route."""
+
+    monkeypatch.setattr(voice, "SPARK", True)
 
 FAKE = r'''
 import json, sys, wave, struct
@@ -275,13 +284,17 @@ def test_an_h3_job_unloads_drama3_before_it_runs():
 
         # while it is loaded a clip is measured against the memory the machine had before it loaded
         assert voice.room_mb() == int(one.before_gb * 1024)
-        if server.SPARK:
+        had_spark = server.SPARK
+        server.SPARK = True
+        try:
             had_room = server.memory_guard.room_mb
             try:
                 server.memory_guard.room_mb = lambda: 1000
                 assert server.memory_of({}, {"WIDTH": 864, "HEIGHT": 480}, 121, False)["available_mb"] == voice.room_mb()
             finally:
                 server.memory_guard.room_mb = had_room
+        finally:
+            server.SPARK = had_spark
         server.build = build
         job = {"id": "test-h3-yield", "kind": "image", "status": "running", "title": "t", "params": {}, "log": "", "outputs": [],
                "started": time.time(), "finished": None, "remote": None}

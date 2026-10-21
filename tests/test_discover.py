@@ -59,10 +59,15 @@ def machine(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(discover, "SPARK", True)
     monkeypatch.setattr(discover, "MAC", False)
+    import capabilities
+    capabilities.use("spark")
     monkeypatch.setattr(discover, "_cache", None)
     monkeypatch.setattr(discover, "_set_env", {})
     (home / "TensorFoldStudio").mkdir()
-    return {"home": home, "data": data, "studio": home / "TensorFoldStudio", "models": home / "spark-studio-models"}
+    try:
+        yield {"home": home, "data": data, "studio": home / "TensorFoldStudio", "models": home / "spark-studio-models"}
+    finally:
+        capabilities.use(None)
 
 
 def scanned(link=True):

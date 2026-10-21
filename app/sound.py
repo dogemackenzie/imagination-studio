@@ -176,8 +176,15 @@ def attach(home: Path, pack: Path, spark: bool, inside, relative, room=None):
 
     @router.get("/api/sound/state")
     def state() -> dict:
-        return {"kinds": {kind: {"ready": not missing(kind), "why": missing(kind) or None, "licence": LICENCES[kind]} for kind in KINDS},
-                "seconds": {"sfx": SFX_SECONDS, "foley": FOLEY_SECONDS}, "spark": spark}
+        import capabilities
+        blocked = capabilities.refusal("sfx", spark)
+        kinds = {}
+        for kind in KINDS:
+            if blocked:
+                kinds[kind] = {"ready": False, "why": blocked["error"], "code": blocked["code"], "licence": LICENCES[kind]}
+            else:
+                kinds[kind] = {"ready": not missing(kind), "why": missing(kind) or None, "licence": LICENCES[kind]}
+        return {"kinds": kinds, "seconds": {"sfx": SFX_SECONDS, "foley": FOLEY_SECONDS}, "spark": spark}
 
     @router.get("/api/sound/takes")
     def takes() -> list[dict]:

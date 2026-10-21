@@ -81,10 +81,28 @@ def test_a_gated_download_hands_back_the_gate(monkeypatch, tmp_path):
 
 
 def test_not_enough_disk_is_said_before_anything_downloads(monkeypatch):
-    monkeypatch.setattr(installs, "free_gb", lambda place: 20.0)
+    import capabilities
+
+    capabilities.use("mac")
+    try:
+        monkeypatch.setattr(installs, "free_gb", lambda place: 20.0)
+        with pytest.raises(ValueError) as error:
+            installs.start(item("oneshot-setup.sh --ref2va (62 GB)"))
+        assert "62 GB" in str(error.value) and "20 GB free" in str(error.value)
+    finally:
+        capabilities.use(None)
+
+
+def test_an_app_only_machine_refuses_a_weight_install():
+    import capabilities
+
+    capabilities.use(None)
     with pytest.raises(ValueError) as error:
         installs.start(item("oneshot-setup.sh --ref2va (62 GB)"))
-    assert "62 GB" in str(error.value) and "20 GB free" in str(error.value)
+    text = str(error.value)
+    assert "oneshot-setup.sh" in text and "oneshot-setup-spark.sh" in text and "not redistributed" in text
+    assert "20 GB" not in text
+    assert installs.plan_of(item("oneshot-setup.sh --ref2va (62 GB)"))["how"] == "oneshot"
 
 
 def test_the_routes_install_link_everything_and_refuse_what_cannot_run(monkeypatch):

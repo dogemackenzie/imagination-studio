@@ -13,6 +13,8 @@
 # adapter (see scripts/fast.sh), on the native engine when it is installed.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Before image.sh, so the refusal names the studio route.
+bash "$HERE/require-route.sh" studio
 IMAGE_PROMPT="${1:-}"; VIDEO_PROMPT="${2:-}"; OUT="${3:-outputs/studio.mp4}"
 IMAGE="${OUT%.*}.png"
 # QHD=1: a 2560x1440 clip. The video is generated at 1280x736, decoded at 2x and centre-cropped by 16 rows top and

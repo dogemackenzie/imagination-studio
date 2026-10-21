@@ -1,7 +1,8 @@
 """Collection and the app lifecycle stay off this machine's model store and off its memory guard.
 
 The Spark tests used to replace ``server.memory_of`` while their module was imported, which disabled the guard for
-every test collected after them. Hardware profiles only toggle the existing SPARK flag. They do not add a render route.
+every test collected after them. Only the spark profile sets the SPARK flag. mac and spark open that machine's
+existing routes; rtx and none do not.
 """
 import importlib.util
 import os

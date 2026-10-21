@@ -12,8 +12,11 @@
 # working as it did, with the Viggle turbo adapter on its six nodes. IMAGE_MODEL (qwen, the default; qwen-full, the
 # base model as TURBO=0 runs it; flux3k-fast; flux3k-full), FLUX3_MODEL_DIR (default ~/flux3-models) and UPSAMPLE choose and steer FLUX3-K.
 set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# App-only stops here. A Mac and a DGX Spark continue, and Linux that is a Spark still hands over below.
+bash "$HERE/require-route.sh" scout
 # On a DGX Spark (Linux, CUDA) the same interface is served by spark/image.sh.
-[ "$(uname -s)" != Linux ] || exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/spark/image.sh" "$@"
+[ "$(uname -s)" != Linux ] || exec bash "$HERE/../spark/image.sh" "$@"
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"
 QWEN_MODEL_DIR="${QWEN_MODEL_DIR:-$HOME/qwen-models/Qwen-Image-2.1-Turbo}"
 QWEN_BASE_DIR="${QWEN_BASE_DIR:-$(dirname "$QWEN_MODEL_DIR")/Qwen-Image-2.1}"

@@ -20,6 +20,19 @@ const ROOMS = [
   { id: "learn", group: "vaults", name: "Learn", key: "", tabs: ["Tutorial"], says: "lessons, step by step" },
   { id: "settings", group: "vaults", name: "Settings", key: ",", tabs: ["Settings"], says: "looks, layout, presets and connections" },
 ];
+// A route is off only when this page was given capabilities that say so. Tests that omit the field keep every button.
+function routeBlock(kind) {
+  const caps = (typeof S !== "undefined" && S && S.capabilities) || null;
+  if (!caps || !caps.routes) return null;
+  const aliases = { image: "scout", picture: "scout", clip: "video", song: "music" };
+  const route = caps.routes[aliases[kind] || kind];
+  if (!route || route.enabled !== false) return null;
+  return route.reason || "This machine has no measured route for this.";
+}
+function localRender() {
+  const caps = (typeof S !== "undefined" && S && S.capabilities) || null;
+  return !caps || caps.local_render !== false;
+}
 const TAB_NAMES = { Home: "Home", Story: "Overview", Production: "Film", Image: "Overview", Video: "Overview", Create: "Create", Previs: "Overview", "Motion Previs": "Motion Previs",
   Agent: "Ask your agent", Sound: "Overview", Voice: "Voice", Music: "Music", Foley: "Sound effects", Edit: "Overview", Editor: "Timeline", Library: "Library", Looks: "Looks", Import: "Bring in & send out",
   Machine: "Telemetry", Models: "Models & weights", Sparks: "Sparks", Brains: "Brains & tools", Updates: "Updates", Tutorial: "Learn", Nodes: "Nodes", Settings: "Settings" };

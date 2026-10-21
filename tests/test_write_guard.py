@@ -398,11 +398,19 @@ def test_the_slate_brain_runs_only_from_this_computer_and_the_studio_page():
 
 
 def test_a_clip_asked_over_the_api_without_a_quality_gets_the_pages_default(monkeypatch):
+    """The default is applied on a route that renders. App-only refuses before build."""
+
+    import capabilities
+
     seen = {}
 
     def built(kind, params, job_id, room=True):
         seen.update(params)
         raise HTTPException(418, "stop here")  # nothing is queued
     monkeypatch.setattr(server, "build", built)
-    assert client.post("/api/jobs", json={"kind": "video", "params": {"prompt": "a lighthouse"}}).status_code == 418
-    assert seen["quality"] == server.API_QUALITY == "fh4" and "fh4" in server.QUALITIES
+    capabilities.use("mac")
+    try:
+        assert client.post("/api/jobs", json={"kind": "video", "params": {"prompt": "a lighthouse"}}).status_code == 418
+        assert seen["quality"] == server.API_QUALITY == "fh4" and "fh4" in server.QUALITIES
+    finally:
+        capabilities.use(None)

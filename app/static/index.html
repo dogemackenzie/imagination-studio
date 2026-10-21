@@ -199,7 +199,7 @@ function lastFramePanel() { const set = p => { C.lastImage = p; C.prompt = ""; }
       C.lastImage ? el("button", { class: "fit", onclick: () => { set(null); render(); } }, "No last frame") : null),
     clipFrames(set, "From a clip in the Library"),
     el("div", { class: "row", style: "margin-top:8px;align-items:flex-end" }, field("Or make one from a prompt (" + imageModelName() + ")", bind(L, "prompt", el("input", { placeholder: "the picture the clip ends on" }))),
-      el("button", { class: "fit", onclick: async () => { if (!L.prompt.trim()) return toast("Describe the picture first"); try { const j = await api("/api/jobs", { kind: "scout", title: "Last frame", params: { prompt: L.prompt, count: 1, seed: C.seed, preset: C.preset, image_model: imageModel(), ...(C.preset === "custom" ? { width: Number(C.cw), height: Number(C.ch) } : {}) } }); L.job = j.id; await poll(); render(); } catch (e) { toast(e.message); } } }, "Make it"),
+      el("button", { class: "fit", disabled: !!(typeof routeBlock === "function" && routeBlock("scout")), title: (typeof routeBlock === "function" && routeBlock("scout")) || "", onclick: async () => { if (typeof routeBlock === "function" && routeBlock("scout")) return toast(routeBlock("scout")); if (!L.prompt.trim()) return toast("Describe the picture first"); try { const j = await api("/api/jobs", { kind: "scout", title: "Last frame", params: { prompt: L.prompt, count: 1, seed: C.seed, preset: C.preset, image_model: imageModel(), ...(C.preset === "custom" ? { width: Number(C.cw), height: Number(C.ch) } : {}) } }); L.job = j.id; await poll(); render(); } catch (e) { toast(e.message); } } }, "Make it"),
       scout ? el("span", { class: "pill " + scout.status }, scout.status) : null));
   if (L.lib) { const grid = el("div", { class: "grid", style: "margin-top:10px" }); box.append(grid);
     api("/api/library").then(list => list.filter(m => m.kind === "image").slice(0, 24).forEach(m => grid.append(el("div", { class: "tile" + (C.lastImage === m.path ? " on" : ""), onclick: () => { set(m.path); L.lib = false; render(); } }, media(m.path), el("div", { class: "cap" }, m.path.split("/").pop().slice(-26)))))).catch(() => {}); }
@@ -245,12 +245,22 @@ const output = () => C.preset === "custom" ? { label: "Custom " + C.cw + "x" + C
 const extras = () => ({ ...(C.preset === "custom" ? { width: Number(C.cw), height: Number(C.ch) } : {}), ...(String(C.steps).trim() ? { steps: Number(C.steps) } : {}), ...(lorasOf(C).length ? { loras: lorasOf(C) } : {}), ...(encoderOf() ? { text_encoder: encoderOf() } : {}) });
 function changed() { sync(); C.prompt = ""; render(); }
 // one decision shown as cards: options are value -> [title, detail]
-// The picture model a prompt goes to (server.py IMAGE_MODELS): Qwen 2.1 Turbo on every install, FLUX3-K Fast and Full
-// where oneshot-setup --flux3 put them, MOSS-Image on a DGX Spark with --moss. Only installed ones are offered; a choice
-// that is not installed falls back to Qwen.
-const imageModels = () => (S.image_models && S.image_models.length ? S.image_models : [{ id: "qwen", label: "Qwen 2.1 Turbo", note: "" }]);
-const imageModel = () => (imageModels().some(m => m.id === C.imageModel) ? C.imageModel : "qwen");
-const imageModelName = () => imageModels().find(m => m.id === imageModel()).label;
+// The picture model a prompt goes to. When /api/state sends image_models, only those are offered, and a saved id
+// that is missing is labelled not on this machine. When that field is absent, the page keeps Qwen.
+const imageModels = () => {
+  if (typeof S !== "undefined" && S && Array.isArray(S.image_models)) {
+    const list = S.image_models.map(m => ({ id: m.id, label: m.label, note: m.note || "" }));
+    if (typeof C !== "undefined" && C.imageModel && !list.some(m => m.id === C.imageModel)) list.push({ id: C.imageModel, label: C.imageModel + " (not on this machine)", note: "" });
+    return list;
+  }
+  return [{ id: "qwen", label: "Qwen 2.1 Turbo", note: "" }];
+};
+const imageModel = () => {
+  const list = imageModels();
+  if (typeof S !== "undefined" && S && Array.isArray(S.image_models)) return list.some(m => m.id === C.imageModel) ? C.imageModel : (list[0] ? list[0].id : "");
+  return list.some(m => m.id === C.imageModel) ? C.imageModel : "qwen";
+};
+const imageModelName = () => { const one = imageModels().find(m => m.id === imageModel()); return one ? one.label : "No picture model on this machine"; };
 const imageModelPick = after => imageModels().length < 2 ? null : el("div", {}, el("label", {}, "Picture model"),
   choice(C, "imageModel", Object.fromEntries(imageModels().map(m => [m.id, [mark(/^flux/.test(m.id) ? "flux" : "qwen", m.label), m.note]])), after || render, true));
 const choice = (obj, key, options, after, tight) => el("div", { class: "choice" + (tight ? " tight" : ""), role: "radiogroup" }, Object.entries(options).map(([v, [title, sub]]) =>
@@ -392,7 +402,7 @@ function loraHub(obj, save = () => {}, redraw = render) { if (!obj.loras) obj.lo
   // how many of the hub's LoRAs can be used on this machine now, and why the others cannot
   const hubTally = () => { const sets = LORAS.filter(r => r.builtin), ok = sets.filter(r => r.usable), not = sets.filter(r => !r.usable);
     const why = r => r.status === "unsupported" ? (r.platforms && !r.platforms.includes("mac") && S.platform !== "spark" ? "DGX Spark only" : "not on this machine") : r.status === "gated" ? "waits on its author's approval of your download" : "not installed";
-    return ok.length + " of " + sets.length + " LoRAs are usable on this " + (S.platform === "spark" ? "DGX Spark" : "Mac") + (not.length ? ". Not usable: " + not.map(r => r.name + " (" + why(r) + ")").join(", ") + "." : "."); };
+    return ok.length + " of " + sets.length + " LoRAs are usable on this " + (S.platform === "spark" ? "DGX Spark" : S.platform === "mac" ? "Mac" : "machine") + (not.length ? ". Not usable: " + not.map(r => r.name + " (" + why(r) + ")").join(", ") + "." : "."); };
   const count = id => LORAS.filter(r => id === "all" || (r.category || ["mine"]).includes(id)).length;
   const tabs = [{ id: "all", name: "All" }, ...HUB.groups].filter(g => g.id === "all" || count(g.id));
   const search = el("input", { type: "search", placeholder: "Search the hub: orbit, anime, fight, speech…", value: HUB.q, style: "max-width:320px", oninput: e => { HUB.q = e.target.value; const at = e.target.selectionStart; redraw(); const again = document.querySelector(".hub input[type=search]"); if (again) { again.focus(); again.setSelectionRange(at, at); } } });
@@ -600,7 +610,7 @@ function viewCreate() {
       el("div", { class: "note" }, (imageModel() === "qwen" ? "Each image takes a few seconds after the model loads"
         : imageModel() === "moss-image" ? "MOSS-Image takes your prompt as written, about 45 s an image at 1344 × 768 once loaded; put the words to be lettered in quotes"
         : "FLUX3-K writes a full scene description from your prompt first (5 to 20 s, once for all the images), then makes each image: Fast about 10 to 15 s, Full about a minute") + "; seeds count up from the one given."),
-      el("div", { class: "row", style: "margin-top:10px" }, el("button", { class: "hot fit", onclick: async () => { try { if (!C.scene.trim()) throw new Error("describe the picture first");
+      el("div", { class: "row", style: "margin-top:10px" }, el("button", { class: "hot fit", disabled: !!(typeof routeBlock === "function" && routeBlock("scout")), title: (typeof routeBlock === "function" && routeBlock("scout")) || "", onclick: async () => { try { if (typeof routeBlock === "function" && routeBlock("scout")) throw new Error(routeBlock("scout")); if (!C.scene.trim()) throw new Error("describe the picture first");
         const j = await api("/api/jobs", { kind: "scout", title: "Image: " + C.scene.slice(0, 40), params: { prompt: C.scene, count: C.count, seed: C.seed, width: w, height: h, image_model: imageModel() } });
         C.imageJob = j.id; await poll(); render(); } catch (e) { toast(e.message); } } }, "Make image"), el("span")));
     if (made) { put(body, el("h3", {}, "Images"), jobCard(made));
@@ -675,7 +685,7 @@ function viewCreate() {
         const scout = C.scoutJob && jobs.find(j => j.id === C.scoutJob);
         put(body, imageModelPick(), field("Image prompt (" + imageModelName() + ")", bind(C, "imagePrompt", el("textarea"))),
           el("div", { class: "row" }, el("div", { class: "fit", style: "width:120px" }, el("label", {}, "How many"), bind(C, "count", el("input", { type: "number", min: 1, max: 12 }))),
-            el("button", { class: "primary fit", disabled: !C.imagePrompt.trim(), onclick: async () => { try { const j = await api("/api/jobs", { kind: "scout", title: "Scouts",
+            el("button", { class: "primary fit", disabled: !C.imagePrompt.trim() || !!(typeof routeBlock === "function" && routeBlock("scout")), title: (typeof routeBlock === "function" && routeBlock("scout")) || "", onclick: async () => { try { if (typeof routeBlock === "function" && routeBlock("scout")) throw new Error(routeBlock("scout")); const j = await api("/api/jobs", { kind: "scout", title: "Scouts",
               params: { prompt: C.imagePrompt, count: C.count, seed: C.seed, preset: C.preset, image_model: imageModel(), ...(C.preset === "custom" ? { width: Number(C.cw), height: Number(C.ch) } : {}) } }); C.scoutJob = j.id; await poll(); render(); } catch (e) { toast(e.message); } } }, "Make scouts"), el("span")),
           scout ? el("div", { class: "note" }, "Scout job: ", el("span", { class: "pill " + scout.status }, scout.status)) : el("div", { class: "note" }, "Six scouts take about half a minute. They are made at the size the video model starts from."));
         if (scout && scout.status === "done") put(body, el("div", { class: "grid", style: "margin-top:10px" }, scout.outputs.filter(p => !p.endsWith("sheet.jpg")).map(p =>
@@ -716,7 +726,7 @@ function viewCreate() {
         bind(C, "retake", el("input", { type: "checkbox", style: "width:auto" })), "If the shot check fails (a keyframe not held, or a cut inside the shot), render it once more at the next seed. That is a second full render."),
       // how many Sparks this job may use, and what that means for it, before it is queued (sparks.js)
       el("div", { style: "margin-top:10px" }, sparksPick({ kind: isLong() ? "long" : "video", clips: 1, params: { loras: lorasOf(C), ...(isRef() ? { references: C.refs, reference_videos: C.refVideos, reference_audios: C.refAudios, ref_turbo: C.refPasses === "4" } : {}), ...(encoderOf() ? { text_encoder: encoderOf() } : {}) } })),
-      el("div", { class: "row", style: "margin-top:10px" }, el("button", { class: "hot fit", disabled: !ready, onclick: async () => { try {
+      el("div", { class: "row", style: "margin-top:10px" }, el("button", { class: "hot fit", disabled: !ready || !!(typeof routeBlock === "function" && routeBlock(isLong() ? "long" : "video")), title: (typeof routeBlock === "function" && routeBlock(isLong() ? "long" : "video")) || "", onclick: async () => { try { if (typeof routeBlock === "function" && routeBlock(isLong() ? "long" : "video")) throw new Error(routeBlock(isLong() ? "long" : "video"));
         const base = { prompt: C.prompt, image: noFrame() ? null : C.image, ...(typeof prefs === "function" && !prefs().presets.qa_gate ? { qa: false } : {}), ...(lastOf() ? { last_image: lastOf() } : {}), preset: C.preset, quality: C.quality, seed: C.seed, ...extras(), ...(isRef() ? { references: C.refs, ref_turbo: C.refPasses === "4", ...(refMedia() ? { reference_videos: await motionVideos(), reference_audios: C.refAudios, reference_video_sound: C.video_sound, ...(motionFields() ? { motion: { pack: C.motion.pack, layer: C.motion.layer, mode: C.motion.mode, measured: C.motion.measured || null, free: motionFree() }, pace: C.motion.pace || "auto", silent: paceOf(C.motion) === "flow" && !musicNamed() } : {}) } : {}) } : {}) };
         const j = await api("/api/jobs", isLong() ? { kind: "long", title: S.long[C.seconds] + ": " + (C.action || C.scene || "Video").slice(0, 40), params: { ...base, total_seconds: Number(C.seconds), beats: (C.beats || "").split("\n") } }
           : { kind: "video", title: (C.action || C.scene || "Clip").slice(0, 48), params: { ...base, ...lengthOf(C), ...(C.retake ? { retake: true } : {}) } });
@@ -1176,7 +1186,7 @@ function render() { renderShell(); releaseMedia($("#view"));
 (async () => { const want = decodeURIComponent(location.hash.slice(1)); if (TABS.includes(want)) tab = want; actLoad();
   // links can preset the Create form: ?goes=image, ?engine=h3&res=720p&up=1&step=4 ...
   for (const [k, v] of new URLSearchParams(location.search)) if (k in C && k !== "mode") C[k] = k === "up" ? v === "1" : (k === "step" || k === "count" ? Number(v) : v);
-  S = await api("/api/state"); await loadLoras(); if (typeof settingsLoad === "function") await settingsLoad().catch(() => {}); if (!S.turbo) C.engine = "fasth3"; sync(); for (const h of ["#gohome", "#mhome"]) $(h).onclick = e => { e.preventDefault(); T.coach = false; go("Home"); }; $("#plat").textContent = S.platform_label; if (S.ffmpeg_note) { $("#warnbar").textContent = S.ffmpeg_note; $("#warnbar").classList.remove("hide"); } document.body.dataset.platform = S.platform; document.title = "Imagination Studio · " + (S.platform === "spark" ? "DGX Spark" : "Mac"); $("#ver").textContent = "Studio " + S.version; shellStart(); $("#home").textContent = S.home; await poll(); render(); setInterval(poll, 2000);
+  S = await api("/api/state"); await loadLoras(); if (typeof settingsLoad === "function") await settingsLoad().catch(() => {}); if (!S.turbo) C.engine = "fasth3"; sync(); for (const h of ["#gohome", "#mhome"]) $(h).onclick = e => { e.preventDefault(); T.coach = false; go("Home"); }; $("#plat").textContent = S.platform_label; if (S.ffmpeg_note) { $("#warnbar").textContent = S.ffmpeg_note; $("#warnbar").classList.remove("hide"); } document.body.dataset.platform = S.platform; document.title = "Imagination Studio · " + ((typeof platName === "function" && platName()) || (S.platform === "spark" ? "DGX Spark" : S.platform === "mac" ? "Mac" : "This machine")); $("#ver").textContent = "Studio " + S.version; shellStart(); $("#home").textContent = S.home; await poll(); render(); setInterval(poll, 2000);
   // ?motionref opens the create wizard on the motion reference stored by the Motion Previs tab
   if (new URLSearchParams(location.search).has("motionref")) { try { const r = (await api("/api/motion/handoff")).reference; if (r) useMotionReference(r, await api("/api/motion/packs/" + r.pack).catch(() => null)); } catch {} } })();
 </script>

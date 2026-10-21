@@ -60,7 +60,12 @@ const HC_MODES = { clip: ["Clip with sound", "minimax", "MiniMax H3", "Describe 
 const HC_RECIPES = () => ({ quick: "Quick look", ...(S && S.sharp ? { sharp: "Sharp Spec" } : {}), final: "Final 2K" });
 const hcMode = () => HC.mode || (HC_MODES[homePrefs().presets.mode] ? homePrefs().presets.mode : "clip");
 const hcRecipe = () => { const r = HC.recipe || homePrefs().presets.recipe; return HC_RECIPES()[r] ? r : "quick"; };
-const hcPictureModel = () => { const want = homePrefs().presets.image_model, have = S && S.image_models && S.image_models.length ? S.image_models.map(m => m.id) : ["qwen"]; return have.includes(want) ? want : "qwen"; };
+const hcPictureModel = () => { const want = homePrefs().presets.image_model;
+  if (S && Array.isArray(S.image_models)) { const have = S.image_models.map(m => m.id); if (!have.length) return ""; return have.includes(want) ? want : have[0]; }
+  return want || "qwen"; };
+function hcBlock(mode) { if (typeof routeBlock !== "function") return null;
+  const kind = mode === "picture" ? "scout" : mode === "voice" ? "voice" : mode === "song" ? "music" : (hcLongs()[hcSeconds()] ? "long" : "video");
+  return routeBlock(kind); }
 const hcSeed = () => typeof prefSeed === "function" ? prefSeed() : 1;
 const hcTitle = t => t.replace(/\s+/g, " ").trim().slice(0, 48);
 // a clip's length: the one picked here, else the recipe's, else Settings → Presets; over 15 s it is a long take, a chain of 15 s clips
@@ -95,6 +100,7 @@ async function hcRequest(mode, text, seed, retake) {
 async function hcGenerate(again) {
   const mode = again ? again.mode : hcMode(), text = (again ? again.text : HC.text).trim();
   if (!text) return toast("Say what you want to make first");
+  const blocked = hcBlock(mode); if (blocked) return toast(blocked);
   if (HC.busy) return; HC.busy = true; render();
   try { const [path, body] = await hcRequest(mode, text, again ? again.seed + 1 : hcSeed(), !!again);
     const job = await api(path, body), seed = (body.params ? body.params.seed : body.seed) || 1;
@@ -128,7 +134,7 @@ function homeComposer() {
         el("b", {}, label), typeof mark === "function" ? mark(id === "picture" && /^flux/.test(hcPictureModel()) ? "flux" : mk, id === "picture" && /^flux/.test(hcPictureModel()) ? "FLUX3-K" : model) : model))),
     area, el("div", { class: "cmp-hint" }, hint),
     el("div", { class: "cmp-bar" },
-      el("button", { type: "button", class: "primary cmp-go", disabled: HC.busy, onclick: () => hcGenerate() }, HC.busy ? "Queuing…" : "Generate", el("kbd", {}, "⌘↵")),
+      el("button", { type: "button", class: "primary cmp-go", disabled: HC.busy || !!hcBlock(mode), title: hcBlock(mode) || "", onclick: () => hcGenerate() }, HC.busy ? "Queuing…" : "Generate", el("kbd", {}, "⌘↵")),
       mode === "clip" ? el("button", { type: "button", class: "small cmp-recipe", title: "The render recipe: click for the next one (Settings → Presets sets the default)",
         onclick: () => { HC.recipe = ids[(ids.indexOf(rec) + 1) % ids.length]; render(); } }, el("span", { class: "eyebrow" }, "Recipe"), recipes[rec]) : null,
       mode === "clip" ? hcLength() : null,

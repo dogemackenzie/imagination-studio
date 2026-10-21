@@ -137,10 +137,61 @@ def lead(first: bool, last: bool, seconds: float = 5, frames: int | None = None)
 
 # On a DGX Spark (Linux, CUDA) the scripts hand over to spark/: FastH3 and Qwen-Image-2.1 through ComfyUI. There is no
 # 2x decoder and no MiniMax H3 Turbo there, so only the native sizes and the FastH3 qualities are offered.
-SPARK = sys.platform.startswith("linux")
-if SPARK:
-    PRESETS = {k: v for k, v in PRESETS.items() if "X2" not in v[2] and k not in ("2k", "qhd")}
-    QUALITIES = {k: v for k, v in QUALITIES.items() if k.startswith("fh")}
+# Linux is not a Spark. hardware.is_spark is a GB10 or "DGX Spark" in the GPU name or the DMI product.
+# The tables stay complete and filter from the live flag, so a test that sets SPARK still sees that machine's presets.
+import hardware  # noqa: E402
+import capabilities  # noqa: E402
+
+SPARK = hardware.is_spark()
+
+
+class _LiveTable:
+    """Preset or quality map. Membership, indexing and items() follow the live SPARK flag."""
+
+    def __init__(self, full: dict, keep):
+        self._full = full
+        self._keep = keep
+
+    def _now(self) -> dict:
+        if SPARK:
+            return {key: value for key, value in self._full.items() if self._keep(key, value)}
+        return dict(self._full)
+
+    def __contains__(self, key) -> bool:
+        return key in self._now()
+
+    def __getitem__(self, key):
+        return self._now()[key]
+
+    def __iter__(self):
+        return iter(self._now())
+
+    def __len__(self) -> int:
+        return len(self._now())
+
+    def items(self):
+        return self._now().items()
+
+    def keys(self):
+        return self._now().keys()
+
+    def values(self):
+        return self._now().values()
+
+    def get(self, key, default=None):
+        return self._now().get(key, default)
+
+
+def _spark_preset(key, value) -> bool:
+    return "X2" not in value[2] and key not in ("2k", "qhd")
+
+
+def _spark_quality(key, _value) -> bool:
+    return str(key).startswith("fh")
+
+
+PRESETS = _LiveTable(PRESETS, _spark_preset)
+QUALITIES = _LiveTable(QUALITIES, _spark_quality)
 # FastH3 on a DGX Spark (GB10), 5 second text-to-video clips with the models already loaded, measured through the
 # scripts on TensorFold's CUDA engine with the 8-bit video decoder at 8 passes: 864x480 in 73 s (a pass 7.1 s, the
 # decode 14 s), 1280x736 in 183 s (18 s, 28 s) and 1344x768 in about 195 s (20.5 s, 29 s). The 4 and 20 pass cells
@@ -167,7 +218,8 @@ def machine() -> tuple[str, str]:
     long as the driver takes when it is busy handing out memory, which is when a worker's API was seen to stop
     answering. A page that polls the state then holds one of the server's threads per call."""
 
-    if SPARK:
+    where = capabilities.mode(SPARK)
+    if where == "spark":
         if not GPU_NAME:
             try:
                 GPU_NAME.append(subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True,
@@ -175,8 +227,16 @@ def machine() -> tuple[str, str]:
             except (OSError, IndexError, subprocess.TimeoutExpired):
                 return "spark", "DGX SPARK · CUDA · H3-CUDA"  # not kept: asked again on a later call
         return "spark", f"DGX SPARK · {GPU_NAME[0].upper()} · H3-CUDA"
-    # no chip name: the same recipe runs from an M1 with 64 GB up
-    return "mac", "MAC · APPLE SILICON MX · H3-METAL"
+    if where == "mac":
+        # no chip name: the same recipe runs from an M1 with 64 GB up
+        return "mac", "MAC · APPLE SILICON MX · H3-METAL"
+    if where == "managed-rtx":
+        return "linux", "MANAGED RTX (UNMEASURED)"
+    if where == "controller":
+        return "linux", "CONTROLLER"
+    # App-only uses the cached observation. It does not ask nvidia-smi again, and it does not say DGX SPARK or Apple.
+    name = ((hardware.observe().get("gpu") or {}).get("name") or "NO GPU").upper()
+    return "linux", f"LINUX · {name} · APP-ONLY"
 
 
 app = FastAPI(title="Imagination Studio by keys+Wasserman, powered by TensorFold, built with Fish Audio Drama 3")
@@ -858,8 +918,10 @@ FLUX3_FILES = {"flux3k-fast": ("flux3-image-klein-bf16.safetensors", "flux3_imag
 
 def image_models() -> list[str]:
     """The picture models installed here, Qwen first: FLUX3-K's ComfyUI files on a Spark, its own venv and BFL's
-    checkpoints on a Mac."""
+    checkpoints on a Mac. An app-only machine lists none: it must not invent a Qwen install."""
 
+    if not capabilities.renders(SPARK):
+        return []
     found = (["qwen"] if qwen_ready() else []) + (["qwen-full"] if qwen_base_ready() else [])
     for name, unets in FLUX3_FILES.items():
         if SPARK:
@@ -1197,7 +1259,7 @@ def media_tools() -> dict:
     return {name: bool(shutil.which(name, path=path)) for name in ("ffmpeg", "ffprobe")}
 
 
-FFMPEG_HOW = "sudo apt install ffmpeg" if SPARK else "brew install ffmpeg"
+FFMPEG_HOW = "sudo apt install ffmpeg" if sys.platform.startswith("linux") else "brew install ffmpeg"
 FFMPEG_NOTE = ("ffmpeg is not installed on this machine (" + FFMPEG_HOW + "). Without it: no long videos, no timeline export, "
                "no frame taken from a clip (continue from a clip, end on a clip), no reference videos or audio, no silenced "
                "sound track" + (", and a clip keeps ComfyUI's own sound track instead of the limited 256 kb/s one. Single clips, "
@@ -1705,13 +1767,15 @@ def public(job: dict) -> dict:
 
 @app.get("/api/state")
 def state() -> dict:
+    mac = capabilities.mode(SPARK) == "mac"
+    rendering = capabilities.renders(SPARK)
     return {"presets": {k: {"label": v[0], "size": v[1]} for k, v in PRESETS.items()},
             "qualities": {k: v[0] for k, v in QUALITIES.items()}, "durations": DURATIONS, "long": LONG,
             "home": str(HOME), "pack": str(PACK), "version": (PACK / "VERSION").read_text().strip(),
-            "zig": zig_ready(), "turbo": turbo_ready() and not SPARK, "x2": not SPARK,
-            "ref2va": ref2va_ready(), "ref2va_turbo": ref2va_turbo_ready(), "reference_limit": REFERENCE_LIMIT,
-            # reference videos and audio: wherever Ref2VA is installed
-            "ref_media": ref2va_ready(), "reference_video_limit": REFERENCE_VIDEO_LIMIT,
+            "zig": zig_ready() and mac, "turbo": turbo_ready() and mac, "x2": mac,
+            "ref2va": ref2va_ready() and rendering, "ref2va_turbo": ref2va_turbo_ready() and rendering, "reference_limit": REFERENCE_LIMIT,
+            # reference videos and audio: wherever Ref2VA is installed, and only on a machine that renders
+            "ref_media": ref2va_ready() and rendering, "reference_video_limit": REFERENCE_VIDEO_LIMIT,
             "reference_audio_limit": REFERENCE_AUDIO_LIMIT, "reference_total": REFERENCE_TOTAL,
             "text_encoders": sorted(text_encoders()),
             # the picture models installed here, in the order the page offers them (IMAGE_MODELS)
@@ -1730,7 +1794,9 @@ def state() -> dict:
             "voice": voice.state(),
             # Music: MiniMax Music 3 (MiniMax-Music3) on this machine (music.py): MLX on a Mac, ComfyUI on a DGX Spark
             "music": music.state(),
-            "engine": ("CUDA · TensorFold int8" if SPARK_ENGINE_LIB.exists() else "CUDA · ComfyUI") if SPARK else ("native Zig engine" if zig_ready() else "MLX engine")}
+            "engine": (("CUDA · TensorFold int8" if SPARK_ENGINE_LIB.exists() else "CUDA · ComfyUI") if capabilities.mode(SPARK) == "spark"
+                       else ("native Zig engine" if zig_ready() else "MLX engine") if mac else "none"),
+            "capabilities": capabilities.public(SPARK)}
 
 
 def numbers(body: dict, keys: tuple) -> dict:
@@ -1867,6 +1933,10 @@ def queue_job(body: dict) -> dict:
         raise HTTPException(400, "unknown job kind")
     if kind == "long" and (params.get("last_image") or params.get("last_same") or params.get("last_frame_from")):
         raise HTTPException(400, "a last frame is for single clips: a long video is a chain of clips")
+    # After the structural checks, before ffmpeg, build and the memory guard. Export is not a generative route.
+    blocked = capabilities.refusal(kind, SPARK)
+    if blocked:
+        raise HTTPException(400, blocked)
     if kind == "long":
         total = int(params.get("total_seconds", 0))
         if not LONGEST < total <= max(LONG):
@@ -2333,7 +2403,11 @@ def files(path: str, request: Request):
 
 @app.exception_handler(HTTPException)
 async def errors(_, error: HTTPException):
-    return JSONResponse({"error": error.detail}, status_code=error.status_code)
+    detail = error.detail
+    # A capability refusal is {"error", "code", "reasons"}. Other details stay a string under "error".
+    if isinstance(detail, dict) and isinstance(detail.get("error"), str):
+        return JSONResponse(dict(detail), status_code=error.status_code)
+    return JSONResponse({"error": detail}, status_code=error.status_code)
 
 
 @app.exception_handler(RequestValidationError)
@@ -2368,9 +2442,30 @@ import slate  # noqa: E402  (Wasserman Slate AI Studio, beside this file)
 import voice  # noqa: E402  (Voice: Fish Audio Drama 3 text to speech, run locally, beside this file)
 
 
+def route_spark(kind: str) -> bool:
+    """The SPARK flag of the module that owns ``kind``.
+
+    Voice and music tests (and a Mac music route) set their own flag. The queue's second check has to
+    use that same flag: ``server.SPARK`` stays false on this machine, and a forced mode still wins inside
+    ``capabilities.refusal``.
+    """
+
+    if kind == "voice":
+        return bool(voice.SPARK)
+    if kind in ("music", "soundtrack"):
+        import music as music_mod
+        return bool(music_mod.SPARK)
+    return bool(SPARK)
+
+
 def enqueue(kind: str, title: str, params: dict, estimate: int | None = None) -> dict:
     """A job that is not a clip (a voice take) into the queue: it renders on this machine, one at a time with the rest."""
 
+    with lock:
+        accepting_jobs()  # a restart refuses before a capability error, including a direct call
+    blocked = capabilities.refusal(kind, route_spark(kind))
+    if blocked:
+        raise HTTPException(400, blocked)
     job_id = time.strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     job = {"id": job_id, "kind": kind, "status": "queued", "title": title, "params": params, "source": None, "outputs": [],
            "progress": None, "error": None, "log": "", "created": time.time(), "started": None, "finished": None,

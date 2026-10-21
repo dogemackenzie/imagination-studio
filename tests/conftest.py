@@ -49,17 +49,28 @@ def studio_queue_if_loaded():
 def host(request, monkeypatch):
     """``mac``, ``spark``, ``rtx`` or ``none``.
 
-    Production still has one ``SPARK`` flag. Only ``spark`` sets it. ``rtx`` names this machine's later profile and
-    does not enable a render route, and ``none`` is a machine with no GPU. Admission tests stay on the real guard.
+    Only ``spark`` sets the ``SPARK`` flags. ``mac`` and ``spark`` open that machine's existing routes.
+    ``rtx`` is managed-rtx and ``none`` is app-only: neither enables a render route, and neither fakes the GPU.
     """
 
+    import capabilities
+    import discover
+    import music
     import server
+    import telemetry
+    import voice
 
     name = request.param
     if name not in {"mac", "spark", "rtx", "none"}:
         raise ValueError(name)
-    monkeypatch.setattr(server, "SPARK", name == "spark")
-    return name
+    spark = name == "spark"
+    for mod in (server, voice, music, discover, telemetry):
+        monkeypatch.setattr(mod, "SPARK", spark)
+    capabilities.use({"mac": "mac", "spark": "spark", "rtx": "managed-rtx", "none": "app-only"}[name])
+    try:
+        yield name
+    finally:
+        capabilities.use(None)
 
 
 @pytest.hookimpl(hookwrapper=True)

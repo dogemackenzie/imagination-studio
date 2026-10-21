@@ -33,9 +33,11 @@ import threading
 import time
 from pathlib import Path
 
+import hardware
+
 APP = Path(__file__).resolve().parent
 PACK = APP.parent
-SPARK = sys.platform.startswith("linux")
+SPARK = hardware.is_spark()
 MAC = sys.platform == "darwin"
 DEPTH = 8
 NOTE = ("Nothing is moved, copied or downloaded: a file found elsewhere is linked where the studio looks for it "
@@ -1225,7 +1227,12 @@ def install_plan(item: dict) -> dict | None:
         plan = installs.plan_of(item)
     except ImportError:
         return None
-    return {k: plan.get(k) for k in ("how", "shown", "size_gb", "lora")}
+    shown = {k: plan.get(k) for k in ("how", "shown", "size_gb", "lora")}
+    import capabilities
+    if installs.weight_install(plan) and not capabilities.renders(hardware.is_spark()):
+        text = capabilities.install_requirements()
+        return {**shown, "how": "unsupported", "shown": text, "requirements": text}
+    return shown
 
 
 def start_scan() -> bool:

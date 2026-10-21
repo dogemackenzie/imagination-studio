@@ -28,6 +28,13 @@ voice.LOCK = Path(os.environ["STUDIO_GPU_LOCK"])
 
 
 @pytest.fixture(autouse=True)
+def spark_music_route(monkeypatch):
+    """These tests were written when Linux selected the Spark music route. The Mac class turns that off itself."""
+
+    monkeypatch.setattr(music, "SPARK", True)
+
+
+@pytest.fixture(autouse=True)
 def stand_in_songs_are_not_this_machines_ram(monkeypatch):
     """Song admission uses the Spark measurements. These stand-ins do not load them, and the tests that hold the
     measurements pass their own available_mb. This host's free RAM must not refuse the stand-in."""
@@ -501,9 +508,13 @@ class Mac(Spark):
         self.mac, self.chip_of = music.MAC, music.Metal.chip
         music.SPARK, music.MAC = False, True
         music.Metal.chip = lambda one, chip=self.chip: chip
+        import capabilities
+        capabilities.use("mac")
         return self
 
     def __exit__(self, *_):
+        import capabilities
+        capabilities.use(None)
         super().__exit__()
         music.MAC, music.Metal.chip = self.mac, self.chip_of
 

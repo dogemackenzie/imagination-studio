@@ -205,8 +205,8 @@ def test_the_app_refuses_before_the_job_is_queued():
     import server
     from fastapi.testclient import TestClient
 
-    if not server.SPARK:
-        return
+    had_spark = server.SPARK
+    server.SPARK = True  # admission is the Spark guard, including on a machine that is not one
     client = TestClient(server.app)
     had = G.room_mb
     G.room_mb = lambda: IDLE  # an idle Spark, whatever this machine is doing now
@@ -228,6 +228,7 @@ def test_the_app_refuses_before_the_job_is_queued():
             server.lora_resolve = was
     finally:
         G.room_mb = had
+        server.SPARK = had_spark
 
 
 if __name__ == "__main__":

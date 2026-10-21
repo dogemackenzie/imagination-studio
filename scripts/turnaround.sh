@@ -20,6 +20,8 @@ PROMPT="${PROMPT:-the camera orbits horizontally around the subject of <Picture 
 case "$SIZE" in 512|1024|2048) ;; *) echo "SIZE is 512, 1024 or 2048, got $SIZE" >&2; exit 2;; esac
 case "$PROMPT" in *"<Picture 1>"*) ;; *) echo "the prompt names the picture as <Picture 1>" >&2; exit 2;; esac
 if [ "$(uname -s)" = Linux ]; then
+  # Before the LoRA check, so an app-only machine is not told the LoRA is missing.
+  bash "$HERE/require-route.sh" turnaround
   LORA="${TURNAROUND_LORA:-$HOME_DIR/loras/turnaround.safetensors}"
   [ -s "$LORA" ] || { echo "no Turnaround LoRA at $LORA: install it in the LoRA hub" >&2; exit 2; }
   exec env PREFIX="$PREFIX" "$PREFIX/venv/bin/python" "$HERE/../spark/spark_workflows.py" turnaround --ref "$REF" \
