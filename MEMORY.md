@@ -202,4 +202,6 @@ Phase 0 added `scripts/doctor.py` and ran it. At the end of that slice the only 
 
 Commit each finished slice before starting the next one. Push that slice to the fork `https://github.com/dogemackenzie/imagination-studio` (`fork`). Pull the original from `https://github.com/wassermanproductions/imagination-studio` (`origin`). Do not push to `origin` unless asked. The fork adds to the original. It stays able to take upstream updates.
 
+GitHub on this machine is this checkout only. The CLI is logged in as dogemackenzie with `GH_CONFIG_DIR=/home/mcpadmin/.config/imagination-studio-gh`. The binary is `/home/mcpadmin/.local/share/imagination-studio/gh/bin/gh`. The credential helper is set on this repo's `fork` remote. Do not run `gh auth setup-git`, and do not give other projects that config.
+
 Update this file when decisions are made or work is completed. Record what changed, validation results, unresolved issues, and the next concrete step. Keep proposals distinct from implemented behavior. Never store credentials, access tokens, or private prompt/media contents here.
