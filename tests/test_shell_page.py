@@ -641,3 +641,64 @@ def test_tools_a_remote_agent_cannot_start_yet_are_set_aside_with_the_reason_and
       BR.tools.unreachable = {}; viewAgent(); out.back = [...AG.tools].sort();""")
     assert out["tools"] == ["studio"] and out["off"] == "true" and "reach this studio" in out["note"]
     assert "needs a way back" in out["toast"] and out["back"] == ["blender", "studio"]
+
+
+def test_the_machine_tab_shows_a_vram_reading_and_what_this_machine_can_use():
+    """A card with a name and VRAM is a reading. An empty reading still says there is none."""
+
+    out = run(r"""
+      const card = { name: "NVIDIA GeForce RTX 3060", util_pct: null, temp_c: null, power_w: null, clock_mhz: null,
+        vram_total_mb: 11911, vram_free_mb: 11798, source: "comfyui" };
+      const line = gpuLine({ gpu: card });
+      out.ring = line.ring; out.foot = line.foot; out.text = line.text; out.temp = line.temp; out.power = line.power;
+      out.none = gpuLine({}).foot; out.noneTemp = gpuLine({}).temp;
+      out.say = gpuSay({ gpu: card }); out.sayNone = gpuSay({});
+      const hot = gpuLine({ gpu: { name: "NVIDIA GB10", util_pct: 12, temp_c: 40, power_w: 30, clock_mhz: 1800 } });
+      out.hotRing = hot.ring; out.hotText = hot.text; out.hotFoot = hot.foot;
+      const fake = () => { const n = el("span", {}); n.setAttribute = (k, v) => { n.attrs[k] = v; }; n.textContent = ""; return n; };
+      NODES["#mdot"] = fake(); NODES["#mpill"] = fake(); NODES["#mtxt"] = fake();
+      telApply({ gpu: card, memory: { total_mb: 32000, available_mb: 16000 }, jobs: {}, warnings: [], disk: { free_gb: 10 } });
+      out.chip = NODES["#mtxt"].textContent; out.title = NODES["#mpill"].title;
+      SHELL.tel = { gpu: card, memory: { total_mb: 32000, available_mb: 16000 }, disk: { used_pct: 10, free_gb: 10 }, warnings: [] };
+      out.home = text(machineStrip());
+      const rows = limitsView({
+        note: "The studio uses what this machine can run. A GPU reading does not open a route that was never measured.",
+        hardware: [{ id: "gpu", label: "GPU", state: "seen", detail: "NVIDIA GeForce RTX 3060, 11.5 GB free of 11.6 GB." },
+          { id: "memory", label: "Memory", state: "ok", detail: "15.6 GB free." }],
+        software: [{ id: "sdxl-turbo", label: "SDXL Turbo", state: "runs", detail: "512×512" },
+          { id: "qwen", label: "Qwen-Image-2.1", state: "missing", detail: "Qwen-Image-2.1 weights are not on this machine." },
+          { id: "flux3k", label: "FLUX3-K", state: "unknown", detail: "The shared ComfyUI did not list its files." }],
+        present: [{ id: "flux2-klein", label: "FLUX.2 Klein", state: "present", detail: "On the shared ComfyUI. It is a different model from FLUX3-K." }],
+        present_note: "These files are on the shared ComfyUI. A job is sent only for a measured route above." });
+      const ids = [];
+      const walk = n => { if (!n || typeof n !== "object") return; if (Array.isArray(n)) return n.forEach(walk);
+        if (n.attrs && n.attrs["data-limit"]) ids.push(n.attrs["data-limit"]); walk(n.kids); };
+      walk(rows);
+      out.limits = text(rows); out.ids = ids;
+      const shared = statusRows({ jobs: { queued: 0 }, gpu_lock: { held: false },
+        renderer: { comfy: { running: true, port: 8190 }, shared: { up: true, port: 8188, name: "NVIDIA GeForce RTX 3060" } },
+        cpu: { load1: 0.2, cores: 8 }, host: "box" });
+      out.status = text(shared);
+      const plain = statusRows({ jobs: { queued: 0 }, gpu_lock: { held: false }, renderer: { comfy: { running: true, port: 8190 } },
+        cpu: { load1: 0.2, cores: 8 }, host: "box" });
+      out.plain = text(plain);
+      M.limits = null;
+      out.page = text(limitsPanel());
+    """)
+    assert out["ring"] == "VRAM" and out["foot"] == "NVIDIA GeForce RTX 3060 · 11.5 GB free of 11.6 GB"
+    assert "no GPU readings" not in out["foot"]
+    assert out["temp"] == "This reading has no temperature."
+    assert out["power"] == "This reading has no power draw."
+    assert out["none"] == "no GPU readings on this machine" and out["noneTemp"] == "reported on a DGX Spark"
+    assert "RTX 3060" in out["say"] and "GB free" in out["say"] and out["sayNone"] == "n/a"
+    assert out["hotRing"] == "GPU" and out["hotText"] == "12%" and "NVIDIA GB10" in out["hotFoot"]
+    assert out["chip"] == "12 GB VRAM"  # 11798 MiB rounds to 12 GB on the chip
+    assert "RTX 3060" in out["title"] and "no GPU readings" not in out["title"]
+    assert "VRAM" in out["home"] and "GB free" in out["home"] and "no GPU readings" not in out["home"]
+    assert "What this machine can use" in out["limits"] and "Read again" in out["limits"]
+    assert "runs here" in out["limits"] and "not installed" in out["limits"] and "not listed" in out["limits"]
+    assert "does not open a route" in out["limits"] and "different model" in out["limits"]
+    assert out["ids"] == ["gpu", "memory", "sdxl-turbo", "qwen", "flux3k", "flux2-klein"]
+    assert "Shared ComfyUI" in out["status"] and "RTX 3060" in out["status"] and "8190" in out["status"] and "8188" in out["status"]
+    assert "Shared ComfyUI" not in out["plain"] and "8190" in out["plain"]
+    assert "What this machine can use" in out["page"] and "Reading this machine" in out["page"]

@@ -3118,7 +3118,15 @@ if hasattr(app.router, "on_shutdown"):
     app.router.on_shutdown.append(hub.close)
     app.router.on_shutdown.append(bolt.shutdown)  # the Studio's Bolt engine ends with the app (its leash also sees the pipe close)  # the tunnels to the workers are this app's: closed with it (and at exit, sparks.py)
 import telemetry  # noqa: E402  (this machine's readings for the status bar: GPU, memory, disk, queue, beside this file)
+import constraints  # noqa: E402  (what this process can see; a reading does not open a route)
 app.include_router(telemetry.attach(HOME, jobs, order, lock, memory_guard, engines=lambda: {"bolt": bolt.summary()}))
+
+
+@app.get("/api/constraints")
+def machine_constraints(fresh: int = 0) -> dict:
+    """Hardware and software this process can use. Read only: no prompt is posted."""
+
+    return constraints.report(SPARK, image_models(), fresh=bool(fresh))
 import suite  # noqa: E402  (the filmmaker suite's files in and out: imports, timeline, dailies, beside this file)
 app.include_router(suite.attach(HOME, jobs, lock, PRESETS, app))
 app.include_router(settings.attach(HOME))

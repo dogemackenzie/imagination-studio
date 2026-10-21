@@ -717,6 +717,9 @@ button.su-app:hover:not(:disabled) { background:var(--raise2); border-color:var(
 .m-plat { margin:-6px 0 20px; }
 .m-warns { gap:8px; margin-bottom:14px; } .m-dot { margin-top:5px; } .m-gap { margin-top:16px; } .m-min { min-width:0; }
 .m-row { padding:10px 0; border-bottom:1px solid var(--line); }
+#limits { margin-top:16px; }
+#limits h3 { margin:14px 0 0; font:600 13px/1.3 var(--sans); color:var(--dim); }
+#limits .m-limit:last-child .m-row:last-child { border-bottom:0; }
 .m-free { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
 .gaugebar.m-tall { height:10px; }
 .m-sparkbox { gap:6px; }

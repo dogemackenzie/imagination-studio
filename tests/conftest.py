@@ -21,6 +21,9 @@ os.environ["STUDIO_DISCOVER_DELAY"] = "-1"
 os.environ.setdefault("BOLT_BACKEND", "external")
 # The access key (app/access.py) stays off unless tests/test_access.py turns it on for its own requests.
 os.environ.setdefault("STUDIO_ACCESS_KEY", "off")
+# An inherited shared-ComfyUI address must not open a socket during the suite. A test that
+# reads it sets the variable itself. The default in sdxl_turbo is not used from telemetry.
+os.environ.pop("SDXL_COMFY_URL", None)
 
 # A named RTX card, with memory above the floor. Tests that describe this card pin it, so a runner
 # with no GPU still checks the same refusal. It is not a claim that the runner has this card.

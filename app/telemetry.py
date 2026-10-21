@@ -9,7 +9,9 @@ the renderer, the queue and (on a DGX Spark) the workload governor, read in a fe
 
 Everything here reads; nothing is reserved, stopped or deleted. On a GB10 nvidia-smi reports memory.used as [N/A]
 (the GPU shares the machine's memory), so memory is read from /proc/meminfo; on a Mac from sysconf and vm_stat, and
-there is no GPU line. Every tool runs with a time limit and its answer is kept for a second.
+there is no GPU line. A process without nvidia-smi uses the shared ComfyUI's own device name and VRAM when
+SDXL_COMFY_URL names that server (app/constraints.py). That reading does not enable a render. Every tool runs
+with a time limit and its answer is kept for a second.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import threading
 import time
 from pathlib import Path
 
+import constraints
 import hardware
 
 from fastapi import APIRouter, Request
@@ -198,15 +201,18 @@ def attach(home: Path, jobs: dict, order: list, lock: threading.Lock, guard=None
         return value
 
     def gpu() -> dict | None:
-        if not shutil.which("nvidia-smi"):
-            return None
-        try:
-            done = subprocess.run(["nvidia-smi", f"--query-gpu={GPU_FIELDS}", "--format=csv,noheader,nounits"],
-                                  capture_output=True, text=True, timeout=2)
-            lines = done.stdout.strip().splitlines()
-            return parse_gpu(lines[0]) if done.returncode == 0 and lines else None
-        except (OSError, subprocess.TimeoutExpired):
-            return None
+        if shutil.which("nvidia-smi"):
+            try:
+                done = subprocess.run(["nvidia-smi", f"--query-gpu={GPU_FIELDS}", "--format=csv,noheader,nounits"],
+                                      capture_output=True, text=True, timeout=2)
+                lines = done.stdout.strip().splitlines()
+                parsed = parse_gpu(lines[0]) if done.returncode == 0 and lines else None
+                if parsed:
+                    return parsed
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        # A container has no nvidia-smi. The shared ComfyUI already sees the card. The reading is not a render route.
+        return constraints.gpu_reading()
 
     def memory() -> dict:
         info = guard.meminfo() if guard else {}
@@ -326,9 +332,13 @@ def attach(home: Path, jobs: dict, order: list, lock: threading.Lock, guard=None
             warnings.append(f"The workload governor reports {ruled['status']}" + (f" ({', '.join(ruled['active'])})" if ruled["active"] else "") + ".")
         if ruled and ruled["sensor_errors"]:
             warnings.append("The workload governor cannot read a sensor: " + "; ".join(str(one) for one in ruled["sensor_errors"][:3]))
+        renderer = {"comfy": cached("comfy", comfy)}
+        shared = constraints.shared_renderer()
+        if shared is not None:
+            renderer["shared"] = shared
         return {"time": time.time(), "host": socket.gethostname(), "platform": "spark" if SPARK else "mac" if sys.platform == "darwin" else sys.platform,
                 "gpu": card, "memory": mem, "cpu": {"load1": load, "cores": os.cpu_count()}, "disk": drive,
-                "gpu_lock": lock_held, "renderer": {"comfy": cached("comfy", comfy)}, "jobs": queue(), "governor": ruled,
+                "gpu_lock": lock_held, "renderer": renderer, "jobs": queue(), "governor": ruled,
                 "engines": held_by_engines(), "warnings": warnings}
 
     def sample() -> None:

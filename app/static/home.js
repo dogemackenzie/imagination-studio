@@ -23,12 +23,23 @@ function machineStrip() {
   return el("div", { class: "mstrip", id: "homemachine" },
     el("div", { class: "who" }, el("span", { class: "dotl" + (running ? " r" : t && (t.warnings || []).length ? " t" : "") }),
       el("div", { style: "min-width:0" }, el("b", {}, platName() || "This machine"), el("span", {}, running ? "Rolling: " + running.title : t && (t.warnings || []).length ? t.warnings[0] : "Ready for the next take"))),
-    t && t.gpu ? m("GPU", t.gpu.util_pct, (t.gpu.util_pct ?? "–") + "%" + (t.gpu.temp_c != null ? " · " + t.gpu.temp_c + "°C" : ""), t.gpu.util_pct > 60 ? "var(--red)" : "var(--green)") : el("div", { class: "m" }, el("span", { class: "note", style: "margin:0" }, t ? "" : "Readouts appear once the machine reports them.")),
+    homeGpu(t, m),
     t && t.memory ? m("Memory", memUsed, gb(t.memory.total_mb - t.memory.available_mb) + " of " + gb(t.memory.total_mb) + " GB", memUsed > 85 ? "var(--red)" : "var(--amber)", t.memory.floor_mb ? 100 - pct(t.memory.floor_mb, t.memory.total_mb) : null) : el("div", { class: "m" }),
     t && t.disk ? m("Disk", t.disk.used_pct, Math.round(t.disk.free_gb) + " GB free", t.disk.used_pct > 90 ? "var(--red)" : "var(--blue)", null, "disk") : el("div", { class: "m disk" }),
     el("button", { class: "small", onclick: () => go("Machine") }, "Telemetry"));
 }
 function homeLive() { const box = $("#homemachine"); if (box) box.replaceWith(machineStrip()); }
+function homeGpu(t, m) {
+  const g = t && t.gpu;
+  if (!g) return el("div", { class: "m" }, el("span", { class: "note", style: "margin:0" }, t ? "" : "Readouts appear once the machine reports them."));
+  if (g.util_pct != null) return m("GPU", g.util_pct, (g.util_pct ?? "–") + "%" + (g.temp_c != null ? " · " + g.temp_c + "°C" : ""), g.util_pct > 60 ? "var(--red)" : "var(--green)");
+  if (g.vram_total_mb != null) {
+    const used = Math.max(0, Math.min(100, Math.round(100 * (1 - (g.vram_free_mb || 0) / g.vram_total_mb))));
+    const gb = n => (n / 1024).toFixed(n >= 102400 ? 0 : 1);
+    return m("VRAM", used, gb(g.vram_free_mb || 0) + " GB free", used > 85 ? "var(--red)" : "var(--green)");
+  }
+  return el("div", { class: "m" }, el("b", {}, g.name || "GPU"));
+}
 
 // the eight ways in, each a picture card (art/start-*.webp); Settings → Appearance picks which show (six fill a row)
 const STARTS = () => [

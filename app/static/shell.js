@@ -164,6 +164,16 @@ function renderRoomsLive(live) { const b = document.querySelector('#rooms button
 
 /* ---------- the machine chip and telemetry ---------- */
 const pct = (a, b) => b ? Math.round(100 * a / b) : 0;
+function gpuSay(t) {
+  const g = t && t.gpu;
+  if (!g) return "n/a";
+  if (g.util_pct != null) return g.util_pct + "%" + (g.temp_c != null ? " at " + g.temp_c + "°C" : "");
+  if (g.vram_total_mb != null && g.vram_free_mb != null) {
+    const gb = n => (n / 1024).toFixed(n >= 102400 ? 0 : 1);
+    return (g.name || "GPU") + " · " + gb(g.vram_free_mb) + " GB free";
+  }
+  return g.name || "n/a";
+}
 const platName = () => !S ? "" : S.platform === "spark" ? "DGX Spark" : S.platform === "mac" ? "Mac" : "Linux";
 function telApply(t) { SHELL.tel = t; SHELL.telAt = Date.now();
   SHELL.samples.push({ t: Date.now(), gpu: t.gpu ? t.gpu.util_pct : null, mem: t.memory ? 100 - pct(t.memory.available_mb, t.memory.total_mb) : null, temp: t.gpu ? t.gpu.temp_c : null, power: t.gpu ? t.gpu.power_w : null });
@@ -173,9 +183,9 @@ function telApply(t) { SHELL.tel = t; SHELL.telAt = Date.now();
   // the chip is green when the machine is ready and red while it rolls; a warning (a full disk) is a small amber mark
   // beside it and in the title, never the chip's own colour
   $("#mdot").className = "dotl" + (busy ? " r" : ""); $("#mpill").classList.toggle("warn", !busy && warn > 0);
-  $("#mtxt").textContent = gpu != null ? gpu + "% GPU" : t.memory ? Math.round(t.memory.available_mb / 1024) + " GB free" : "";
+  $("#mtxt").textContent = gpu != null ? gpu + "% GPU" : t.gpu && t.gpu.vram_free_mb != null ? Math.round(t.gpu.vram_free_mb / 1024) + " GB VRAM" : t.memory ? Math.round(t.memory.available_mb / 1024) + " GB free" : "";
   const gb = mb => (mb / 1024).toFixed(mb >= 102400 ? 0 : 1);
-  const say = [(S && S.platform_label) || platName(), busy ? "rolling" : "ready", "GPU " + (gpu == null ? "n/a" : gpu + "%" + (t.gpu && t.gpu.temp_c != null ? " at " + t.gpu.temp_c + "°C" : "")),
+  const say = [(S && S.platform_label) || platName(), busy ? "rolling" : "ready", "GPU " + gpuSay(t),
     t.memory ? "memory " + gb(t.memory.total_mb - t.memory.available_mb) + " of " + gb(t.memory.total_mb) + " GB (" + used + "%)" : "",
     // a card with memory of its own (an RTX Pro 6000): its memory, beside the machine's
     t.memory && t.memory.card ? "card " + gb(t.memory.card.used_mb) + " of " + gb(t.memory.card.total_mb) + " GB" : "",

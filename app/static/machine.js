@@ -13,6 +13,23 @@ function ring(id, label, color) {
 function ringSet(id, fraction, text, color) { const r = document.querySelector('[data-ring="' + id + '"]'); if (!r) return;
   const v = r.querySelector(".val"); v.setAttribute("stroke-dashoffset", RING * (1 - Math.max(0, Math.min(1, fraction || 0)))); if (color && v.style) v.style.stroke = color;
   r.querySelector("[data-v]").textContent = text; }
+function ringLabel(id, text) { const r = document.querySelector('[data-ring="' + id + '"]'); if (!r || !text) return; const span = r.querySelector(".lab span"); if (span) span.textContent = text; }
+// util when nvidia-smi reports it; VRAM when the shared ComfyUI is the reading this process has
+function gpuLine(t) {
+  const g = t && t.gpu;
+  const quiet = g && (g.source === "comfyui" || g.vram_total_mb != null);
+  const temp = !g ? "reported on a DGX Spark" : g.temp_c == null ? (quiet ? "This reading has no temperature." : "GPU temperature") : g.temp_c > 85 ? "hot: renders may slow" : "GPU temperature";
+  const power = !g ? "reported on a DGX Spark" : g.power_w == null ? (quiet ? "This reading has no power draw." : "power draw") : "power draw";
+  if (!g) return { fraction: 0, text: "–", color: "var(--green)", ring: "GPU", foot: "no GPU readings on this machine", temp, power };
+  const name = g.name || "GPU";
+  if (g.util_pct != null) return { fraction: g.util_pct / 100, text: g.util_pct + "%", color: g.util_pct > 60 ? "var(--amber)" : "var(--green)", ring: "GPU", foot: name + (g.clock_mhz ? " · " + g.clock_mhz + " MHz" : ""), temp, power };
+  if (g.vram_total_mb != null) {
+    const free = g.vram_free_mb || 0, used = Math.max(0, Math.min(1, 1 - free / g.vram_total_mb));
+    const gb = n => (n / 1024).toFixed(n >= 102400 ? 0 : 1);
+    return { fraction: used, text: Math.round(used * 100) + "%", color: used > 0.85 ? "var(--red)" : "var(--green)", ring: "VRAM", foot: name + " · " + gb(free) + " GB free of " + gb(g.vram_total_mb) + " GB", temp, power };
+  }
+  return { fraction: 0, text: "–", color: "var(--green)", ring: "GPU", foot: name, temp, power };
+}
 function sparkPath(values, w = 600, h = 64, max = 100) { const pts = values.map((v, i) => [values.length < 2 ? 0 : i * w / (values.length - 1), h - 3 - (Math.max(0, Math.min(max, v || 0)) / max) * (h - 8)]);
   if (!pts.length) return ["", ""]; const line = "M" + pts.map(p => p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" L");
   return [line, line + " L" + w + " " + h + " L0 " + h + " Z"]; }
@@ -20,20 +37,43 @@ function sparkPath(values, w = 600, h = 64, max = 100) { const pts = values.map(
 function sparkline(id, tone) { return el("div", { class: "stack m-sparkbox" }, svg("svg", { class: "spark m-" + tone, viewBox: "0 0 600 64", preserveAspectRatio: "none", "data-spark": id },
   svg("path", { d: "", class: "area" }), svg("path", { d: "", class: "line", "vector-effect": "non-scaling-stroke" }))); }
 function sparkSet(id, values, max) { const s = document.querySelector('[data-spark="' + id + '"]'); if (!s) return; const [line, area] = sparkPath(values, 600, 64, max); const p = s.querySelectorAll("path"); p[0].setAttribute("d", area); p[1].setAttribute("d", line); }
-const M = { storage: null, loading: false, history: null };
+const M = { storage: null, loading: false, history: null, limits: null };
+const LIMIT_WORD = { runs: "runs here", present: "on the server", missing: "not installed", closed: "not offered", seen: "seen", down: "not answering", ok: "within the floor", tight: "under the floor", unknown: "not listed" };
+const limitTone = s => s === "runs" || s === "seen" || s === "ok" ? "ok" : s === "closed" || s === "tight" ? "warn" : s === "present" ? "t" : "";
+function limitsView(d) {
+  const head = el("div", { class: "kv" }, el("h2", { class: "m-flat" }, "What this machine can use"),
+    el("button", { class: "small", onclick: () => { M.limits = null; const box = document.querySelector("#limits"); if (box) limitsDraw(box); api("/api/constraints?fresh=1").then(next => { M.limits = next; const live = document.querySelector("#limits"); if (live) limitsDraw(live); }).catch(() => { M.limits = { error: true }; const live = document.querySelector("#limits"); if (live) limitsDraw(live); }); } }, "Read again"));
+  if (!d) return [head, el("div", { class: "note" }, "Reading this machine…")];
+  if (d.error) return [head, el("div", { class: "note" }, "The reading did not answer.")];
+  const row = item => el("div", { class: "m-row", "data-limit": item.id },
+    el("div", { class: "kv" }, el("span", {}, item.label), el("span", { class: "tag2 " + limitTone(item.state) }, LIMIT_WORD[item.state] || item.state)),
+    item.detail ? el("div", { class: "note m-flat" }, item.detail) : null);
+  const block = (title, rows, note) => rows && rows.length ? el("div", { class: "m-limit" }, el("h3", {}, title), note ? el("div", { class: "note m-flat" }, note) : null, ...rows.map(row)) : null;
+  return [head, d.note ? el("div", { class: "note" }, d.note) : null, block("Hardware", d.hardware), block("Software", d.software), block("On the shared ComfyUI", d.present, d.present_note)].filter(Boolean);
+}
+function limitsDraw(box) { box.replaceChildren(...limitsView(M.limits)); }
+function limitsPanel() {
+  const box = el("div", { class: "panel stack", id: "limits" });
+  limitsDraw(box);
+  api("/api/constraints").then(d => { M.limits = d; if (document.querySelector("#limits")) limitsDraw(document.querySelector("#limits")); }).catch(() => { M.limits = { error: true }; if (document.querySelector("#limits")) limitsDraw(document.querySelector("#limits")); });
+  return box;
+}
 function machineLive(t) {
-  if (!t) return; const g = t.gpu || {}, mem = t.memory || {}, used = mem.total_mb ? 1 - mem.available_mb / mem.total_mb : 0;
-  ringSet("gpu", (g.util_pct || 0) / 100, g.util_pct == null ? "–" : g.util_pct + "%", g.util_pct > 60 ? "var(--amber)" : "var(--green)");
+  if (!t) return; const g = t.gpu || {}, mem = t.memory || {}, used = mem.total_mb ? 1 - mem.available_mb / mem.total_mb : 0, line = gpuLine(t);
+  ringSet("gpu", line.fraction, line.text, line.color); ringLabel("gpu", line.ring);
   ringSet("mem", used, Math.round(used * 100) + "%", used > .85 ? "var(--red)" : used > .65 ? "var(--amber)" : "var(--blue)");
   ringSet("temp", (g.temp_c || 0) / 100, g.temp_c == null ? "–" : g.temp_c + "°", g.temp_c > 85 ? "var(--red)" : g.temp_c > 70 ? "var(--amber)" : "var(--green)");
   ringSet("power", (g.power_w || 0) / 240, g.power_w == null ? "–" : Math.round(g.power_w) + "W", "var(--blue)");
   const foot = (k, s) => { const n = document.querySelector('[data-foot="' + k + '"]'); if (n) n.textContent = s; };
-  foot("gpu", (g.name || "GPU") + (g.clock_mhz ? " · " + g.clock_mhz + " MHz" : ""));
+  foot("gpu", line.foot);
   foot("mem", mem.total_mb ? Math.round((mem.total_mb - mem.available_mb) / 1024) + " of " + Math.round(mem.total_mb / 1024) + " GB" + (mem.floor_mb ? " · guard floor " + Math.round(mem.floor_mb / 1024) + " GB" : "") : "–");
-  const noGpu = !t.gpu; if (noGpu) foot("gpu", "no GPU readings on this machine");
-  foot("temp", noGpu ? "reported on a DGX Spark" : g.temp_c > 85 ? "hot: renders may slow" : "GPU temperature"); foot("power", noGpu ? "reported on a DGX Spark" : "power draw");
+  foot("temp", line.temp); foot("power", line.power);
   const hist = [...(M.history || []), ...SHELL.samples.map(s => ({ gpu: s.gpu, mem: s.mem }))].slice(-300);
-  sparkSet("gpu", hist.map(s => s.gpu), 100); sparkSet("mem", hist.map(s => s.mem), 100);
+  // a missing load is not 0%. VRAM stays on the ring; it is not drawn as GPU load.
+  const gpuVals = hist.map(s => s.gpu).filter(v => typeof v === "number");
+  sparkSet("gpu", gpuVals, 100); sparkSet("mem", hist.map(s => s.mem), 100);
+  const cap = document.querySelector('[data-spark-cap="gpu"]');
+  if (cap) cap.textContent = gpuVals.length ? "last 10 minutes" : "this reading has no load";
   const st = document.querySelector("#machstatus"); if (st) st.replaceChildren(...statusRows(t));
   const w = document.querySelector("#machwarn"); if (w) w.replaceChildren(...(t.warnings || []).map(x => el("div", { class: "warnline" }, el("span", { class: "dotl r m-dot" }), el("div", {}, x))));
 }
@@ -42,6 +82,7 @@ function statusRows(t) { const row = (k, v, cls) => el("div", { class: "kv m-row
   return [row("Rolling", cur ? cur.title : "nothing"), row("Queue", (t.jobs ? t.jobs.queued : 0) + " waiting"),
     row("GPU lock", t.gpu_lock ? (t.gpu_lock.held ? "held" + (t.gpu_lock.holder ? " by " + t.gpu_lock.holder : "") : "free") : "–"),
     row("Renderer", t.renderer && t.renderer.comfy ? (t.renderer.comfy.running ? "ComfyUI up on " + t.renderer.comfy.port : "idle, models unloaded") : "–"),
+    t.renderer && t.renderer.shared ? row("Shared ComfyUI", t.renderer.shared.up ? "up on port " + t.renderer.shared.port + (t.renderer.shared.name ? " · " + t.renderer.shared.name : "") : "not answering on port " + (t.renderer.shared.port || 8188)) : null,
     // NVIDIA Nemotron 3.5 Bolt run by the Studio (app/bolt.py): what it holds of the memory, when loaded
     t.engines && t.engines.bolt && t.engines.bolt.managed ? row("Bolt brain", boltLine(t.engines.bolt) + " · " + (t.engines.bolt.backend || "")) : null,
     row("Workload governor", t.governor ? (t.governor.status || "answering") + (Array.isArray(t.governor.reservations) ? " · " + count(t.governor.reservations.length, "reservation") : "") + (t.governor.alert_temperature_c ? " · alert at " + t.governor.alert_temperature_c + "°C" : "") : "not on this machine", t.governor && t.governor.status && t.governor.status !== "ok" ? "warn" : ""),
@@ -76,9 +117,10 @@ function viewMachine() {
       el("div", { class: "gauge" }, ring("mem", "Memory", "var(--blue)"), el("div", { class: "foot", "data-foot": "mem" }, "–")),
       el("div", { class: "gauge" }, ring("temp", "Temp", "var(--green)"), el("div", { class: "foot", "data-foot": "temp" }, "–")),
       el("div", { class: "gauge" }, ring("power", "Power", "var(--blue)"), el("div", { class: "foot", "data-foot": "power" }, "–"))),
+    limitsPanel(),
     el("div", { class: "split m-gap" },
       el("div", { class: "stack" },
-        el("div", { class: "panel stack" }, el("div", { class: "kv" }, el("h2", { class: "m-flat" }, "GPU load"), el("span", {}, "last 10 minutes")), sparkline("gpu", "green"),
+        el("div", { class: "panel stack" }, el("div", { class: "kv" }, el("h2", { class: "m-flat" }, "GPU load"), el("span", { "data-spark-cap": "gpu" }, "last 10 minutes")), sparkline("gpu", "green"),
           el("div", { class: "kv" }, el("h2", { class: "m-flat" }, "Unified memory"), el("span", {}, "% used")), sparkline("mem", "blue")),
         storagePanel()),
       el("div", { class: "panel" }, el("h2", {}, "Right now"), el("div", { id: "machstatus" }, el("div", { class: "note" }, "Waiting for the first reading…")),
