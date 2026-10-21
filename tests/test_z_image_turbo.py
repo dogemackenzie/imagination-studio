@@ -219,3 +219,54 @@ console.log(JSON.stringify(globalThis.__out));
     assert done.returncode == 0, done.stderr
     out = json.loads(done.stdout.strip().splitlines()[-1])
     assert out["open"] is None and out["video"] == "closed video" and out["badge"] == "Z-Image Turbo"
+
+
+def test_the_picture_form_opens_a_measured_z_image_still_at_1024():
+    if not shutil.which("node"):
+        pytest.skip("node is not installed")
+    page = (ROOT / "app/static/index.html").read_text()
+    start, end = page.index("// measured-still:start"), page.index("// measured-still:end")
+    harness = r"""
+const vm = require("vm"), fs = require("fs");
+globalThis.el = (tag, attrs = {}, ...kids) => ({ tag, attrs, kids: kids.flat() });
+globalThis.mark = (id, label) => ({ mark: id, label });
+globalThis.choice = (obj, key, options) => { globalThis.picked = options; return { options }; };
+globalThis.render = () => {};
+globalThis.routeBlock = kind => kind === "scout" ? "closed scout" : "closed";
+globalThis.S = { image_models: [
+  { id: "sdxl-turbo", label: "SDXL Turbo", width: 512, height: 512, steps: 1, max_count: 1 },
+  { id: "z-image", label: "Z-Image Turbo", width: 1024, height: 1024, steps: 8, max_count: 1 },
+  { id: "flux3k-fast", label: "FLUX3-K Fast", width: 1024, height: 1024, steps: 16, max_count: 4 }
+]};
+globalThis.C = { imageModel: "z-image", imageSize: "1344x768", count: 4 };
+vm.runInThisContext(fs.readFileSync(process.argv[2], "utf8"));
+const z = pictureStillFacts();
+C.imageModel = "sdxl-turbo"; C.count = 4; C.imageSize = "1344x768";
+const sdxl = pictureStillFacts();
+C.imageModel = "qwen"; C.count = 4; C.imageSize = "1344x768";
+const qwen = pictureStillFacts();
+C.imageModel = "z-image";
+imageModelPick();
+console.log(JSON.stringify({ z, sdxl, qwen, titles: { z: picked["z-image"][0], sdxl: picked["sdxl-turbo"][0], flux: picked["flux3k-fast"][0] } }));
+"""
+    import tempfile
+    page_js = tempfile.NamedTemporaryFile("w", suffix=".js", delete=False)
+    page_js.write(page[start:end])
+    page_js.close()
+    handle = tempfile.NamedTemporaryFile("w", suffix=".js", delete=False)
+    handle.write(harness)
+    handle.close()
+    try:
+        done = subprocess.run(["node", handle.name, page_js.name], capture_output=True, text=True, timeout=30)
+    finally:
+        Path(handle.name).unlink(missing_ok=True)
+        Path(page_js.name).unlink(missing_ok=True)
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout.strip().splitlines()[-1])
+    assert out["z"]["open"] is True and out["z"]["size"] == "1024x1024" and out["z"]["max"] == 1
+    assert "1024 × 1024" in out["z"]["note"] and "8 steps" in out["z"]["note"] and "Z-Image Turbo" in out["z"]["note"]
+    assert out["z"]["choices"]["1024x1024"][1] == "1024 × 1024, 8 steps"
+    assert out["sdxl"]["open"] is True and out["sdxl"]["size"] == "512x512" and "one step" in out["sdxl"]["note"]
+    assert out["qwen"]["open"] is False and out["qwen"]["reason"] == "closed scout" and out["qwen"]["size"] == "1344x768"
+    assert out["titles"]["z"] == "Z-Image Turbo" and out["titles"]["sdxl"] == "SDXL Turbo"
+    assert out["titles"]["flux"]["mark"] == "flux"

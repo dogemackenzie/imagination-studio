@@ -266,9 +266,11 @@ function changed() { sync(); C.prompt = ""; render(); }
 // one decision shown as cards: options are value -> [title, detail]
 // The picture model a prompt goes to. When /api/state sends image_models, only those are offered, and a saved id
 // that is missing is labelled not on this machine. When that field is absent, the page keeps Qwen.
+// measured-still:start
+const MEASURED_STILLS = { "sdxl-turbo": true, "z-image": true };
 const imageModels = () => {
   if (typeof S !== "undefined" && S && Array.isArray(S.image_models)) {
-    const list = S.image_models.map(m => ({ id: m.id, label: m.label, note: m.note || "", max_count: m.max_count, width: m.width, height: m.height }));
+    const list = S.image_models.map(m => ({ id: m.id, label: m.label, note: m.note || "", max_count: m.max_count, width: m.width, height: m.height, steps: m.steps }));
     if (typeof C !== "undefined" && C.imageModel && !list.some(m => m.id === C.imageModel)) list.push({ id: C.imageModel, label: C.imageModel + " (not on this machine)", note: "" });
     return list;
   }
@@ -279,9 +281,28 @@ const imageModel = () => {
   if (typeof S !== "undefined" && S && Array.isArray(S.image_models)) return list.some(m => m.id === C.imageModel) ? C.imageModel : (list[0] ? list[0].id : "");
   return list.some(m => m.id === C.imageModel) ? C.imageModel : "qwen";
 };
+// A measured still uses the server's own size and step count. Anything else stays on the scout route.
+function pictureStillFacts() {
+  const id = imageModel();
+  const card = MEASURED_STILLS[id] ? imageModels().find(m => m.id === id && m.width && m.height) : null;
+  if (card && typeof C !== "undefined") {
+    C.imageSize = card.width + "x" + card.height;
+    const cap = card.max_count || 1;
+    if (C.count > cap) C.count = cap;
+  }
+  const reason = card ? "" : ((typeof routeBlock === "function" && routeBlock("scout")) || "");
+  const steps = card ? Number(card.steps) : 0;
+  const stepWord = steps === 1 ? "one step" : steps + " steps";
+  return {
+    still: !!card, model: id, size: card ? card.width + "x" + card.height : (typeof C !== "undefined" ? C.imageSize : ""),
+    choices: card ? { [card.width + "x" + card.height]: ["Square", card.width + " × " + card.height + ", " + stepWord] } : null,
+    open: !reason, reason, max: card ? (card.max_count || 1) : 12,
+    note: card ? card.label + " keeps this prompt as written: one " + card.width + " × " + card.height + " picture per seed, " + stepWord + ". It does not edit, animate, or follow a video size." : "" };
+}
 const imageModelName = () => { const one = imageModels().find(m => m.id === imageModel()); return one ? one.label : "No picture model on this machine"; };
 const imageModelPick = after => imageModels().length < 2 ? null : el("div", {}, el("label", {}, "Picture model"),
-  choice(C, "imageModel", Object.fromEntries(imageModels().map(m => [m.id, [m.id === "sdxl-turbo" ? m.label : mark(/^flux/.test(m.id) ? "flux" : "qwen", m.label), m.note]])), after || render, true));
+  choice(C, "imageModel", Object.fromEntries(imageModels().map(m => [m.id, [MEASURED_STILLS[m.id] ? m.label : mark(/^flux/.test(m.id) ? "flux" : "qwen", m.label), m.note]])), after || render, true));
+// measured-still:end
 const choice = (obj, key, options, after, tight) => el("div", { class: "choice" + (tight ? " tight" : ""), role: "radiogroup" }, Object.entries(options).map(([v, [title, sub]]) =>
   el("button", { type: "button", role: "radio", "aria-checked": String(obj[key]) === v ? "true" : "false", class: String(obj[key]) === v ? "on" : "", onclick: () => { obj[key] = v; if (after) after(); } }, el("b", {}, title), sub ? el("span", {}, sub) : null)));
 // A number of passes of your own is the Custom card of each passes chooser, right after its 20-pass card. C.steps
@@ -621,22 +642,19 @@ function viewCreate() {
     // the prompt goes to the image model and stops there
     const made = C.imageJob && jobs.find(j => j.id === C.imageJob);
     // Only a model the server lists is the measured still. A saved id that is not offered stays on the closed scout route.
-    const sdxl = imageModel() === "sdxl-turbo" && typeof S !== "undefined" && S && Array.isArray(S.image_models) && S.image_models.some(m => m.id === "sdxl-turbo");
-    const sdxlCard = sdxl ? (imageModels().find(m => m.id === "sdxl-turbo") || {}) : {};
-    if (sdxl) C.imageSize = "512x512";
+    const facts = pictureStillFacts();
     const [w, h] = C.imageSize.split("x").map(Number);
-    const pictureBlock = sdxl ? "" : ((typeof routeBlock === "function" && routeBlock("scout")) || "");
-    const pictureCount = sdxl ? (sdxlCard.max_count || 1) : 12;
-    if (sdxl && C.count > pictureCount) C.count = pictureCount;
+    const pictureBlock = facts.reason;
+    const pictureCount = facts.max;
     put(body, el("h2", {}, "The picture"), goes, picture, imageModelPick(),
-      el("label", {}, "Size"), choice(C, "imageSize", sdxl ? { "512x512": ["Square", "512 × 512, one step"] } : { "1344x768": ["16:9", "1344 × 768"], "1664x928": ["16:9 large", "1664 × 928"], "1024x1024": ["Square", "1024 × 1024"], "768x1344": ["9:16", "768 × 1344"] }, render, true),
+      el("label", {}, "Size"), choice(C, "imageSize", facts.choices || { "1344x768": ["16:9", "1344 × 768"], "1664x928": ["16:9 large", "1664 × 928"], "1024x1024": ["Square", "1024 × 1024"], "768x1344": ["9:16", "768 × 1344"] }, render, true),
       el("div", { class: "row" },
         el("div", { class: "fit", style: "width:120px" }, el("label", {}, "How many"), bind(C, "count", el("input", { type: "number", min: 1, max: pictureCount }))),
         el("div", { class: "fit", style: "width:110px" }, el("label", {}, "Seed"), bind(C, "seed", el("input", { type: "number", min: 0 })))),
-      el("div", { class: "note" }, (sdxl ? "SDXL Turbo keeps this prompt as written: one 512 × 512 picture per seed, one step. It does not edit, animate, or follow a video size."
-        : imageModel() === "qwen" ? "Each image takes a few seconds after the model loads"
+      el("div", { class: "note" }, (facts.note
+        || (imageModel() === "qwen" ? "Each image takes a few seconds after the model loads"
         : imageModel() === "moss-image" ? "MOSS-Image takes your prompt as written, about 45 s an image at 1344 × 768 once loaded; put the words to be lettered in quotes"
-        : "FLUX3-K writes a full scene description from your prompt first (5 to 20 s, once for all the images), then makes each image: Fast about 10 to 15 s, Full about a minute") + "; seeds count up from the one given."),
+        : "FLUX3-K writes a full scene description from your prompt first (5 to 20 s, once for all the images), then makes each image: Fast about 10 to 15 s, Full about a minute")) + "; seeds count up from the one given."),
       el("div", { class: "row", style: "margin-top:10px" }, el("button", { class: "hot fit", disabled: !!pictureBlock, title: pictureBlock, onclick: async () => { try { if (pictureBlock) throw new Error(pictureBlock); if (!C.scene.trim()) throw new Error("describe the picture first");
         const j = await api("/api/jobs", { kind: "scout", title: "Image: " + C.scene.slice(0, 40), params: { prompt: C.scene, count: C.count, seed: C.seed, width: w, height: h, image_model: imageModel() } });
         C.imageJob = j.id; await poll(); render(); } catch (e) { toast(e.message); } } }, "Make image"), el("span")));
