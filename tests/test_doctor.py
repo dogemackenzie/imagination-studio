@@ -223,13 +223,13 @@ def test_gpu_container_pulls_only_the_small_fallback(monkeypatch):
 def test_published_ports_keep_only_watched_listeners():
     text = "\n".join([
         "eager_curie\tmcr.microsoft.com/playwright/mcp\t",
-        "studio-studio-1\t03fd36151c01\t192.168.50.22:8190->8190/tcp, 192.168.50.22:8443->8443/tcp",
+        "studio-studio-1\t03fd36151c01\t192.168.1.20:8190->8190/tcp, 192.168.1.20:8443->8443/tcp",
     ])
     matches = doctor.parse_published_ports(text)
     assert matches == [{
         "name": "studio-studio-1",
         "image": "03fd36151c01",
-        "ports": "192.168.50.22:8190->8190/tcp, 192.168.50.22:8443->8443/tcp",
+        "ports": "192.168.1.20:8190->8190/tcp, 192.168.1.20:8443->8443/tcp",
         "watched_ports": [8190],
     }]
 

@@ -14,10 +14,9 @@ services:
         UPSTREAM_REPO: ${UPSTREAM_REPO:-drowzeys/Imagination-Studio-by-keys-Wasserman}
     image: imagination-studio-app:${SOURCE_REV:-local}
     ports:
-      # This machine, as requested: 192.168.50.22:7870. 127.0.0.1 stays for this computer.
+      # Loopback in this file. compose.override.yaml, gitignored, can add an address for this machine.
       # There is no login. Not 0.0.0.0, and not 8188, 8190, 8191, or 8443.
       - "127.0.0.1:${STUDIO_PORT:-7870}:7870"
-      - "192.168.50.22:${STUDIO_PORT:-7870}:7870"
     environment:
       STUDIO_CONTAINER: "1"
       STUDIO_HOME: /data

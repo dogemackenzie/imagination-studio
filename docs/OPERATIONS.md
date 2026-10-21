@@ -4,7 +4,7 @@ The system runs on a Mac, a DGX Spark, and Linux. This page is the Linux app con
 The commands match `compose.yaml`, `Dockerfile.studio`, `scripts/container-entrypoint.sh`, `scripts/container-healthcheck.py`,
 `scripts/doctor.py`, `scripts/comfy_preflight.py`, and `scripts/studio-data.py`.
 
-The app listens on `127.0.0.1:7870` and `192.168.50.22:7870`. There is no login. The container does not
+The app listens on `127.0.0.1:7870`. There is no login. The container does not
 attach a GPU. It does not publish 8188, 8190, 8191, or 8443. `HOST` stays unset. `STUDIO_BIND` is `0.0.0.0`
 only inside the container so the published addresses can reach the app. `STUDIO_ACCESS_KEY=off` is set for
 this service. The entrypoint defaults that variable to off, and a container with it unset does not ask, so

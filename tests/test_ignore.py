@@ -3,6 +3,7 @@
 Curated sample clips and docs/benchmarks/rtx3060-images.json stay available: the README links the clips, and the
 image copies the measured profile.
 """
+import re
 import subprocess
 from pathlib import Path
 
@@ -55,3 +56,18 @@ def check_ignore(path):
 def test_git_ignores_host_files_and_keeps_curated_ones():
     assert [path for path in IGNORED if not check_ignore(path)] == []
     assert [path for path in KEPT if check_ignore(path)] == []
+
+
+def test_documentation_does_not_name_a_lan_address():
+    """Loopback and the Docker bridge are the only addresses in the deployment notes."""
+    allowed = {"0.0.0.0", "127.0.0.1", "172.17.0.1"}
+    address = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+    names = ["MEMORY.md", ".env.example", "compose.yaml", "docs/BUILD_PLAN.md", "docs/OPERATIONS.md"]
+    hits = []
+    for name in names:
+        for number, line in enumerate((ROOT / name).read_text(encoding="utf-8").splitlines(), 1):
+            for found in address.findall(line):
+                if found not in allowed:
+                    hits.append(f"{name}:{number}: {found}")
+    assert hits == []
+    assert check_ignore("compose.override.yaml")

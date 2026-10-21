@@ -164,6 +164,9 @@ compose() {
     "$STUDIO_UPDATE_COMPOSE" "$@"
   else
     local -a files=(-f compose.yaml)
+    if [[ -f compose.override.yaml ]]; then
+      files+=(-f compose.override.yaml)
+    fi
     if [[ -f compose.nvml.yaml ]]; then
       files+=(-f compose.nvml.yaml)
     fi

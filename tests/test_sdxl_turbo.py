@@ -95,7 +95,7 @@ def test_the_workflow_keeps_the_prompt_and_uses_cfg_one():
 
 
 def test_the_shared_address_is_only_port_8188(monkeypatch):
-    for bad in ("http://127.0.0.1:8190", "http://192.168.50.22:8188", "http://172.17.0.1:8190", "http://0.0.0.0:8188"):
+    for bad in ("http://127.0.0.1:8190", "http://192.168.1.20:8188", "http://172.17.0.1:8190", "http://0.0.0.0:8188"):
         monkeypatch.setenv("SDXL_COMFY_URL", bad)
         with pytest.raises(RuntimeError):
             S.shared_origin()
@@ -325,7 +325,7 @@ def test_the_measured_route_does_not_open_a_shared_port(monkeypatch):
     assert A.block_foreign_render() == A.REASONS["protected_endpoint"]
     monkeypatch.setenv("SPARK_COMFY_URL", "http://127.0.0.1:8191")
     assert A.block_foreign_render() is None
-    for url in ("http://127.0.0.1:8188", "http://192.168.50.22:8190", "http://127.0.0.1:8190"):
+    for url in ("http://127.0.0.1:8188", "http://192.168.1.20:8190", "http://127.0.0.1:8190"):
         monkeypatch.setenv("SPARK_COMFY_URL", url)
         assert A.block_foreign_render() == A.REASONS["protected_endpoint"]
     monkeypatch.setenv("SPARK_COMFY_URL", "http://127.0.0.1:8191")

@@ -89,13 +89,13 @@ def test_a_published_container_does_not_ask_unless_the_key_is_turned_on(monkeypa
     monkeypatch.setenv("STUDIO_CONTAINER", "1")
     assert access.enabled() is False
     phone = TestClient(server.app, client=("8.8.8.8", 50000))
-    for host in ("studio.tail1234.ts.net", "8.8.8.8:7870", "192.168.50.22:7870", "100.64.1.2:7870"):
+    for host in ("studio.tail1234.ts.net", "8.8.8.8:7870", "192.168.1.10:7870", "100.64.1.2:7870"):
         said = phone.get("/api/state", headers={"host": host})
         assert said.status_code == 200 and said.json()["access_key"] is False, host
         assert phone.get("/api/key", headers={"host": host}).json()["needed"] is False
-    lan = TestClient(server.app, client=("192.168.50.52", 50000))
+    lan = TestClient(server.app, client=("192.168.1.50", 50000))
     for path in ("/api/updates", "/api/brains", "/api/agent/tools"):
-        assert lan.get(path, headers={"host": "192.168.50.22:7870"}).status_code == 403, path
+        assert lan.get(path, headers={"host": "192.168.1.10:7870"}).status_code == 403, path
     assert phone.get("/api/updates", headers={"host": "studio.tail1234.ts.net"}).status_code == 403
     assert phone.get("/api/key/share", headers={"host": "8.8.8.8:7870"}).status_code == 404
     monkeypatch.delenv("STUDIO_CONTAINER", raising=False)
@@ -184,20 +184,20 @@ def test_a_published_container_treats_a_localhost_host_as_this_computer(keyed, m
 
     monkeypatch.setenv("STUDIO_CONTAINER", "1")
     bridge = TestClient(server.app, client=("172.17.0.1", 50000))
-    for host in ("127.0.0.1:7870", "localhost:7870", "[::1]:7870", "192.168.50.22:7870", "10.0.10.5:7870", "[fd00::1]:7870"):
+    for host in ("127.0.0.1:7870", "localhost:7870", "[::1]:7870", "192.168.1.10:7870", "10.0.10.5:7870", "[fd00::1]:7870"):
         assert bridge.get("/api/state", headers={"host": host}).status_code == 200, host
-    assert bridge.get("/api/key", headers={"host": "192.168.50.22:7870"}).json()["local"] is True
-    phone = TestClient(server.app, client=("192.168.50.52", 50000))
-    assert phone.get("/api/state", headers={"host": "192.168.50.22:7870"}).status_code == 200
-    assert phone.get("/api/key", headers={"host": "192.168.50.22:7870"}).json() == {"needed": False, "signed_in": True, "local": True}
+    assert bridge.get("/api/key", headers={"host": "192.168.1.10:7870"}).json()["local"] is True
+    phone = TestClient(server.app, client=("192.168.1.50", 50000))
+    assert phone.get("/api/state", headers={"host": "192.168.1.10:7870"}).status_code == 200
+    assert phone.get("/api/key", headers={"host": "192.168.1.10:7870"}).json() == {"needed": False, "signed_in": True, "local": True}
     for host in ("studio.tail1234.ts.net", "8.8.8.8:7870", "100.64.1.2:7870", "169.254.1.1:7870"):
         said = phone.get("/api/state", headers={"host": host})
         assert said.status_code == 401 and said.json()["access"] == "key", host
     for path in ("/api/updates", "/api/brains", "/api/agent/tools"):
-        assert phone.get(path, headers={"host": "192.168.50.22:7870"}).status_code == 403, path
+        assert phone.get(path, headers={"host": "192.168.1.10:7870"}).status_code == 403, path
     monkeypatch.delenv("STUDIO_CONTAINER", raising=False)
     assert bridge.get("/api/state", headers={"host": "127.0.0.1:7870"}).status_code == 401
-    assert phone.get("/api/state", headers={"host": "192.168.50.22:7870"}).status_code == 401
+    assert phone.get("/api/state", headers={"host": "192.168.1.10:7870"}).status_code == 401
 
 
 def test_this_computer_by_its_network_address_or_name_needs_no_key(keyed, monkeypatch):
