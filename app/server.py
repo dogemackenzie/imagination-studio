@@ -45,6 +45,7 @@ import lengths  # noqa: E402  (which frame counts the model takes, beside this f
 sys.path.insert(0, str(PACK / "spark"))
 import memory_guard  # noqa: E402  (a DGX Spark's memory: what a clip needs and whether this machine has it, in spark/)
 import rtx_admit  # noqa: E402  (RTX admission and which renderer this Studio may stop)
+import sdxl_turbo  # noqa: E402  (the measured RTX still; unoffered until its profile is enabled)
 import settings  # noqa: E402  (Settings: looks, layout, presets, settings.json, beside this file)
 
 FPS = 24
@@ -925,18 +926,28 @@ IMAGE_MODELS = {"qwen": ("Qwen 2.1 Turbo", "8 steps, the quickest draft; Qwen Re
                 "qwen-full": ("Qwen 2.1 Full", "the 40-step base model at CFG 4: more detail than Turbo, about 8x slower"),
                 "flux3k-fast": ("FLUX3-K Fast", "FLUX 3 Image Klein, 16 steps: sharper text, whole figures, better prompt following"),
                 "flux3k-full": ("FLUX3-K Full", "FLUX 3 Image Klein base, 50 steps: the most detail, about 5x slower than Fast"),
-                "moss-image": ("MOSS-Image", "25 steps: exact lettering for posters, titles and signs; Apache 2.0, commercial use allowed")}
+                "moss-image": ("MOSS-Image", "25 steps: exact lettering for posters, titles and signs; Apache 2.0, commercial use allowed"),
+                "sdxl-turbo": (sdxl_turbo.LABEL, sdxl_turbo.NOTE)}
 # BFL's file names, the present one first (renamed 2026-10-17, the same files; spark_generate.FLUX3_OLD)
 FLUX3_FILES = {"flux3k-fast": ("flux3-image-klein-bf16.safetensors", "flux3_image_klein_sd_bf16.safetensors"),
                "flux3k-full": ("flux3-image-klein-base-bf16.safetensors", "flux3_image_klein_base_bf16.safetensors")}
 
 
+def image_model_card(name: str) -> dict:
+    label, note = IMAGE_MODELS[name]
+    card = {"id": name, "label": label, "note": note}
+    if name == "sdxl-turbo":
+        card.update(sdxl_turbo.public_limits())
+    return card
+
+
 def image_models() -> list[str]:
     """The picture models installed here, Qwen first: FLUX3-K's ComfyUI files on a Spark, its own venv and BFL's
-    checkpoints on a Mac. An app-only machine lists none: it must not invent a Qwen install."""
+    checkpoints on a Mac. An app-only machine lists none of those: it must not invent a Qwen install. SDXL Turbo
+    is listed only when its measured profile is enabled and the checkpoint is the recorded file."""
 
     if not capabilities.renders(SPARK):
-        return []
+        return ["sdxl-turbo"] if (not SPARK and sdxl_turbo.offered()) else []
     found = (["qwen"] if qwen_ready() else []) + (["qwen-full"] if qwen_base_ready() else [])
     for name, unets in FLUX3_FILES.items():
         if SPARK:
@@ -994,10 +1005,15 @@ def image_model_env(params: dict) -> dict:
     if name not in IMAGE_MODELS:
         raise HTTPException(400, f"unknown picture model {name}: one of {', '.join(IMAGE_MODELS)}")
     if name not in image_models():
+        if name == "sdxl-turbo":
+            raise HTTPException(400, sdxl_turbo.script_block() or "SDXL Turbo is not offered on this machine.")
         how = {"qwen": "", "qwen-full": " --image-edit", "moss-image": " --moss (on a DGX Spark)"}.get(name, " --flux3")
         raise HTTPException(400, f"{IMAGE_MODELS[name][0]} is not installed here: oneshot-setup.sh{how} adds it"
                                  + (" (Machine → Models & weights shows what is missing)" if name == "qwen" else ""))
-    return {"IMAGE_MODEL": name}
+    env = {"IMAGE_MODEL": name}
+    if name == "sdxl-turbo":
+        env["STUDIO_PYTHON"] = sys.executable
+    return env
 
 
 def text_encoders() -> dict[str, str]:
@@ -1315,7 +1331,17 @@ def build(kind: str, params: dict, job_id: str, room: bool = True) -> tuple[list
             width, height = int(params["width"]), int(params["height"])
             if width % 16 or height % 16 or not (256 <= width <= 2048 and 256 <= height <= 2048):
                 raise HTTPException(400, "image sides are multiples of 16 between 256 and 2048")
+        if params.get("image_model") == "sdxl-turbo":
+            try:
+                width, height = sdxl_turbo.canvas(params)
+            except ValueError as error:
+                raise HTTPException(400, str(error)) from None
         env = {"SEED": seed, "WIDTH": width, "HEIGHT": height, **image_model_env(params)}
+        # After the profile check inside image_model_env, so a missing profile is the error, not the count.
+        if params.get("image_model") == "sdxl-turbo":
+            count = int(params.get("count", 1))
+            if not 1 <= count <= sdxl_turbo.max_count():
+                raise HTTPException(400, f"SDXL Turbo scouts are 1 to {sdxl_turbo.max_count()} pictures, one at a time")
         first = int(seed)
         outputs = [str(folder / f"scout_s{first + i}.png") for i in range(count)] + [str(folder / "sheet.jpg")]
         return ["bash", str(scripts / "scout.sh"), prompt, str(count), str(folder)], env, outputs
@@ -1829,7 +1855,7 @@ def state() -> dict:
             "reference_audio_limit": REFERENCE_AUDIO_LIMIT, "reference_total": REFERENCE_TOTAL,
             "text_encoders": sorted(text_encoders()),
             # the picture models installed here, in the order the page offers them (IMAGE_MODELS)
-            "image_models": [{"id": k, "label": IMAGE_MODELS[k][0], "note": IMAGE_MODELS[k][1]} for k in image_models()], "sharp": SHARP if "sharp" in PRESETS and "fh8" in QUALITIES else None, "custom": {"sides": CUSTOM_SIDES, "pixels": CUSTOM_PIXELS, "steps": CUSTOM_STEPS},
+            "image_models": [image_model_card(k) for k in image_models()], "sharp": SHARP if "sharp" in PRESETS and "fh8" in QUALITIES else None, "custom": {"sides": CUSTOM_SIDES, "pixels": CUSTOM_PIXELS, "steps": CUSTOM_STEPS},
             "platform": machine()[0], "platform_label": machine()[1], "last_frame": True,
             # every clip length the model takes (lengths.py), and the longest this machine renders at each size
             "lengths": {"fps": FPS, "step": lengths.STEP, "shortest": lengths.SHORTEST, "longest": lengths.LONGEST,
@@ -1984,8 +2010,11 @@ def queue_job(body: dict) -> dict:
     if kind == "long" and (params.get("last_image") or params.get("last_same") or params.get("last_frame_from")):
         raise HTTPException(400, "a last frame is for single clips: a long video is a chain of clips")
     # After the structural checks, before ffmpeg, build and the memory guard. Export is not a generative route.
+    gate = sdxl_turbo.submission(kind, params)
+    if gate is not None and not gate["ok"]:
+        raise HTTPException(400, gate)
     blocked = capabilities.refusal(kind, SPARK)
-    if blocked:
+    if blocked and gate is None:
         raise HTTPException(400, blocked)
     if kind == "long":
         total = int(params.get("total_seconds", 0))
@@ -2485,7 +2514,7 @@ app.include_router(hf_gate.attach(lambda request: agents.local(request, True)))
 app.include_router(lineart.attach(HOME))
 import picture_edit  # noqa: E402  (a picture re-drawn by the image model, with the hub's image LoRAs)
 edit_router, edit_build = picture_edit.attach(HOME, PACK, SPARK, lora_resolve, inside, relative,
-                                              lambda: [{"id": k, "label": IMAGE_MODELS[k][0], "note": IMAGE_MODELS[k][1]} for k in image_models()])
+                                              lambda: [image_model_card(k) for k in image_models()])
 app.include_router(edit_router)
 import pace  # noqa: E402  (whether a clip's sound and motion agree, beside this file)
 import negation  # noqa: E402  (what a prompt forbids by name, shown before a job is queued, beside this file)

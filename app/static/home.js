@@ -63,7 +63,14 @@ const hcRecipe = () => { const r = HC.recipe || homePrefs().presets.recipe; retu
 const hcPictureModel = () => { const want = homePrefs().presets.image_model;
   if (S && Array.isArray(S.image_models)) { const have = S.image_models.map(m => m.id); if (!have.length) return ""; return have.includes(want) ? want : have[0]; }
   return want || "qwen"; };
+// SDXL Turbo is not Qwen. The chip names the model the server actually lists.
+const pictureBadge = () => { const model = hcPictureModel();
+  if (model === "sdxl-turbo") return el("span", { class: "mk" }, "SDXL Turbo");
+  if (/^flux/.test(model)) return typeof mark === "function" ? mark("flux", "FLUX3-K") : "FLUX3-K";
+  return typeof mark === "function" ? mark("qwen", "Qwen 2.1") : "Qwen 2.1"; };
 function hcBlock(mode) { if (typeof routeBlock !== "function") return null;
+  // SDXL Turbo is one measured still. Video, voice, and music stay on the machine route.
+  if (mode === "picture" && hcPictureModel() === "sdxl-turbo") return null;
   const kind = mode === "picture" ? "scout" : mode === "voice" ? "voice" : mode === "song" ? "music" : (hcLongs()[hcSeconds()] ? "long" : "video");
   return routeBlock(kind); }
 const hcSeed = () => typeof prefSeed === "function" ? prefSeed() : 1;
@@ -131,7 +138,7 @@ function homeComposer() {
   return el("section", { class: "composer", id: "composer" },
     el("div", { class: "cmp-modes", role: "tablist", "aria-label": "What to make" }, Object.entries(HC_MODES).map(([id, [label, mk, model]]) =>
       el("button", { type: "button", role: "tab", "data-mode": id, "aria-selected": mode === id ? "true" : "false", class: "cmp-mode" + (mode === id ? " on" : ""), onclick: () => { HC.mode = id; render(); } },
-        el("b", {}, label), typeof mark === "function" ? mark(id === "picture" && /^flux/.test(hcPictureModel()) ? "flux" : mk, id === "picture" && /^flux/.test(hcPictureModel()) ? "FLUX3-K" : model) : model))),
+        el("b", {}, label), id === "picture" ? pictureBadge() : (typeof mark === "function" ? mark(mk, model) : model)))),
     area, el("div", { class: "cmp-hint" }, hint),
     el("div", { class: "cmp-bar" },
       el("button", { type: "button", class: "primary cmp-go", disabled: HC.busy || !!hcBlock(mode), title: hcBlock(mode) || "", onclick: () => hcGenerate() }, HC.busy ? "Queuing…" : "Generate", el("kbd", {}, "⌘↵")),

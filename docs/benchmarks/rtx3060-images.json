@@ -1,0 +1,64 @@
+{
+  "ok": false,
+  "model": "sdxl-turbo",
+  "enabled": false,
+  "reasons": [
+    {
+      "code": "busy_renderer",
+      "reason": "Another process holds the GPU. Studio does not stop it or submit work to it."
+    }
+  ],
+  "code": "busy_renderer",
+  "reason": "Another process holds the GPU. Studio does not stop it or submit work to it.",
+  "checkpoint": {
+    "file": "sd_xl_turbo_1.0_fp16.safetensors",
+    "bytes": 6938081905,
+    "expected_bytes": 6938081905,
+    "sha256": "e869ac7d6942cb327d68d5ed83a40447aadf20e0c3358d98b2cc9e270db0da26",
+    "sha256_source": "phase 0; this run checked the file size and did not read the file",
+    "license": "Stability AI Non-Commercial Research Community License",
+    "path": "/home/mcpadmin/ComfyUI/models/checkpoints/sd_xl_turbo_1.0_fp16.safetensors"
+  },
+  "recipe": {
+    "width": 512,
+    "height": 512,
+    "steps": 1,
+    "cfg": 1.0,
+    "max_count": 1,
+    "batch_size": 1,
+    "sampler": "euler_ancestral",
+    "scheduler": "sgm_uniform"
+  },
+  "host_available_mb": 13622,
+  "host_total_mb": 15976,
+  "floor_mb": 8000,
+  "vram_free_mib": 11653,
+  "vram_need_mib": 6617,
+  "vram_reserve_mib": 512,
+  "cgroup": {
+    "known": true,
+    "cap": false,
+    "headroom_mb": null,
+    "pressure_full_avg10": 0.0
+  },
+  "gpu_processes": [
+    {
+      "pid": 897018,
+      "name": "/home/mcpadmin/ComfyUI/.venv/bin/python",
+      "vram_mib": 250
+    }
+  ],
+  "comfy_pinned": "b9b290e43f1eb379946dfeb013faf9bbefa1a618",
+  "attention": "pytorch",
+  "precision": "fp16",
+  "render": null,
+  "comfy_installed": "e0a32bce84f4603f2b61b16b50f8958e68fd6171",
+  "attention_flag": true,
+  "fp16_unet_flag": true,
+  "gpu_name": "NVIDIA GeForce RTX 3060",
+  "gpu_uuid": "GPU-82f380a9-0f75-b3d3-8db7-4045bd2dfaeb",
+  "gpu_memory_mib": 12288,
+  "driver": "595.84",
+  "comfy_spark_attention": "--use-ck-attention",
+  "note": "No render ran. The profile stays disabled. Another process holds the GPU and was left running. Host available 13622 MB is at or above the 8000 MB floor. Free VRAM 11653 MiB covers the 6617 MiB checkpoint plus the 512 MiB reserve. Studio does not stop another process or submit work to the shared renderer."
+}

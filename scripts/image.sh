@@ -6,6 +6,7 @@
 #   IMAGE_MODEL=flux3k-fast bash scripts/image.sh "a prompt" out.png   # FLUX3-K Fast (16 steps); flux3k-full: 50 steps
 #   IMAGE_MODEL=qwen-full bash scripts/image.sh "a prompt" out.png     # Qwen 2.1 Full: the base model, 40 steps at CFG 4
 #   IMAGE_MODEL=moss-image bash scripts/image.sh "a prompt" out.png    # MOSS-Image, 25 steps (DGX Spark only)
+#   IMAGE_MODEL=sdxl-turbo bash scripts/image.sh "a prompt" out.png   # SDXL Turbo, 512x512, only with a measured profile
 # Environment: PREFIX, QWEN_MODEL_DIR (Qwen-Image-2.1-Turbo: 8 steps on the schedule saved with the checkpoint),
 # QWEN_BASE_DIR (Qwen-Image-2.1, for TURBO=0), TURBO, STEPS (base model only, default 40), WIDTH, HEIGHT (multiples
 # of 16), SEED, EXTRA (extra flags), QWEN_CFG (base model only, default 4; 1 runs it without guidance). An install from before 2.3 has the base model at QWEN_MODEL_DIR: it keeps
@@ -14,7 +15,12 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # App-only stops here. A Mac and a DGX Spark continue, and Linux that is a Spark still hands over below.
-bash "$HERE/require-route.sh" scout
+# SDXL Turbo is its own route: it stays stopped until a measured profile enables it.
+if [ "${IMAGE_MODEL:-qwen}" = "sdxl-turbo" ]; then
+  bash "$HERE/require-route.sh" sdxl-turbo
+else
+  bash "$HERE/require-route.sh" scout
+fi
 # On a DGX Spark (Linux, CUDA) the same interface is served by spark/image.sh.
 [ "$(uname -s)" != Linux ] || exec bash "$HERE/../spark/image.sh" "$@"
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"
@@ -40,6 +46,7 @@ case "${IMAGE_MODEL:-qwen}" in
     # shellcheck disable=SC2086
     exec "$PREFIX/flux3-venv/bin/python" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/flux3_generate.py" "${ARGS[@]}" ${EXTRA:-};;
   moss-image) echo "MOSS-Image runs on a DGX Spark (ComfyUI): there is no Mac build of it yet" >&2; exit 1;;
+  sdxl-turbo) echo "SDXL Turbo runs on the measured RTX machine through its owned renderer." >&2; exit 1;;
   qwen) ;;
   qwen-full) TURBO=0;;
   *) echo "IMAGE_MODEL is qwen, qwen-full, flux3k-fast, flux3k-full or moss-image, not ${IMAGE_MODEL}" >&2; exit 2;;

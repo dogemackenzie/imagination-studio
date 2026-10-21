@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import hardware
 
@@ -179,6 +180,16 @@ def script_exit(kind: str) -> int:
     before a script hands the job to spark/.
     """
 
+    if kind == "sdxl-turbo":
+        spark = Path(__file__).resolve().parent.parent / "spark"
+        if str(spark) not in sys.path:
+            sys.path.insert(0, str(spark))
+        import sdxl_turbo
+        reason = sdxl_turbo.script_block()
+        if reason is None:
+            return 0
+        sys.stderr.write(reason + "\n")
+        return 1
     detail = refusal(kind, hardware.is_spark())
     if detail is None:
         return 0

@@ -30,6 +30,8 @@ VRAM_RESERVE_MIB = 512
 PRESSURE_FULL_AVG10 = 5.0
 VRAM_CACHE_S = 1.0
 PROTECTED_PORTS = {8188}
+# The measured RTX route also refuses the shared host port and the other studio's published renderer.
+MEASURED_FORBIDDEN_PORTS = {8188, 8190}
 
 REASONS = {
     "insufficient_memory": "Available host memory is under the 8000 MB floor, so a render cannot start.",
@@ -416,7 +418,30 @@ def block_foreign_render(spark: bool | None = None) -> str | None:
     found = decide(collect())
     if found["ok"]:
         return None
+    # A measured SDXL Turbo route may pass the empty-profile gate. Every other refusal still stands,
+    # and the shared renderer ports stay closed.
+    if found["code"] == "unmeasured_configuration" and _sdxl_measured_open():
+        return measured_url_block()
     return found["reason"]
+
+
+def _sdxl_measured_open() -> bool:
+    if os.environ.get("RTX_MEASURED_ROUTE", "").strip() != "sdxl-turbo":
+        return False
+    if os.environ.get("RTX_SDXL_CALIBRATE", "").strip() == "1":
+        return True
+    import sdxl_turbo
+    return sdxl_turbo.offered()
+
+
+def measured_url_block() -> str | None:
+    """A reason to refuse the measured route's renderer URL. None when the URL is an owned loopback port."""
+
+    url = os.environ.get("SPARK_COMFY_URL") or (
+        "http://127.0.0.1:" + os.environ.get("SPARK_COMFY_PORT", "8190"))
+    if protected(url) or port_of(url) in MEASURED_FORBIDDEN_PORTS:
+        return REASONS["protected_endpoint"]
+    return None
 
 
 def _host_sample() -> tuple[int | None, int | None]:

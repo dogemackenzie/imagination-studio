@@ -14,6 +14,15 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"
+# SDXL Turbo does not use the Spark venv or comfy.sh. The owned renderer is a separate process.
+if [ "${IMAGE_MODEL:-qwen}" = "sdxl-turbo" ]; then
+  PROMPT="${1:-}"; OUT="${2:-outputs/image.png}"
+  PY="${STUDIO_PYTHON:-python3}"
+  ARGS=(image --model sdxl-turbo -o "$OUT" --width "${WIDTH:-512}" --height "${HEIGHT:-512}" --seed "${SEED:-0}")
+  if [ -n "${PROMPT_FILE:-}" ]; then ARGS+=(--prompt-file "$PROMPT_FILE"); else ARGS+=(--prompt "$PROMPT"); fi
+  # shellcheck disable=SC2086
+  exec "$PY" "$HERE/spark_generate.py" "${ARGS[@]}" ${EXTRA:-}
+fi
 [ -x "$PREFIX/venv/bin/python" ] || { echo "run oneshot-setup-spark.sh first: no environment at $PREFIX" >&2; exit 1; }
 PROMPT="${1:-}"; OUT="${2:-outputs/image.png}"
 [ "${IMAGE_MODEL:-qwen}" != qwen-full ] || { export IMAGE_MODEL=qwen; TURBO=0; }

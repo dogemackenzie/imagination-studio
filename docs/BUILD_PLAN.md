@@ -226,6 +226,18 @@ First candidate: the existing SDXL Turbo FP16 checkpoint. Start at 512x512, batc
 
 **Acceptance:** repeated completed outputs open correctly; memory stays above every floor; no unrelated workload is interrupted; output metadata identifies the real model and settings; measured limits are enforced at submission and load. If the first candidate cannot fit, stop at the working app release and record the limiting budget before considering another existing model or hardware change.
 
+Recorded 2026-10-21. The route is `spark/sdxl_turbo.py`. `docs/benchmarks/rtx3060-images.json` stays `enabled` false and `render` null. No image was produced. Ordinary image submissions stay disabled. The published container was not rebuilt.
+
+The checkpoint size matches 6,938,081,905 bytes at `/home/mcpadmin/ComfyUI/models/checkpoints/sd_xl_turbo_1.0_fp16.safetensors`. The sha256 is the Phase 0 value; this run checked the size and did not read the file. The licence is the Stability AI Non-Commercial Research Community License. The recipe is 512×512, one step, ComfyUI cfg 1.0 (conditional only; Diffusers `guidance_scale` 0.0 is a different setting), `euler_ancestral`, `sgm_uniform`, batch size 1, and a count of 1. Attention is PyTorch and precision is fp16. Spark's `--use-ck-attention` is unchanged. The pinned ComfyUI revision is `b9b290e43f1eb379946dfeb013faf9bbefa1a618`. The installed shared tree is `e0a32bce84f4603f2b61b16b50f8958e68fd6171` and was not checked out or modified.
+
+`python3 spark/sdxl_turbo.py calibrate --record docs/benchmarks/rtx3060-images.json` exited 1 with `busy_renderer`. Host available 13622 MB of 15976 MB is at or above the 8000 MB floor. Free VRAM 11653 MiB covers the 6617 MiB checkpoint plus the 512 MiB reserve. The limit is the shared process, pid 897018 (`/home/mcpadmin/ComfyUI/.venv/bin/python`, 250 MiB). It was left running. The owned renderer on `127.0.0.1:8191` was not started. Ports 8188 and 8190 stay refused for this route. `local_render` stays false. Scout and video routes stay disabled. On this host the lead reason stays `unmeasured_configuration`.
+
+Full suite (`pytest tests`, pytest 9.1.1, `--timeout=240`): **672 passed, 8 skipped, 0 failed**, 159.38 s. Exit 0. Log `/tmp/phase5-suite.log`. The 8 skips match Phase 1.
+
+A temporary loopback server, with an enabled profile that is not the committed file, showed Home's Picture chip as SDXL Turbo and left Picture Generate enabled. Clip, Voice, and Song Generate stayed disabled. More options opened Create at 512×512, count 1, with Make image enabled and the one-step note. Make image was not clicked. With the committed disabled profile, `image_models` stays empty and those controls stay closed. A saved Qwen id on Create stays on the closed scout sizes until the listed SDXL Turbo card is chosen.
+
+The next step is one minimal render when pid 897018 is not holding the GPU and a fresh probe still clears both budgets. Leave that process running. Phase 6 stays waiting. The profile stays disabled until that render is measured.
+
 ## Phase 6 Add optional remote H3 video
 
 **Dependency:** a real capable worker, user-provided SSH access, matching Studio code, and its own verified memory guard. This phase is independent of local image benchmarking once Phases 1–3 are complete.
@@ -290,4 +302,4 @@ The first useful release is A–D plus the app-only parts of H. GPU validation m
 
 ## Immediate next work
 
-Phase 4 is done. Start Phase 5 (validate the existing SDXL Turbo checkpoint under the guarded route, and record a measured profile before enabling it). Image submissions stay disabled until that profile exists. Do not lower the 8000 MB floor. Do not send a job to the shared ComfyUI. The app container stays `imagination-studio-app:4718c9e` on `127.0.0.1:7870` and `192.168.50.22:7870`. Preserve the shared ComfyUI service, its model files, and the container that publishes port 8190.
+Phase 5 recorded the SDXL Turbo route and left `docs/benchmarks/rtx3060-images.json` disabled. Host available 13622 MB and free VRAM 11653 MiB cleared the checkpoint budget. Pid 897018 still holds the GPU, so no render ran and image submissions stay off. The next step is one minimal render when that process is not holding the GPU and a fresh probe still clears the 8000 MB floor and the 512 MiB VRAM reserve. Leave the shared ComfyUI running. Phase 6 waits. The app container stays `imagination-studio-app:4718c9e` on `127.0.0.1:7870` and `192.168.50.22:7870`. Preserve the shared ComfyUI service, its model files, and the container that publishes port 8190.

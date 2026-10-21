@@ -1166,6 +1166,10 @@ def sound(args) -> None:
 
 
 def image(args) -> None:
+    if args.model == "sdxl-turbo":
+        import sdxl_turbo
+        sdxl_turbo.render_images(args, prompt_of(args), render, fetch, URL)
+        return
     for name, value in (("width", args.width), ("height", args.height)):
         if value % 16:
             sys.exit(f"--{name} must be a multiple of 16, got {value}")
@@ -1279,10 +1283,11 @@ def main() -> None:
     i.add_argument("-o", "--output", required=True)
     i.add_argument("--width", type=int, default=1344); i.add_argument("--height", type=int, default=768)
     i.add_argument("--seed", type=int, default=0); i.add_argument("--seeds", default="", help="several pictures: 1,2,3")
-    i.add_argument("--model", choices=("qwen", *FLUX3, *MOSS), default=os.environ.get("IMAGE_MODEL") or "qwen",
+    i.add_argument("--model", choices=("qwen", *FLUX3, *MOSS, "sdxl-turbo"), default=os.environ.get("IMAGE_MODEL") or "qwen",
                    help="qwen: Qwen-Image-2.1-Turbo (the default); flux3k-fast: FLUX3-K distilled, 16 steps; "
                         "flux3k-full: FLUX3-K base, 50 steps at CFG 3.5 (oneshot-setup-spark.sh --flux3); "
-                        "moss-image: MOSS-Image SFT, 25 steps at CFG 2.5 (oneshot-setup-spark.sh --moss)")
+                        "moss-image: MOSS-Image SFT, 25 steps at CFG 2.5 (oneshot-setup-spark.sh --moss); "
+                        "sdxl-turbo: the measured RTX still, 512x512, 1 step, only when its profile is enabled")
     i.add_argument("--no-upsample", dest="upsample", action="store_false",
                    help="FLUX3-K: send the prompt as written (a full scene caption) instead of BFL's prompt upsampler's")
     i.add_argument("--base", action="store_true", help="the base model without the turbo adapter")

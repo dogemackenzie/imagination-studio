@@ -8,8 +8,12 @@
 # is what the video model starts from for a 2560x1440 clip, so a scout is exactly the frame the clip will open on.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Before image.sh, so a scout is refused as a scout.
-bash "$HERE/require-route.sh" scout
+# Before image.sh, so a scout is refused as a scout. SDXL Turbo is refused on its own route until measured.
+if [ "${IMAGE_MODEL:-}" = "sdxl-turbo" ]; then
+  bash "$HERE/require-route.sh" sdxl-turbo
+else
+  bash "$HERE/require-route.sh" scout
+fi
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"
 PROMPT="${1:-}"; COUNT="${2:-4}"; DIR="${3:-outputs/scout}"
 FIRST="${SEED:-1}"
