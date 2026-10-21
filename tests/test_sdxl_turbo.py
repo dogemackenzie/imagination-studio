@@ -1,7 +1,7 @@
 """SDXL Turbo on this RTX machine (spark/sdxl_turbo.py).
 
-No shared ComfyUI, no download, and no render. A measured profile in a test is a tiny stand-in file.
-The real checkpoint is not read. An allowed scout is built and not queued.
+Tests never open a socket to the shared ComfyUI. A measured profile in a test is a tiny stand-in
+file. The real checkpoint is not read. An allowed scout is built and not queued.
 """
 import json
 import os
@@ -94,23 +94,16 @@ def test_the_workflow_keeps_the_prompt_and_uses_cfg_one():
         S.workflow(PROMPT, 1, 768, 768)
 
 
-def test_the_owned_command_is_outside_the_shared_install_and_not_a_second_start(tmp_path, monkeypatch):
+def test_a_still_only_posts_a_prompt_to_the_shared_server(monkeypatch):
     source = (ROOT / "spark/sdxl_turbo.py").read_text()
-    assert "main.py --listen" not in source
-    root = tmp_path / "ComfyUI"
-    (root / ".venv/bin").mkdir(parents=True)
-    monkeypatch.setattr(S, "comfy_root", lambda: root)
-    state = tmp_path / "state"
-    argv = S.launch_argv(state)
-    assert argv[1:6] == ["main.py", "--listen", "127.0.0.1", "--port", "8191"]
-    assert "--use-pytorch-cross-attention" in argv and "--fp16-unet" in argv
-    assert "--fp16-vae" not in argv and "--use-ck-attention" not in argv
-    joined = " ".join(argv)
-    assert "0.0.0.0" not in joined and "8188" not in joined and "8190" not in joined and "comfy.sh" not in joined
-    assert (state / "output").is_dir() and (state / "user").is_dir()
-    for banned in (root, root / "output", tmp_path):
+    assert "main.py --listen" not in source and "comfy.sh" not in source
+    def boom(*args, **kwargs):
+        raise AssertionError("a lifecycle call opened a socket")
+    monkeypatch.setattr(S.urllib.request, "urlopen", boom)
+    for method, path, payload in (("POST", "/interrupt", {}), ("POST", "/free", {}), ("DELETE", "/queue", None),
+                                  ("POST", "/prompt", None), ("GET", "/interrupt", None)):
         with pytest.raises(RuntimeError):
-            S.launch_argv(banned)
+            S.exchange(method, path, payload)
 
 
 def test_the_model_stays_unoffered_without_a_matching_profile(tmp_path, monkeypatch):
@@ -137,23 +130,33 @@ def test_a_clear_budget_does_not_enable_the_model(tmp_path, monkeypatch):
     weight.write_bytes(b"x")
     monkeypatch.setattr(S, "BYTES", 1)
     monkeypatch.setattr(S, "checkpoint_path", lambda: weight)
-    monkeypatch.setattr(S, "gpu_processes", lambda: [])
+    monkeypatch.setattr(S, "listener_pids", lambda: {4242})
+    monkeypatch.setattr(S, "gpu_processes", lambda: [{"pid": 4242, "name": "python", "vram_mib": 250}])
     monkeypatch.setattr(S.rtx_admit, "collect", lambda: budgets())
     report = S.assess()
     assert report["ok"] is True and report["enabled"] is False and report["render"] is None
-    monkeypatch.setattr(S, "gpu_processes", lambda: [{"pid": os.getpid() + 1, "name": "python", "vram_mib": 9}])
+    assert report["shared_pids"] == [4242] and report["shared_url"] == "http://127.0.0.1:8188"
+    monkeypatch.setattr(S, "gpu_processes", lambda: [
+        {"pid": 4242, "name": "python", "vram_mib": 250},
+        {"pid": os.getpid() + 1, "name": "python", "vram_mib": 9}])
     busy = S.assess()
     assert busy["ok"] is False and busy["enabled"] is False and busy["code"] == "busy_renderer"
+    monkeypatch.setattr(S, "listener_pids", lambda: set())
+    assert S.assess()["code"] == "renderer_down"
+    monkeypatch.setattr(S, "listener_pids", lambda: {4242})
     monkeypatch.setattr(S, "gpu_processes", lambda: None)
     assert S.assess()["code"] == "missing_telemetry"
-    monkeypatch.setattr(S, "gpu_processes", lambda: [])
+    monkeypatch.setattr(S, "listener_pids", lambda: {4242})
+    monkeypatch.setattr(S, "gpu_processes", lambda: [{"pid": 4242, "name": "python", "vram_mib": 250}])
     monkeypatch.setattr(S.rtx_admit, "collect", lambda: budgets(host_available_mb=1000))
     low = S.assess()
     assert low["code"] == "insufficient_memory" and low["enabled"] is False
     assert memory_guard.ESTIMATES == {"int8": (54_500, 215), "int8-lora": (54_500, 215), "bf16": (75_000, 47)}
 
 
-def test_the_queue_refuses_sdxl_until_a_profile_exists():
+def test_the_queue_refuses_sdxl_until_a_profile_exists(tmp_path, monkeypatch):
+    # The committed profile may be enabled. This test pins a missing one so it cannot enqueue a real still.
+    monkeypatch.setenv("SDXL_PROFILE", str(tmp_path / "missing.json"))
     before = set(server.jobs)
     scout = client.post("/api/jobs", json={"kind": "scout", "params": {
         "prompt": PROMPT, "image_model": "sdxl-turbo", "count": 1, "width": 512, "height": 512}})
@@ -222,40 +225,49 @@ def test_an_offered_still_is_512_and_does_not_open_video(measured):
     assert "512x512" in str(caught.value.detail)
 
 
-def test_render_images_asks_the_owned_port_and_does_not_open_a_protected_one(tmp_path, monkeypatch):
-    path = tmp_path / "profile.json"
-    path.write_text(json.dumps({"enabled": False, "model": "sdxl-turbo", "recipe": recipe(max_count=2),
-                                 "checkpoint": {"bytes": 1}}))
-    monkeypatch.setenv("SDXL_PROFILE", str(path))
+def _png(width: int, height: int) -> bytes:
+    data = bytearray(b"\x89PNG\r\n\x1a\n" + b"\0" * 16)
+    data[16:20] = width.to_bytes(4, "big")
+    data[20:24] = height.to_bytes(4, "big")
+    return bytes(data)
+
+
+def test_render_images_posts_one_prompt_and_leaves_a_busy_queue_alone(tmp_path, monkeypatch):
     monkeypatch.setenv("RTX_SDXL_CALIBRATE", "1")
-    monkeypatch.setenv("RTX_ADMIT_SPARK", "0")
-    monkeypatch.setattr(S.rtx_admit, "allow", lambda url: {"ok": True, "reason": ""})
-    seen = []
+    monkeypatch.setattr(S, "assess", lambda: {"ok": True, "reason": ""})
+    calls = []
 
-    def render(graph, sampler):
-        seen.append((graph["2"]["inputs"]["text"], graph["5"]["inputs"]["seed"], sampler))
-        return {"filename": "x"}, 0.2
+    def exchange(method, path, payload=None, timeout=30):
+        calls.append((method, path))
+        if path == "/queue":
+            return {"queue_running": [], "queue_pending": []}
+        if path == "/prompt":
+            assert method == "POST" and payload["prompt"]["2"]["inputs"]["text"] == PROMPT
+            assert payload["prompt"]["5"]["inputs"]["seed"] == 4
+            return {"prompt_id": "p1"}
+        if path == "/history/p1":
+            return {"p1": {"status": {"completed": True, "status_str": "success"},
+                           "outputs": {"7": {"images": [{"filename": "studio-sdxl_00001_.png", "subfolder": "", "type": "output"}]}}}}
+        if path.startswith("/view?"):
+            return _png(512, 512)
+        raise AssertionError(path)
 
-    def fetch(item, out):
-        seen.append(str(out))
+    monkeypatch.setattr(S, "exchange", exchange)
+    out = tmp_path / "out.png"
+    made = S.render_images(Args(seed=4, output=str(out)), PROMPT, None, None, "http://127.0.0.1:8190")
+    assert out.read_bytes().startswith(b"\x89PNG") and made[0]["seed"] == 4 and made[0]["url"] == S.SHARED_URL
+    assert calls == [("GET", "/queue"), ("POST", "/prompt"), ("GET", "/history/p1"), ("GET", "/view?filename=studio-sdxl_00001_.png&subfolder=&type=output")]
+    assert "/interrupt" not in [path for _, path in calls] and "/free" not in [path for _, path in calls]
 
-    try:
-        with pytest.raises(SystemExit) as caught:
-            S.render_images(Args(), PROMPT, render, fetch, "http://127.0.0.1:8190")
-        assert "protected" in str(caught.value).lower()
-        with pytest.raises(SystemExit):
-            S.render_images(Args(), PROMPT, render, fetch, "http://127.0.0.1:8188")
-        assert seen == []
-        S.render_images(Args(seeds="4,5", output=str(tmp_path / "out.png")), PROMPT, render, fetch,
-                        "http://127.0.0.1:8191")
-        assert [row[0] for row in seen if isinstance(row, tuple)] == [PROMPT, PROMPT]
-        assert [row[1] for row in seen if isinstance(row, tuple)] == [4, 5]
-        monkeypatch.setattr(S.rtx_admit, "allow", lambda url: {"ok": False, "reason": "not owned"})
-        with pytest.raises(SystemExit) as caught:
-            S.render_images(Args(seed=9), PROMPT, render, fetch, "http://127.0.0.1:8191")
-        assert "not owned" in str(caught.value)
-    finally:
-        os.environ.pop("RTX_MEASURED_ROUTE", None)
+    def busy(method, path, payload=None, timeout=30):
+        calls.append((method, path))
+        return {"queue_running": [[1, "other"]], "queue_pending": []}
+
+    monkeypatch.setattr(S, "exchange", busy)
+    with pytest.raises(SystemExit) as caught:
+        S.render_images(Args(output=str(out)), PROMPT, None, None, "http://127.0.0.1:8188")
+    assert "queue" in str(caught.value).lower()
+    assert calls[-1] == ("GET", "/queue")
 
 
 def test_the_measured_route_does_not_open_a_shared_port(monkeypatch):
@@ -302,7 +314,7 @@ def test_the_scripts_stop_before_a_render(tmp_path):
     start = script.index('if [ "${IMAGE_MODEL:-qwen}" = "sdxl-turbo" ]; then')
     block = script[start:script.index("\nfi\n", start)]
     assert "comfy.sh" not in block and "spark_generate.py" in block
-    assert "owned renderer" in (ROOT / "scripts/image.sh").read_text()
+    assert "shared ComfyUI" in (ROOT / "scripts/image.sh").read_text()
 
 
 def test_the_home_composer_names_sdxl_and_leaves_video_closed():

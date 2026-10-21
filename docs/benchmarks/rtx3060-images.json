@@ -1,15 +1,10 @@
 {
-  "ok": false,
+  "ok": true,
   "model": "sdxl-turbo",
-  "enabled": false,
-  "reasons": [
-    {
-      "code": "busy_renderer",
-      "reason": "Another process holds the GPU. Studio does not stop it or submit work to it."
-    }
-  ],
-  "code": "busy_renderer",
-  "reason": "Another process holds the GPU. Studio does not stop it or submit work to it.",
+  "enabled": true,
+  "reasons": [],
+  "code": "",
+  "reason": "",
   "checkpoint": {
     "file": "sd_xl_turbo_1.0_fp16.safetensors",
     "bytes": 6938081905,
@@ -29,7 +24,7 @@
     "sampler": "euler_ancestral",
     "scheduler": "sgm_uniform"
   },
-  "host_available_mb": 13622,
+  "host_available_mb": 13667,
   "host_total_mb": 15976,
   "floor_mb": 8000,
   "vram_free_mib": 11653,
@@ -48,10 +43,31 @@
       "vram_mib": 250
     }
   ],
+  "shared_pids": [
+    897018
+  ],
+  "shared_url": "http://127.0.0.1:8188",
   "comfy_pinned": "b9b290e43f1eb379946dfeb013faf9bbefa1a618",
   "attention": "pytorch",
   "precision": "fp16",
-  "render": null,
+  "render": {
+    "output": "/home/mcpadmin/ImaginationStudio/sdxl-turbo/still_s1.png",
+    "engine": "cuda",
+    "model": "sdxl-turbo",
+    "width": 512,
+    "height": 512,
+    "seed": 1,
+    "steps": 1,
+    "cfg": 1.0,
+    "sampler": "euler_ancestral",
+    "scheduler": "sgm_uniform",
+    "prompt_id": "24757f89-dd49-404b-960b-8cfd462bab86",
+    "bytes": 267932,
+    "total_s": 51.8,
+    "url": "http://127.0.0.1:8188",
+    "host_available_mb_min": 6654,
+    "vram_free_mib_min": 4697
+  },
   "comfy_installed": "e0a32bce84f4603f2b61b16b50f8958e68fd6171",
   "attention_flag": true,
   "fp16_unet_flag": true,
@@ -60,5 +76,5 @@
   "gpu_memory_mib": 12288,
   "driver": "595.84",
   "comfy_spark_attention": "--use-ck-attention",
-  "note": "No render ran. The profile stays disabled. Another process holds the GPU and was left running. Host available 13622 MB is at or above the 8000 MB floor. Free VRAM 11653 MiB covers the 6617 MiB checkpoint plus the 512 MiB reserve. Studio does not stop another process or submit work to the shared renderer."
+  "note": "One still finished on the shared ComfyUI at 127.0.0.1:8188. Studio did not start, stop, interrupt, or unload that server. During the load, host available fell to 6654 MB, under the 8000 MB floor. The floor was not lowered. A later still still has to clear it before it is submitted."
 }

@@ -14,7 +14,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"
-# SDXL Turbo does not use the Spark venv or comfy.sh. The owned renderer is a separate process.
+# SDXL Turbo does not use the Spark venv or comfy.sh. It submits one prompt to the shared ComfyUI.
 if [ "${IMAGE_MODEL:-qwen}" = "sdxl-turbo" ]; then
   PROMPT="${1:-}"; OUT="${2:-outputs/image.png}"
   PY="${STUDIO_PYTHON:-python3}"

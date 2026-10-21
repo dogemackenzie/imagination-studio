@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""SDXL Turbo on this RTX machine, through an owned ComfyUI. No standalone inference.
+"""SDXL Turbo on this RTX machine, as one prompt to the shared ComfyUI. No standalone inference.
 
-The checkpoint is the existing fp16 file. Nothing here downloads, moves, or hashes it while host
-memory is under the floor. Diffusers ``guidance_scale=0.0`` is not ComfyUI's ``cfg``. ComfyUI's
-sampler uses ``uncond + cfg * (cond - uncond)`` and skips the unconditional pass when cfg is 1, so
-the recipe's cfg is 1.0. cfg 0 would keep only the empty negative.
+The checkpoint is the existing fp16 file. Nothing here downloads, moves, or hashes it. Diffusers
+``guidance_scale=0.0`` is not ComfyUI's ``cfg``. ComfyUI's sampler uses ``uncond + cfg * (cond -
+uncond)`` and skips the unconditional pass when cfg is 1, so the recipe's cfg is 1.0. cfg 0 would
+keep only the empty negative.
 
-The model stays unoffered until a profile with ``enabled`` true records a finished render. A
-calibration run refuses while another process holds the GPU or a budget fails. It does not stop
-that process, and it does not talk to ports 8188 or 8190.
+The shared server is already running at http://127.0.0.1:8188. A still is a POST to ``/prompt``
+when its queue is empty. This module does not start, stop, interrupt, unload, or clear that
+server, and it does not launch a second one. Spark's own ``call()`` still refuses port 8188.
+
+The model stays unoffered until a profile with ``enabled`` true records a finished render.
 """
 from __future__ import annotations
 
@@ -16,6 +18,10 @@ import json
 import os
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import rtx_admit
@@ -38,8 +44,9 @@ BATCH = 1
 MAX_COUNT = 4
 WEIGHT_MIB = (BYTES + 1024 * 1024 - 1) // (1024 * 1024)
 PINNED_COMFY = "b9b290e43f1eb379946dfeb013faf9bbefa1a618"
-PORT = 8191
-LISTEN = "127.0.0.1"
+SHARED_URL = "http://127.0.0.1:8188"
+SHARED_PORT = 8188
+WAIT_S = 600
 
 
 def profile_path() -> Path:
@@ -191,25 +198,86 @@ def comfy_root() -> Path:
     return Path(os.environ.get("SDXL_COMFY_ROOT", Path.home() / "ComfyUI")).expanduser()
 
 
-def launch_argv(state: Path) -> list[str]:
-    """An owned ComfyUI on loopback. Writable directories stay outside the shared install."""
+def listener_pids(port: int = SHARED_PORT) -> set[int] | None:
+    """Pids listening on 127.0.0.1:port. None when the table cannot be read. This does not signal them."""
 
-    state = state.resolve()
-    root = comfy_root().resolve()
-    if state == root or root in state.parents or state in root.parents:
-        raise RuntimeError("the owned renderer state must sit outside the shared ComfyUI install")
-    for name in ("output", "input", "temp", "user"):
-        (state / name).mkdir(parents=True, exist_ok=True)
-    python = Path(os.environ.get("SDXL_COMFY_PYTHON", root / ".venv" / "bin" / "python"))
-    return [
-        str(python), "main.py",
-        "--listen", LISTEN, "--port", str(PORT),
-        "--output-directory", str(state / "output"),
-        "--input-directory", str(state / "input"),
-        "--temp-directory", str(state / "temp"),
-        "--user-directory", str(state / "user"),
-        "--use-pytorch-cross-attention", "--fp16-unet",
-    ]
+    try:
+        text = Path("/proc/net/tcp").read_text(errors="replace")
+    except OSError:
+        return None
+    inodes = set()
+    want = f"{port:04X}"
+    for line in text.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 10:
+            continue
+        local, state, inode = parts[1], parts[3], parts[9]
+        addr, _, phex = local.partition(":")
+        if state == "0A" and addr.upper() == "0100007F" and phex.upper() == want:
+            inodes.add(inode)
+    if not inodes:
+        return set()
+    found = set()
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            descriptors = list((entry / "fd").iterdir())
+        except OSError:
+            continue
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(descriptor)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target.endswith("]") and target[8:-1] in inodes:
+                found.add(int(entry.name))
+                break
+    return found
+
+
+def exchange(method: str, path: str, payload: dict | None = None, timeout: float = 30):
+    """One read, or a POST to /prompt. Anything else is refused before a socket opens."""
+
+    if method == "GET":
+        allowed = path in ("/queue", "/system_stats") or path.startswith("/history/") or path.startswith("/view?")
+        if payload is not None or not allowed:
+            raise RuntimeError("that shared ComfyUI request is not a still")
+    elif method == "POST" and path == "/prompt" and payload is not None:
+        allowed = True
+    else:
+        raise RuntimeError("Studio does not start, stop, interrupt, unload, or clear the shared ComfyUI")
+    request = urllib.request.Request(
+        SHARED_URL + path, data=None if payload is None else json.dumps(payload).encode(),
+        method=method, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as reply:
+            body = reply.read()
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode(errors="replace")[:500]
+        raise RuntimeError(f"the shared ComfyUI answered {error.code}: {detail}") from None
+    except OSError as error:
+        raise RuntimeError(f"the shared ComfyUI at {SHARED_URL} did not answer: {error}") from None
+    if path.startswith("/view?"):
+        return body
+    return json.loads(body) if body else {}
+
+
+def queue_busy(body: dict) -> bool:
+    return bool((body or {}).get("queue_running") or (body or {}).get("queue_pending"))
+
+
+def _saved_image(record: dict) -> dict:
+    found = [item for output in (record.get("outputs") or {}).values() for items in output.values()
+             for item in (items if isinstance(items, list) else [])
+             if isinstance(item, dict) and item.get("filename") and item.get("type", "output") == "output"]
+    if not found:
+        raise RuntimeError("the shared ComfyUI finished without an image")
+    return found[0]
 
 
 def gpu_processes() -> list[dict] | None:
@@ -249,18 +317,26 @@ def assess() -> dict:
     sample["profile"] = True
     found = rtx_admit.decide(sample)
     processes = gpu_processes()
-    foreign = [row for row in (processes or []) if row["pid"] != os.getpid()]
+    listeners = listener_pids()
+    shared = set(listeners or [])
+    foreign = [row for row in (processes or []) if row["pid"] not in shared and row["pid"] != os.getpid()]
     reasons = []
     if size != BYTES:
         reasons.append({"code": "missing_model", "reason": "The SDXL Turbo checkpoint is not the measured file."})
     if not found["ok"]:
         reasons.append({"code": found["code"], "reason": found["reason"]})
+    if listeners is None:
+        reasons.append({"code": "missing_telemetry",
+                        "reason": "The shared ComfyUI listener could not be read. A missing reading is not a free server."})
+    elif not listeners:
+        reasons.append({"code": "renderer_down",
+                        "reason": "The shared ComfyUI is not listening on 127.0.0.1:8188. Studio does not start it."})
     if processes is None:
         reasons.append({"code": "missing_telemetry",
                         "reason": "The GPU process list could not be read. A missing reading is not a free GPU."})
     elif foreign:
         reasons.append({"code": "busy_renderer",
-                        "reason": "Another process holds the GPU. Studio does not stop it or submit work to it."})
+                        "reason": "Another process besides the shared ComfyUI holds the GPU. Studio does not stop it."})
     return {
         "ok": not reasons,
         "model": ID,
@@ -281,6 +357,8 @@ def assess() -> dict:
         "vram_reserve_mib": sample.get("vram_reserve_mib") or rtx_admit.vram_reserve_mib(),
         "cgroup": sample.get("cgroup"),
         "gpu_processes": processes,
+        "shared_pids": sorted(shared),
+        "shared_url": SHARED_URL,
         "comfy_pinned": PINNED_COMFY,
         "attention": "pytorch",
         "precision": "fp16",
@@ -288,9 +366,29 @@ def assess() -> dict:
     }
 
 
-def render_images(args, text: str, render, fetch, url: str) -> None:
-    """One owned renderer, sequential pictures, batch size one. The server is not started here."""
+def _png_size(data: bytes) -> tuple[int, int]:
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise RuntimeError("the shared ComfyUI did not return a PNG")
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
 
+
+def _sample_floor() -> dict:
+    """One more read of the budgets while a still is in the shared queue. This does not stop it."""
+
+    try:
+        sample = rtx_admit.collect()
+    except Exception:
+        return {}
+    return {"host_available_mb": sample.get("host_available_mb"), "vram_free_mib": sample.get("vram_free_mib")}
+
+
+def render_images(args, text: str, render=None, fetch=None, url: str | None = None) -> list[dict]:
+    """Submit stills to the shared ComfyUI. ``render``, ``fetch`` and ``url`` are ignored.
+
+    Spark's renderer posts interrupts and follows SPARK_COMFY_URL. This route does neither.
+    """
+
+    del render, fetch, url
     if args.base:
         sys.exit("SDXL Turbo has no base-model switch.")
     if (args.negative or "").strip():
@@ -301,24 +399,63 @@ def render_images(args, text: str, render, fetch, url: str) -> None:
         sys.exit(f"SDXL Turbo is measured at {WIDTH}x{HEIGHT} only.")
     if not offered() and os.environ.get("RTX_SDXL_CALIBRATE") != "1":
         sys.exit(script_block())
-    os.environ["RTX_MEASURED_ROUTE"] = ID
-    if rtx_admit.protected(url) or rtx_admit.port_of(url) in rtx_admit.MEASURED_FORBIDDEN_PORTS:
-        sys.exit(rtx_admit.REASONS["protected_endpoint"])
-    held = rtx_admit.allow(url)
-    if not held["ok"]:
-        sys.exit(held["reason"])
+    report = assess()
+    if not report["ok"]:
+        sys.exit(report["reason"])
     seeds = [int(part) for part in args.seeds.split(",") if part.strip()] if args.seeds else [args.seed]
     if not 1 <= len(seeds) <= max_count():
         sys.exit(f"SDXL Turbo scouts are 1 to {max_count()} pictures, one at a time.")
     target = Path(args.output)
+    made = []
     for seed in seeds:
-        item, seconds = render(workflow(text, seed, args.width, args.height), "5")
+        queue = exchange("GET", "/queue", timeout=10)
+        if queue_busy(queue):
+            sys.exit("The shared ComfyUI queue already has work. Studio leaves that queue alone.")
+        started = time.time()
+        peaks = _sample_floor()
+        posted = exchange("POST", "/prompt", {
+            "prompt": workflow(text, seed, args.width, args.height),
+            "client_id": "studio-sdxl"}, timeout=60)
+        prompt_id = str(posted.get("prompt_id") or "")
+        if not prompt_id:
+            sys.exit("The shared ComfyUI did not accept the still.")
+        record = None
+        deadline = time.time() + WAIT_S
+        while time.time() < deadline:
+            sample = _sample_floor()
+            for key, value in sample.items():
+                if value is None:
+                    continue
+                current = peaks.get(key)
+                peaks[key] = value if current is None else min(current, value)
+            history = exchange("GET", f"/history/{prompt_id}", timeout=30)
+            if prompt_id in history and history[prompt_id].get("status", {}).get("completed") is not None:
+                record = history[prompt_id]
+                break
+            time.sleep(1)
+        if record is None:
+            sys.exit("The still did not finish within the wait. Studio did not interrupt the shared ComfyUI.")
+        if record.get("status", {}).get("status_str") != "success":
+            sys.exit("The shared ComfyUI did not finish the still. Studio did not interrupt it.")
+        item = _saved_image(record)
+        query = urllib.parse.urlencode({
+            "filename": item["filename"], "subfolder": item.get("subfolder", ""),
+            "type": item.get("type", "output")})
+        data = exchange("GET", "/view?" + query, timeout=60)
+        wide, tall = _png_size(data)
+        if (wide, tall) != (args.width, args.height):
+            sys.exit(f"The still came back as {wide}x{tall}. SDXL Turbo is measured at {args.width}x{args.height}.")
         out = target.with_name(f"{target.stem}_s{seed}{target.suffix}") if args.seeds else target
-        fetch(item, out)
-        print("[tensorfold] " + json.dumps({
-            "output": str(out), "engine": "cuda", "model": ID, "width": args.width, "height": args.height,
-            "seed": seed, "steps": STEPS, "cfg": CFG, "sampler": SAMPLER, "scheduler": SCHEDULER,
-            "total_s": round(seconds, 1)}), flush=True)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        row = {"output": str(out), "engine": "cuda", "model": ID, "width": wide, "height": tall,
+               "seed": seed, "steps": STEPS, "cfg": CFG, "sampler": SAMPLER, "scheduler": SCHEDULER,
+               "prompt_id": prompt_id, "bytes": len(data), "total_s": round(time.time() - started, 1),
+               "url": SHARED_URL, "host_available_mb_min": peaks.get("host_available_mb"),
+               "vram_free_mib_min": peaks.get("vram_free_mib")}
+        print("[tensorfold] " + json.dumps(row), flush=True)
+        made.append(row)
+    return made
 
 
 def _runtime_facts() -> dict:
@@ -371,12 +508,17 @@ def _limit_note(report: dict) -> str:
     reserve = report.get("vram_reserve_mib")
     if free is not None and need is not None and reserve is not None and free - reserve < need:
         limits.append(f"free VRAM {free} MiB cannot hold the {need} MiB checkpoint plus the {reserve} MiB reserve")
-    foreign = [row for row in (report.get("gpu_processes") or []) if row.get("pid") != os.getpid()]
+    cleared = []
+    shared = set(report.get("shared_pids") or [])
+    foreign = [row for row in (report.get("gpu_processes") or []) if row.get("pid") not in shared and row.get("pid") != os.getpid()]
     if report.get("gpu_processes") is None:
         limits.append("the GPU process list could not be read")
+    elif not shared:
+        limits.append("the shared ComfyUI is not listening on 127.0.0.1:8188 and was not started")
     elif foreign:
-        limits.append("another process holds the GPU and was left running")
-    cleared = []
+        limits.append("another process besides the shared ComfyUI holds the GPU and was left running")
+    else:
+        cleared.append("the shared ComfyUI on 127.0.0.1:8188 is the renderer and was left running")
     if available is not None and floor is not None and available >= floor:
         cleared.append(f"host available {available} MB is at or above the {floor} MB floor")
     if free is not None and need is not None and reserve is not None and free - reserve >= need:
@@ -385,30 +527,80 @@ def _limit_note(report: dict) -> str:
         limits.append("no budget failed")
     said = ". ".join(part[:1].upper() + part[1:] for part in limits + cleared)
     return ("No render ran. The profile stays disabled. " + said + ". "
-            "Studio does not stop another process or submit work to the shared renderer.")
+            "A still is one prompt to that server. Studio does not start, stop, interrupt, or unload it.")
+
+
+def _write_report(path: str, report: dict) -> None:
+    if not path:
+        return
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(report, indent=2) + "\n")
 
 
 def main(argv: list[str] | None = None) -> int:
     import argparse
-    parser = argparse.ArgumentParser(description="Check whether one SDXL Turbo render can start. This does not start a renderer.")
-    parser.add_argument("command", choices=("calibrate",))
+    parser = argparse.ArgumentParser(description="Submit one SDXL Turbo still to the shared ComfyUI, or only check the budgets.")
+    parser.add_argument("command", choices=("calibrate", "render"))
     parser.add_argument("--record", default="", help="write the JSON report here")
+    parser.add_argument("--prompt", default="a red apple on a wooden table, soft daylight")
+    parser.add_argument("--output", default="")
+    parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args(argv)
     report = assess()
     report.update(_runtime_facts())
     report["comfy_spark_attention"] = "--use-ck-attention"
-    report["render"] = None
-    report["enabled"] = False
-    report["note"] = _limit_note(report)
-    if args.record:
-        path = Path(args.record)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps({"ok": report["ok"], "enabled": False, "code": report["code"], "reason": report["reason"],
-                      "host_available_mb": report["host_available_mb"], "floor_mb": report["floor_mb"],
-                      "vram_free_mib": report["vram_free_mib"], "vram_need_mib": report["vram_need_mib"],
-                      "note": report["note"]}))
-    return 0 if report["ok"] else 1
+    if args.command == "calibrate":
+        report["render"] = None
+        report["enabled"] = False
+        report["note"] = _limit_note(report)
+        _write_report(args.record, report)
+        print(json.dumps({"ok": report["ok"], "enabled": False, "code": report["code"], "reason": report["reason"],
+                          "host_available_mb": report["host_available_mb"], "floor_mb": report["floor_mb"],
+                          "vram_free_mib": report["vram_free_mib"], "vram_need_mib": report["vram_need_mib"],
+                          "note": report["note"]}))
+        return 0 if report["ok"] else 1
+    if not report["ok"]:
+        report["render"] = None
+        report["enabled"] = False
+        report["note"] = _limit_note(report)
+        _write_report(args.record, report)
+        print(json.dumps({"ok": False, "enabled": False, "code": report["code"], "reason": report["reason"]}))
+        return 1
+    output = args.output or str(Path.home() / "ImaginationStudio" / "sdxl-turbo" / f"still_s{args.seed}.png")
+    request = type("Request", (), {
+        "base": False, "negative": "", "steps": None, "width": WIDTH, "height": HEIGHT,
+        "seeds": "", "seed": args.seed, "output": output,
+    })()
+    os.environ["RTX_SDXL_CALIBRATE"] = "1"
+    try:
+        made = render_images(request, args.prompt)
+    except SystemExit as error:
+        report["render"] = None
+        report["enabled"] = False
+        report["ok"] = False
+        report["code"] = "render_failed"
+        report["reason"] = str(error)
+        report["note"] = "No finished still was recorded. The profile stays disabled. " + str(error)
+        _write_report(args.record, report)
+        print(json.dumps({"ok": False, "enabled": False, "reason": str(error)}))
+        return 1
+    report["render"] = made[0]
+    report["enabled"] = True
+    report["ok"] = True
+    report["code"] = ""
+    report["reason"] = ""
+    low = made[0].get("host_available_mb_min")
+    floor = rtx_admit.HOST_FLOOR_MB
+    dip = ""
+    if low is not None and low < floor:
+        dip = (f" During the load, host available fell to {low} MB, under the {floor} MB floor. "
+               "The floor was not lowered. A later still still has to clear it before it is submitted.")
+    report["note"] = ("One still finished on the shared ComfyUI at 127.0.0.1:8188. "
+                      "Studio did not start, stop, interrupt, or unload that server." + dip)
+    _write_report(args.record, report)
+    print(json.dumps({"ok": True, "enabled": True, "output": made[0]["output"], "total_s": made[0]["total_s"]}))
+    return 0
 
 
 if __name__ == "__main__":

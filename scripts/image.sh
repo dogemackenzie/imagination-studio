@@ -46,7 +46,7 @@ case "${IMAGE_MODEL:-qwen}" in
     # shellcheck disable=SC2086
     exec "$PREFIX/flux3-venv/bin/python" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/flux3_generate.py" "${ARGS[@]}" ${EXTRA:-};;
   moss-image) echo "MOSS-Image runs on a DGX Spark (ComfyUI): there is no Mac build of it yet" >&2; exit 1;;
-  sdxl-turbo) echo "SDXL Turbo runs on the measured RTX machine through its owned renderer." >&2; exit 1;;
+  sdxl-turbo) echo "SDXL Turbo submits a still to the shared ComfyUI on the measured RTX machine." >&2; exit 1;;
   qwen) ;;
   qwen-full) TURBO=0;;
   *) echo "IMAGE_MODEL is qwen, qwen-full, flux3k-fast, flux3k-full or moss-image, not ${IMAGE_MODEL}" >&2; exit 2;;
