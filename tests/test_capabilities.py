@@ -131,6 +131,20 @@ def test_a_missing_gpu_and_a_free_machine_stay_closed():
     assert capabilities.refusal("picture", False)["code"] == "unmeasured_configuration"
 
 
+def test_a_controller_does_not_open_a_local_render(capsys):
+    capabilities.use("controller")
+    assert capabilities.mode(False) == "controller"
+    assert capabilities.renders(False) is False
+    assert capabilities.refusal("video", False) is None
+    for kind in ("scout", "studio", "long", "edit", "voice", "music"):
+        assert capabilities.refusal(kind, False)["code"] == "unmeasured_configuration"
+    assert capabilities.refusal("export", False) is None
+    assert server.machine() == ("linux", "CONTROLLER")
+    assert capabilities.script_exit("video") == 1
+    assert "does not render H3" in capsys.readouterr().err
+    assert capabilities.script_exit("export") == 0
+
+
 def test_scripts_refuse_before_the_spark_handoff():
     done = subprocess.run(["bash", str(ROOT / "scripts/require-route.sh"), "video"], capture_output=True, text=True, timeout=30)
     assert done.returncode == 1 and "measured" in done.stderr.lower()

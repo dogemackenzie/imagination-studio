@@ -257,6 +257,10 @@ Primary files: `app/sparks.py`, `app/server.py`, `app/remote.py`, `app/static/sp
 
 **Acceptance:** the controller can queue a valid clip it cannot render itself; the worker checks its own resources, renders and returns it; mismatched code, lost worker, cancellation and refusal paths remain bounded; the controller never launches a local video model. Without a worker, validate with fixtures and label live verification pending.
 
+Recorded 2026-10-21. `STUDIO_MODE=controller` queues one video clip. This machine does not render H3. The prompt, the frame count, the paths, and the references are checked here. The worker's own memory guard is asked when the clip is sent. `sparks` stays a number from 1 to 5. On a controller that number is workers, and this machine is not a GPU slot. `GET /api/sparks` reports `role`, `slot`, and `eligible`. `GET /api/state` still reports `sparks` as `supported` and `limit` only. An export stays on this machine. Pictures, edits, voice, music, and a long chain stay on their own routes. A worker that refuses the clip, has different code, or stops answering fails the job with a reason. `LOST` stays 60 seconds. A worker that went down waits for Check. While a check is in flight the clip stays queued. The tests use a stand-in worker. They do not open a tunnel and they do not start H3. Live verification on a real worker is pending. The published container stays `STUDIO_MODE=app-only`. No SSH key is mounted.
+
+Full suite (`pytest tests`, pytest 9.1.1, `--timeout=240`): **693 passed, 8 skipped, 0 failed**, 166.43 s. Exit 0. Log `/tmp/phase6-suite.log`. The 8 skips match Phase 1. The published image is still `imagination-studio-app:050899a` until this slice is rebuilt.
+
 ## Phase 7 Finish operations and release verification
 
 **Outcome:** a repeatable local deployment with a tested recovery path.
@@ -293,7 +297,7 @@ Use small reviewable changes. The estimates below describe scope; elapsed time d
 | G | C, D and a capable worker | Optional controller-only single-video support | Large, worker dependent |
 | H | D, plus whichever of F/G ships | Operational documentation, backup, rollback, release checks | Medium |
 
-The first useful release is A–D plus the app-only parts of H. GPU validation must not delay a working project and media application. The next useful release adds E–F. G is optional and should not be presented as already configured.
+The first useful release is A–D plus the app-only parts of H. GPU validation must not delay a working project and media application. The next useful release adds E–F. G is optional. The controller role is in the tree and is exercised with a stand-in worker. The published container is not configured as a controller. Live verification on a real worker is pending.
 
 ## Verification matrix
 
@@ -312,4 +316,4 @@ The first useful release is A–D plus the app-only parts of H. GPU validation m
 
 ## Immediate next work
 
-Phase 7 is published as `imagination-studio-app:050899a` (`sha256:e62291ac45f5b0d20c6562ee73b29f7218e676f11b992b6317b9fd5e917d2cad`, 788 MB) on `127.0.0.1:7870` and `192.168.50.22:7870`. The previous image `14151f6` is kept. Two projects survived the recreate. Inside the container the lead reason stays `unavailable_hardware`, `local_render` stays false, and scout and video routes stay disabled. Picture is the SDXL Turbo still. A later still has to clear the 8000 MB floor and an empty shared queue. Phase 6 waits. Preserve the shared ComfyUI service, its model files, and the container that publishes port 8190. The system runs on Mac, DGX Spark, and Linux. Operations are in `docs/OPERATIONS.md`.
+Phase 6 is in the tree and the suite is green (693 passed, 8 skipped). The tests use a stand-in worker. Live verification on a real worker is pending. The published app container is still `imagination-studio-app:050899a` until it is rebuilt from this slice. Rebuild with `SOURCE_REV` set to that commit, recreate with `--no-deps`, and keep the `050899a` and `14151f6` images. The published service stays `STUDIO_MODE=app-only`. Do not mount an SSH key. Inside the container the lead reason stays `unavailable_hardware`, `local_render` stays false, and scout and video routes stay disabled. Picture is the SDXL Turbo still. A later still has to clear the 8000 MB floor and an empty shared queue. Preserve the shared ComfyUI service, its model files, and the container that publishes port 8190. The system runs on Mac, DGX Spark, and Linux. Operations are in `docs/OPERATIONS.md`.

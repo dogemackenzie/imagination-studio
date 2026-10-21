@@ -2,8 +2,9 @@
 
 A mode names a machine. It cannot invent a measured route: ``managed-rtx`` and ``app-only``
 never render, and ``STUDIO_MODE=spark`` is ignored unless this process is actually a Spark
-(the flag passed in, or ``hardware.is_spark()``). ``use`` is how a test simulates a whole
-machine. Export and soundtrack stay available everywhere: they assemble files that already exist.
+(the flag passed in, or ``hardware.is_spark()``). ``controller`` may queue one video clip for a
+worker and does not render it here. ``use`` is how a test simulates a whole machine. Export and
+soundtrack stay available everywhere: they assemble files that already exist.
 """
 from __future__ import annotations
 
@@ -126,6 +127,9 @@ def refusal(kind: str, spark: bool | None = None) -> dict | None:
     kind = ALIASES.get(kind, kind)
     if kind in PRESERVED or kind not in GENERATIVE:
         return None
+    # A controller queues one video clip. The worker admits it. Nothing else opens.
+    if kind == "video" and mode(spark) == "controller":
+        return None
     items = reasons(spark)
     if not items:
         return None
@@ -180,6 +184,9 @@ def script_exit(kind: str) -> int:
     before a script hands the job to spark/.
     """
 
+    if kind == "video" and mode(hardware.is_spark()) == "controller":
+        sys.stderr.write("This machine does not render H3. A clip is queued for a worker from the app.\n")
+        return 1
     if kind == "sdxl-turbo":
         spark = Path(__file__).resolve().parent.parent / "spark"
         if str(spark) not in sys.path:

@@ -20,6 +20,8 @@ services:
       STUDIO_CONTAINER: "1"
       STUDIO_HOME: /data
       STUDIO_DISCOVER_DELAY: "-1"
+      # app-only is the published service. controller is optional and is not this service.
+      # Do not mount an SSH key, known_hosts, or an agent socket on this service.
       STUDIO_MODE: app-only
       PORT: "7870"
       # Inside the container only, so the published loopback port can reach the app.

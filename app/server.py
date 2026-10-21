@@ -1550,6 +1550,8 @@ def take(job: dict, params: dict, label: str = "") -> tuple[bool, dict, list[str
     if worker:
         _, env, outputs = build(job["kind"], params, job["id"], room=False)
         return hub.render(job, worker, params, Path(outputs[0]), label), env, outputs
+    if hub.controller and job["kind"] == "video":
+        raise RuntimeError(sparks.NOT_HERE)
     command, env, outputs = build(job["kind"], params, job["id"])
     return run(job, command, env, label), env, outputs
 
@@ -2032,8 +2034,9 @@ def queue_job(body: dict) -> dict:
     gate = sdxl_turbo.submission(kind, params)
     if gate is not None and not gate["ok"]:
         raise HTTPException(400, gate)
+    remote_clip = kind == "video" and capabilities.mode(SPARK) == "controller"
     blocked = capabilities.refusal(kind, SPARK)
-    if blocked and gate is None:
+    if blocked and gate is None and not remote_clip:
         raise HTTPException(400, blocked)
     if kind == "long":
         total = int(params.get("total_seconds", 0))
@@ -2074,7 +2077,9 @@ def queue_job(body: dict) -> dict:
         raise HTTPException(400, "MiniMax H3 Turbo is not installed here (oneshot-setup.sh --turbo adds it): use FastH3, quality fh4, fh8 or fh20")
     job_id = time.strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     if kind not in ("export", "long"):
-        build(kind, params, job_id)  # reject bad settings now, not when the job's turn comes
+        # A controller clip is checked here for prompt, frames, paths and references.
+        # The worker's own memory guard is asked when the clip is sent, not this machine's.
+        build(kind, params, job_id, room=not remote_clip)
     job = {"id": job_id, "kind": kind, "status": "queued", "title": body.get("title") or (action_title(kind, params) if kind in actions.KINDS else sound_title(kind, params) if kind in sound.KINDS else kind), "params": params,
            "source": action_source(kind, params) if kind in actions.KINDS else sound_source(kind, params) if kind in sound.KINDS else None,
            "outputs": [], "progress": None, "error": None, "log": "", "created": time.time(), "started": None,
@@ -2092,7 +2097,8 @@ def queue_job(body: dict) -> dict:
     if not 1 <= chosen <= sparks.LIMIT:
         raise HTTPException(400, f"sparks is a whole number from 1 to {sparks.LIMIT}")
     said = hub.plan({"sparks": chosen, "kind": kind, "params": params})
-    job["sparks"] = {"chosen": chosen if SPARK else 1, "available": said["available"], "used": said["used"], "says": said["says"]}
+    counts = SPARK or capabilities.mode(SPARK) == "controller"
+    job["sparks"] = {"chosen": chosen if counts else 1, "available": said["available"], "used": said["used"], "says": said["says"]}
     with lock:
         accepting_jobs()
         waiting = sum(1 for one in jobs.values() if one["status"] in ("queued", "running"))
@@ -2651,7 +2657,8 @@ def clip_time(kind: str, params: dict) -> int | None:
         return None
 
 
-hub = sparks.Hub(HOME, PACK, SPARK, jobs, order, lock, wake, about_this_spark, inside, perform, clip_time)
+hub = sparks.Hub(HOME, PACK, SPARK, jobs, order, lock, wake, about_this_spark, inside, perform, clip_time,
+                  controller=capabilities.mode(SPARK) == "controller")
 app.include_router(hub.router())
 import updates  # noqa: E402  (Git source updates after an idle, graceful app shutdown)
 

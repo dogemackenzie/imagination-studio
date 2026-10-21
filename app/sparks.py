@@ -54,7 +54,9 @@ PORT = 7870      # a worker's app, on its own 127.0.0.1
 POLL = float(os.environ.get("STUDIO_SPARK_POLL", "2"))     # seconds between looks at a worker's job
 LOST = float(os.environ.get("STUDIO_SPARK_LOST", "60"))    # a worker silent this long while it renders is down
 CALL = float(os.environ.get("STUDIO_SPARK_CALL", "10"))    # the longest one request to a worker may take
-MOVES = 2        # a clip is taken back from a worker at most this often; after that it renders on this Spark
+MOVES = 2        # a clip is taken back from a worker at most this often; after that a Spark renders it here
+NOT_HERE = "This machine does not render H3. The clip was not started on this machine."
+WAIT = "Waiting for a worker to be checked. This machine does not render the clip."
 DISK_GB = 2      # a worker with less free disk than this is not given a clip
 KINDS = ("video",)  # what is handed to a worker: single clips
 PREFIX = "$HOME/.local/opt/tensorfold-studio"
@@ -62,6 +64,35 @@ THEIR_HOME = "$HOME/TensorFoldStudio"  # a worker's studio folder, and where its
 ADDRESS = re.compile(r"(?:[a-z_][a-z0-9_-]{0,31}@)?[A-Za-z0-9][A-Za-z0-9.-]{0,252}")
 FOLDER = re.compile(r"[A-Za-z0-9_+][A-Za-z0-9_.+/-]{0,200}")
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"]
+
+
+def ssh_base() -> list[str]:
+    """ssh for a worker. The default is this user's own ssh.
+
+    An identity file is added only when ``STUDIO_SSH_IDENTITY`` and ``STUDIO_SSH_KNOWN_HOSTS``
+    are both set and both are files. Those paths are not copied into an image or the repository.
+    """
+
+    command = list(SSH)
+    identity = os.environ.get("STUDIO_SSH_IDENTITY", "").strip()
+    known = os.environ.get("STUDIO_SSH_KNOWN_HOSTS", "").strip()
+    if not identity or not known:
+        return command
+    if identity.startswith("-") or known.startswith("-") or "\n" in identity or "\n" in known:
+        return command
+    if not os.path.isfile(identity) or not os.path.isfile(known):
+        return command
+    return [command[0], "-i", identity, "-o", "IdentitiesOnly=yes", "-o", f"UserKnownHostsFile={known}", *command[1:]]
+
+
+def ssh_env() -> dict:
+    """The process environment for ssh. ``STUDIO_SSH_AUTH_SOCK`` selects an agent socket when it exists."""
+
+    env = os.environ.copy()
+    sock = os.environ.get("STUDIO_SSH_AUTH_SOCK", "").strip()
+    if sock and not sock.startswith("-") and "\n" not in sock and os.path.exists(sock):
+        env["SSH_AUTH_SOCK"] = sock
+    return env
 # the files that are the app: a worker whose copy of any of them differs from this Spark's is updated before it is used
 CODE = ("VERSION", "*.py", "app/*.py", "app/*.json", "app/static/*.js", "app/static/index.html", "spark/*.py", "spark/*.sh",
         "spark/tensorfold_h3/*.py", "spark/studio_mmaudio/*.py", "scripts/*.sh", "scripts/*.py")
@@ -169,7 +200,8 @@ def shell(address: str, command: str, timeout: float = 30) -> tuple[int, str]:
     when ssh itself cannot reach it or log in."""
 
     try:
-        done = subprocess.run([*SSH, address, command], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        done = subprocess.run([*ssh_base(), address, command], capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL, env=ssh_env())
     except subprocess.TimeoutExpired:
         return 255, f"no answer over ssh in {timeout:g} s"
     except OSError as error:
@@ -182,9 +214,9 @@ def copy(pack: Path, address: str, folder: str, timeout: float = 900) -> tuple[i
     part of it (they are the worker's own install); what the worker's folder holds besides is left alone."""
 
     command = ["rsync", "-a", "--exclude", ".git", "--exclude", "samples", "--exclude", "outputs", "--exclude", "payload",
-               "--exclude", "__pycache__", "--exclude", "*.pyc", "-e", " ".join(SSH), f"{pack}/", f"{address}:{folder}/"]
+               "--exclude", "__pycache__", "--exclude", "*.pyc", "-e", " ".join(ssh_base()), f"{pack}/", f"{address}:{folder}/"]
     try:
-        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=ssh_env())
     except subprocess.TimeoutExpired:
         return 255, f"the copy did not finish in {timeout:g} s"
     except OSError as error:
@@ -203,8 +235,10 @@ class Tunnel:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             self.port = probe.getsockname()[1]
-        self.process = subprocess.Popen([*SSH, "-o", "ExitOnForwardFailure=yes", "-N", "-L", f"127.0.0.1:{self.port}:127.0.0.1:{PORT}", self.address],
-                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        self.process = subprocess.Popen([*ssh_base(), "-o", "ExitOnForwardFailure=yes", "-N", "-L",
+                                         f"127.0.0.1:{self.port}:127.0.0.1:{PORT}", self.address],
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                        text=True, env=ssh_env())
         until = time.time() + wait
         while time.time() < until:
             if self.process.poll() is not None:
@@ -284,8 +318,9 @@ class Hub:
     the studio folder; ``work(job, worker)`` runs a claimed job to its end (the server's own job routine);
     ``timing(kind, params)`` is one clip's measured time on one Spark, or None."""
 
-    def __init__(self, home: Path, pack: Path, spark: bool, jobs: dict, order: list, lock, wake, info, inside, work, timing=None):
+    def __init__(self, home: Path, pack: Path, spark: bool, jobs: dict, order: list, lock, wake, info, inside, work, timing=None, controller: bool = False):
         self.home, self.pack, self.spark = home, pack, spark
+        self.controller = bool(controller)
         self.jobs, self.order, self.lock, self.wake = jobs, order, lock, wake
         self.info, self.inside, self.work, self.timing = info, inside, work, timing or (lambda kind, params: None)
         self.folder = home / "sparks"
@@ -317,8 +352,13 @@ class Hub:
         part.write_text(json.dumps(found, indent=1))
         part.replace(self.book)
 
+    def schedules(self) -> bool:
+        """A Spark and a controller both keep a worker list. A Mac does not."""
+
+        return bool(self.spark or self.controller)
+
     def workers(self) -> list[dict]:
-        return self.config()["workers"] if self.spark else []
+        return self.config()["workers"] if self.schedules() else []
 
     def default_folder(self) -> str:
         """Where a worker's Studio is unless said otherwise: where this one is, under the home folder."""
@@ -364,18 +404,29 @@ class Hub:
                 "can": {key: bool(info.get(key)) for key in ("fasth3", "image", "ref2va", "ref2va_turbo", "ffmpeg")} | {"loras": len(info.get("loras") or [])} if info else None}
 
     def overview(self) -> dict:
-        if not self.spark:
+        if not self.schedules():
             return {"supported": False, "limit": LIMIT, "note": MAC, "available": 1, "listed": 1, "default": 1, "workers": [], "this": {"name": self.name}}
         found = self.config()
         rows = [self.shown(worker) for worker in found["workers"]]
         mine = self.info()
+        usable = sum(1 for row in rows if row["usable"])
         with self.lock:
             local = next((job["id"] for job in self.jobs.values() if job["status"] == "running" and job.get("spark") == self.name), None)
-        return {"supported": True, "limit": LIMIT, "note": "", "available": 1 + sum(1 for row in rows if row["usable"]), "listed": 1 + len(rows),
+        here = {"name": self.name, "version": mine.get("version"),
+                "memory_gb": round((mine.get("memory") or {}).get("available_mb", 0) / 1000, 1), "disk_gb": mine.get("disk_gb"),
+                "can": {key: bool(mine.get(key)) for key in ("fasth3", "image", "ref2va", "ref2va_turbo", "ffmpeg")} | {"loras": len(mine.get("loras") or [])}}
+        if self.controller:
+            # This machine is not a GPU slot. ``eligible`` is the workers that can render.
+            return {"supported": True, "limit": LIMIT, "role": "controller", "slot": False, "eligible": usable,
+                    "note": "This machine does not render H3. A clip runs on a worker. This machine is not a GPU slot.",
+                    "available": usable, "listed": len(rows),
+                    "default": max(1, min(int(found.get("sparks") or 1), LIMIT)), "workers": rows, "folder": self.default_folder(),
+                    "this": {**here, "job": None, "state": "ready", "slot": False}}
+        available = 1 + usable
+        return {"supported": True, "limit": LIMIT, "role": "spark", "slot": True, "eligible": available, "note": "",
+                "available": available, "listed": 1 + len(rows),
                 "default": max(1, min(int(found.get("sparks") or 1), LIMIT)), "workers": rows, "folder": self.default_folder(),
-                "this": {"name": self.name, "version": mine.get("version"), "job": local, "state": "busy" if local else "ready",
-                         "memory_gb": round((mine.get("memory") or {}).get("available_mb", 0) / 1000, 1), "disk_gb": mine.get("disk_gb"),
-                         "can": {key: bool(mine.get(key)) for key in ("fasth3", "image", "ref2va", "ref2va_turbo", "ffmpeg")} | {"loras": len(mine.get("loras") or [])}}}
+                "this": {**here, "job": local, "state": "busy" if local else "ready"}}
 
     # ---- a worker: check, update and start, stop -----------------------------------------------------------------
 
@@ -618,11 +669,29 @@ class Hub:
         except (TypeError, ValueError):
             return 1
 
+    def wants_worker(self, job: dict) -> bool:
+        """Whether the dispatch loop should offer this queued job to a worker.
+
+        On a Spark, one means this machine, so a job waits for a worker only when it asks for more than one.
+        On a controller this machine is not a slot, so one means one worker. A controller never offers anything but a clip.
+        """
+
+        if job.get("status") != "queued":
+            return False
+        if self.controller:
+            params = job.get("params") or {}
+            return job.get("kind") == "video" and not here_only("video", params) and self.asked(job) >= 1
+        return self.asked(job) > 1
+
     def team(self, job: dict) -> list[str]:
         """The workers a job may render on, in the list's order: the first N - 1 that are up and can render it."""
 
         sparks = job.get("sparks") or {}
-        if not self.spark or self.asked(job) < 2 or here_only(job["kind"], job["params"]) or sparks.get("moves", 0) >= MOVES:
+        if not self.schedules() or here_only(job["kind"], job["params"]) or sparks.get("moves", 0) >= MOVES:
+            return []
+        # A Spark counts itself as one slot, so workers get N - 1. A controller is not a slot, so workers get N.
+        slots = self.asked(job) if self.controller else self.asked(job) - 1
+        if slots < 1:
             return []
         found = []
         for worker in self.workers():
@@ -631,7 +700,7 @@ class Hub:
             if capable(job["kind"], job["params"], self.state(worker["address"])["info"]):
                 continue
             found.append(worker["address"])
-        return found[:self.asked(job) - 1]
+        return found[:slots]
 
     def waits(self, job: dict) -> bool:
         """Whether a clip opens or ends on a clip that is still to be made: it waits for that one."""
@@ -651,8 +720,12 @@ class Hub:
 
         ready = [self.jobs[i] for i in self.order if self.jobs[i]["status"] == "queued" and not self.waits(self.jobs[i])]
         if address is None:
-            idle = {worker["address"] for worker in self.workers() if not self.usable(worker) and not self.state(worker["address"])["job"]}
-            job = next((job for job in ready if not idle.intersection(self.team(job))), None) or (ready[0] if ready else None)
+            if self.controller:
+                # Exports and soundtrack stay on this machine. A video job is never claimed here.
+                job = next((job for job in ready if job["kind"] in ("export", "soundtrack")), None)
+            else:
+                idle = {worker["address"] for worker in self.workers() if not self.usable(worker) and not self.state(worker["address"])["job"]}
+                job = next((job for job in ready if not idle.intersection(self.team(job))), None) or (ready[0] if ready else None)
         else:
             job = next((job for job in ready if address in self.team(job)), None)
         if job is None:
@@ -697,7 +770,7 @@ class Hub:
             self.kick.clear()
             try:
                 with self.lock:
-                    waiting = any(job["status"] == "queued" and self.asked(job) > 1 for job in self.jobs.values())
+                    waiting = any(self.wants_worker(job) for job in self.jobs.values())
                 refresh = time.time() - looked > 20
                 if refresh:
                     looked = time.time()
@@ -718,6 +791,11 @@ class Hub:
                         threading.Thread(target=self.run, args=(job, worker), daemon=True).start()
             except Exception as error:  # noqa: BLE001 - the loop outlives a bad moment
                 print(f"[sparks] {error}", flush=True)
+            if self.controller:
+                try:
+                    self.unplaced()
+                except Exception as error:  # noqa: BLE001
+                    print(f"[sparks] {error}", flush=True)
 
     def run(self, job: dict, worker: dict) -> None:
         try:
@@ -735,7 +813,7 @@ class Hub:
     def start(self) -> None:
         """At the app's start on a Spark: last run's tunnels closed, the loop started, the listed workers looked at."""
 
-        if self.started or not self.spark:
+        if self.started or not self.schedules():
             return
         self.stopped.clear()
         self.started = True
@@ -756,6 +834,78 @@ class Hub:
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
             thread.join(timeout=2.0)
         self.started = False
+
+    def placement(self, job: dict) -> str | None:
+        """None when a worker may still take this queued clip. ``""`` while a check is in flight.
+        A sentence when no worker will take it. A Spark never calls this."""
+
+        if not self.controller or job.get("kind") != "video" or job.get("status") != "queued":
+            return None
+        if self.waits(job) or self.team(job):
+            return None
+        listed = self.workers()
+        workers = [worker for worker in listed if worker.get("enabled", True)]
+        if not listed:
+            return NOT_HERE + " No worker is listed."
+        if not workers:
+            return NOT_HERE + " Every worker is switched off."
+        pending = False
+        notes = []
+        blocked = (job.get("sparks") or {}).get("not") or {}
+        for worker in workers:
+            name = worker.get("name") or worker["address"]
+            live = self.state(worker["address"])
+            if live["working"]:
+                pending = True
+                continue
+            if worker["address"] in blocked:
+                notes.append(f"{name}: {blocked[worker['address']]}")
+                continue
+            if live["state"] == "new":
+                notes.append(f"{name}: press Check")
+                continue
+            why = self.usable(worker) or capable(job["kind"], job["params"], live["info"])
+            if not why:
+                return None
+            notes.append(f"{name}: {why}")
+        if pending or not notes:
+            return ""
+        moves = (job.get("sparks") or {}).get("moves") or 0
+        taken = f" Handed back {moves} time{'s' if moves != 1 else ''}." if moves else ""
+        return (NOT_HERE + " " + "; ".join(notes[:3]) + taken)[:500]
+
+    def fail_video(self, job: dict, why: str) -> None:
+        """Mark a controller clip failed. It is not put back on the queue and it is not rendered here."""
+
+        with self.lock:
+            if job.get("status") != "queued":
+                return
+            job["status"] = "failed"
+            job["error"] = why
+            job["finished"] = time.time()
+            job.setdefault("sparks", {"chosen": 1})["wait"] = None
+            job["log"] = (job.get("log", "") + f"[sparks] {why}\n")[-20000:]
+        try:
+            import history
+            history.remember(job)
+        except OSError:
+            pass
+
+    def unplaced(self) -> None:
+        """Fail a controller clip that no worker will take. Leave one whose worker is still being checked."""
+
+        if not self.controller:
+            return
+        with self.lock:
+            queued = [job for job in self.jobs.values() if job.get("status") == "queued" and job.get("kind") == "video"]
+        for job in queued:
+            said = self.placement(job)
+            if said is None:
+                continue
+            if said == "":
+                job.setdefault("sparks", {"chosen": 1})["wait"] = WAIT
+                continue
+            self.fail_video(job, said)
 
     # ---- one clip on a worker -----------------------------------------------------------------------------------------
 
@@ -866,7 +1016,7 @@ class Hub:
     def record(self, job: dict) -> None:
         """A finished clip written into the takes list: its path, seed, settings and the Spark that rendered it."""
 
-        if not self.spark or job["kind"] not in ("video", "studio", "long") or not job.get("outputs"):
+        if not self.schedules() or job["kind"] not in ("video", "studio", "long") or not job.get("outputs"):
             return
         params = job["params"]
         line = {"path": job["outputs"][0], "job": job["id"], "title": job.get("title"), "kind": job["kind"], "seed": params.get("seed"),
@@ -907,12 +1057,14 @@ class Hub:
         except (TypeError, ValueError):
             raise HTTPException(400, "sparks and clips are whole numbers")
         kind, params = str(body.get("kind") or "video"), body.get("params") if isinstance(body.get("params"), dict) else {}
-        if not self.spark:
+        if not self.schedules():
             return {"supported": False, "limit": LIMIT, "chosen": 1, "available": 1, "listed": 1, "used": 1, "mode": "one", "says": MAC, "without": [], "estimate": None}
         able, without = [], []
         for worker in self.workers():
             why = self.usable(worker) or capable(kind, params, self.state(worker["address"])["info"])
             (without.append({"name": worker.get("name") or worker["address"], "why": why}) if why else able.append(worker["address"]))
+        if self.controller:
+            return self._controller_plan(chosen, clips, kind, params, able, without, body.get("seconds"))
         listed, available = 1 + len(able) + len(without), 1 + len(able)
         here = here_only(kind, params)
         used = 1 if here else min(chosen, available)
@@ -934,7 +1086,36 @@ class Hub:
             faster, measured = speedup(used, clips) if mode == "parallel" else (1.0, True)
             estimate = {"seconds": int(seconds * clips / faster), "one_spark": int(seconds * clips), "faster": round(faster, 2), "measured": measured,
                         "note": "an estimate from one measured run of 8 clips" + ("" if measured else f"; {used} Sparks were not measured (five exist)")}
-        return {"supported": True, "limit": LIMIT, "chosen": chosen, "available": available, "listed": listed, "used": used, "mode": mode,
+        return {"supported": True, "limit": LIMIT, "role": "spark", "slot": True, "eligible": available,
+                "chosen": chosen, "available": available, "listed": listed, "used": used, "mode": mode,
+                "count": count, "says": says, "without": without, "estimate": estimate}
+
+    def _controller_plan(self, chosen: int, clips: int, kind: str, params: dict, able: list, without: list, seconds) -> dict:
+        """What ``sparks`` means when this machine is not a GPU slot. ``eligible`` is workers only."""
+
+        available, listed = len(able), len(able) + len(without)
+        here = here_only(kind, params)
+        used = 0 if here else min(chosen, available)
+        count = f"{available} of {chosen} available" if chosen > available else f"{used} worker{'s' if used != 1 else ''}"
+        if here:
+            mode, says = "one", here
+        elif used < 1:
+            mode, says = "one", "No worker can take this clip. " + NOT_HERE
+        elif clips > 1:
+            mode, says = "parallel", f"One clip per worker, {min(used, clips)} at a time: {clips} clips on {min(used, clips)} workers."
+        else:
+            mode, says = "one", f"This clip renders on one worker, the first that is free of the {used}. " + ONE_CLIP
+        estimate = None
+        try:
+            seconds = float(seconds or self.timing(kind, params) or 0)
+        except (TypeError, ValueError):
+            seconds = 0
+        if seconds > 0 and used:
+            faster, measured = speedup(used, clips) if mode == "parallel" else (1.0, True)
+            estimate = {"seconds": int(seconds * clips / faster), "one_spark": int(seconds * clips), "faster": round(faster, 2), "measured": measured,
+                        "note": "an estimate from one measured run of 8 clips" + ("" if measured else f"; {used} Sparks were not measured (five exist)")}
+        return {"supported": True, "limit": LIMIT, "role": "controller", "slot": False, "eligible": available,
+                "chosen": chosen, "available": available, "listed": listed, "used": used, "mode": mode,
                 "count": count, "says": says, "without": without, "estimate": estimate}
 
     # ---- the API ------------------------------------------------------------------------------------------------------
@@ -966,7 +1147,7 @@ class Hub:
 
         @router.post("/api/sparks/workers")
         def add(body: dict) -> dict:
-            if not self.spark:
+            if not self.schedules():
                 raise HTTPException(400, MAC)
             try:
                 address = address_of(str(body.get("address") or ""))
@@ -976,8 +1157,9 @@ class Hub:
             found = self.config()
             if any(worker["address"] == address for worker in found["workers"]):
                 raise HTTPException(400, f"{address} is already in the list")
-            if len(found["workers"]) >= LIMIT - 1:
-                raise HTTPException(400, f"at most {LIMIT} Sparks, this one included")
+            room = LIMIT if self.controller else LIMIT - 1
+            if len(found["workers"]) >= room:
+                raise HTTPException(400, f"at most {LIMIT} Sparks" + ("" if self.controller else ", this one included"))
             found["workers"].append({"address": address, "name": str(body.get("name") or "").strip()[:60] or address, "folder": folder, "enabled": True})
             self.keep(found)
             self.act(address, "check")

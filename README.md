@@ -1241,7 +1241,8 @@ The system runs on a Mac, a DGX Spark, and Linux. On this Linux machine the publ
 container. Build, start, stop, logs, health, outputs, model inventory, refusal reasons, backup,
 and rollback are in [docs/OPERATIONS.md](docs/OPERATIONS.md). The container does not attach a GPU
 and it leaves the shared ComfyUI service running. Settings without secrets are listed in
-[.env.example](.env.example).
+[.env.example](.env.example). A controller that queues one clip for a worker is described in
+[docs/multi-spark.md](docs/multi-spark.md). The published container stays app-only.
 
 ## Install, and the one-click app
 

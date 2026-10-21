@@ -135,3 +135,32 @@ measured run lost at four. It is an estimate. Six to eight Sparks are not measur
   finishes its clip in its own folder and this app, started again, does not fetch it.
 - **Starting a worker's install.** The app sends code, not models or the environment.
 - **Five Sparks at most.** The limit is 5 (`LIMIT` in `app/sparks.py`), the most that have been measured.
+
+## A controller
+
+A controller queues one video clip for a worker. This machine does not render H3. The role is optional.
+The published Linux container stays `STUDIO_MODE=app-only` and does not list workers.
+
+Start a checkout with `STUDIO_MODE=controller` when this machine should hand clips to workers. The Sparks
+tab then counts workers. The number from 1 to 5 is how many workers that job may use. This machine is not
+one of those slots. `GET /api/sparks` reports `role` `controller`, `slot` false, and `eligible` as the
+workers that can take the clip. `GET /api/state` still reports `sparks` as `supported` and `limit` only.
+
+The app checks the prompt, the frame count, the paths, and the references before the clip is queued.
+The worker's own memory guard is asked when the clip is sent. Pictures, edits, voice, music, and a long
+chain stay on their own routes. An export stays on this machine. `scripts/video.sh` on a controller
+exits before H3 starts. Queue the clip from the app.
+
+One job per worker. The worker's Studio code has to match this app (`CODE` in `app/sparks.py`, which
+already includes `app/*.py`). A worker that stops answering is marked down after 60 seconds (`LOST`).
+The clip fails here with the reason. It is not started on this machine. Press **Check** before that
+worker is offered another clip. While a check is still running, the clip stays queued and the card
+shows a wait line for as long as that check takes. The 60 second limit is unchanged.
+
+SSH is your own `ssh`. An identity file is added only when both `STUDIO_SSH_IDENTITY` and
+`STUDIO_SSH_KNOWN_HOSTS` are set and both paths are files. `STUDIO_SSH_AUTH_SOCK` selects an agent
+socket when that path exists. The published image does not mount a key, a known-hosts file, or an
+agent socket. A key does not go in this repository.
+
+Live verification on a real worker is pending. The tests use a stand-in for the worker's app. They
+do not open a tunnel to another machine and they do not start H3.

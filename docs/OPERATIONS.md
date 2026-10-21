@@ -35,6 +35,14 @@ load a model.
 The in-app updater in a container answers that the image has to be rebuilt and the container
 recreated. It does not fetch git.
 
+## Optional controller
+
+The published container stays `STUDIO_MODE=app-only`. A controller is a separate setting,
+`STUDIO_MODE=controller`, on a checkout you start yourself. It can queue one video clip for a
+worker. This machine does not render that clip. The image does not mount an SSH key, a known-hosts
+file, or an agent socket. A real worker has not been verified from this machine. The rules are in
+[docs/multi-spark.md](multi-spark.md).
+
 ## Outputs
 
 Inside the container the data directory is `/data` (`STUDIO_HOME`). The named volume is

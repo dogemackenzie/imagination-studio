@@ -7,7 +7,7 @@ const SPK = { data: null, n: 1, form: { address: "", folder: "" }, plans: {}, ta
 const spkTake = path => { const t = SPK.takes[path]; return t && t.spark ? "on " + t.spark : null; };
 const spkLimit = () => (SPK.data && SPK.data.limit) || 5;
 // "5 of 8 available" when more are asked for than there are; else how many will be used
-const spkCount = (d, n) => !d || !d.supported ? "this machine" : n > d.available ? d.available + " of " + n + " available" : n === 1 ? "this Spark alone" : n + " of " + d.available + " available Sparks";
+const spkCount = (d, n) => !d || !d.supported ? "this machine" : d.slot === false ? (d.available ? (n > d.available ? d.available + " of " + n + " workers" : n + (n === 1 ? " worker" : " workers")) : "no worker") : n > d.available ? d.available + " of " + n + " available" : n === 1 ? "this Spark alone" : n + " of " + d.available + " available Sparks";
 const spkSig = d => !d ? "" : JSON.stringify([d.available, d.default, d.workers.map(w => [w.address, w.name, w.state, w.working, w.enabled, w.why, w.job, w.memory_gb, w.usable]), d.this && d.this.job]);
 async function spkLoad(draw) { const was = spkSig(SPK.data); try { const first = !SPK.data; SPK.data = await api("/api/sparks");
     if (first) { let kept = null; try { kept = Number(localStorage.getItem("sparks")); } catch {} SPK.n = SPK.data.supported ? Math.max(1, Math.min(kept || SPK.data.default || 1, SPK.data.limit)) : 1; }
@@ -31,17 +31,18 @@ function sparksPick(what = {}, label = "Sparks") { const d = SPK.data, says = el
   if (!d) return null;
   if (!d.supported) return el("div", { class: "sparks" }, el("label", {}, label), el("div", { class: "row", style: "gap:5px;align-items:center" }, el("button", { class: "small on fit", disabled: true }, "1"), el("span", { class: "note" }, d.note)));
   spkPlan(says, what);
-  return el("div", { class: "sparks", "data-keep": "" }, el("label", { title: "How many DGX Sparks this job may use, this one counted. More than there are is allowed: what is there is used." }, label),
+  const unit = d.slot === false ? "worker" : "Spark";
+  return el("div", { class: "sparks", "data-keep": "" }, el("label", { title: d.slot === false ? "How many workers this job may use. This machine is not one of them." : "How many DGX Sparks this job may use, this one counted. More than there are is allowed: what is there is used." }, label),
     el("div", { class: "row", style: "gap:5px;align-items:center;flex-wrap:wrap" },
       Array.from({ length: d.limit }, (_, i) => el("button", { type: "button", class: "small fit" + (SPK.n === i + 1 ? " on" : "") + (i + 1 > d.available ? " far" : ""), "aria-pressed": String(SPK.n === i + 1),
-        title: i + 1 > d.available ? "Only " + d.available + " available now: " + d.available + " will be used" : (i + 1) + (i ? " Sparks" : " Spark"), onclick: () => spkSet(i + 1) }, String(i + 1))),
+        title: i + 1 > d.available ? "Only " + d.available + " available now: " + d.available + " will be used" : (i + 1) + (i ? " " + unit + "s" : " " + unit), onclick: () => spkSet(i + 1) }, String(i + 1))),
       el("button", { type: "button", class: "small fit", title: "The list of Sparks: add one, check them, update and start them", onclick: () => { tab = "Sparks"; history.replaceState(null, "", "#Sparks"); render(); } }, "Sparks…")), says); }
 // The queue's own line, on every tab
 function spkQueue() { const box = document.querySelector("#sparks"); if (!box || !SPK.data) return; const d = SPK.data;
   if (!d.supported) { box.replaceChildren(el("div", { class: "note" }, "Sparks: 1. " + d.note)); return; }
-  box.replaceChildren(el("div", { class: "sparks" }, el("div", { class: "row", style: "gap:4px;align-items:center;flex-wrap:wrap" }, el("span", { class: "note fit", title: "How many DGX Sparks a job queued now may use, this one counted" }, "Sparks"),
+  box.replaceChildren(el("div", { class: "sparks" }, el("div", { class: "row", style: "gap:4px;align-items:center;flex-wrap:wrap" }, el("span", { class: "note fit", title: d.slot === false ? "How many workers a job queued now may use. This machine is not one of them." : "How many DGX Sparks a job queued now may use, this one counted" }, "Sparks"),
     Array.from({ length: d.limit }, (_, i) => el("button", { type: "button", class: "small fit" + (SPK.n === i + 1 ? " on" : "") + (i + 1 > d.available ? " far" : ""), onclick: () => spkSet(i + 1) }, String(i + 1)))),
-    el("div", { class: "note" }, spkCount(d, SPK.n) + (SPK.n > 1 ? ": queued clips render one per Spark." : ".")))); }
+    el("div", { class: "note" }, spkCount(d, SPK.n) + (SPK.n > 1 ? (d.slot === false ? ": one clip per worker." : ": queued clips render one per Spark.") : ".")))); }
 const spkDo = async (path, body, method) => { try { SPK.data = await api(path, body, method); SPK.plans = {}; } catch (e) { toast(e.message, 6000); } spkQueue(); render(); };
 const spkHas = can => !can ? "" : [can.fasth3 ? "FastH3 clips (text, first and last frame)" : "no FastH3", can.ref2va ? "Ref2VA" + (can.ref2va_turbo ? " with Turbo" : "") : "no Ref2VA", can.image ? "image model" : "no image model",
   can.loras ? can.loras + " LoRA" + (can.loras === 1 ? "" : "s") : "no LoRAs", can.ffmpeg ? "ffmpeg" : "no ffmpeg"].join(" · ");
@@ -61,6 +62,20 @@ function viewSparks() { const box = el("section", { class: "card" }, el("h2", {}
       w.disk_gb != null ? w.disk_gb + " GB of disk free" : null, w.job ? "rendering job " + w.job : null].filter(Boolean).join(" · ")),
     w.can ? el("div", { class: "note" }, "Renders: " + spkHas(w.can)) : null,
     w.why || (w.unusable && w.state === "ready") ? el("div", { class: "note", style: "color:var(--warn)" }, w.why || w.unusable) : null);
+  if (d.slot === false) {
+    put(box, el("div", { class: "note" }, "This machine does not render H3 and is not a GPU slot. A clip runs on a worker Spark, one job on a worker at a time. The worker listens on its own 127.0.0.1. This app reaches it through an ssh tunnel. A worker that stops answering stays out until you press Check."),
+      sparksPick({ clips: 8 }, "Workers for new jobs"),
+      el("h3", {}, (d.eligible || 0) + " eligible worker" + ((d.eligible || 0) === 1 ? "" : "s")),
+      el("div", { class: "seg" }, el("div", { class: "seghead" }, spkDot("stopped"), el("b", {}, d.this.name), el("span", { class: "note" }, "this machine"), el("span", { class: "pill queued" }, "not a GPU slot")),
+        el("div", { class: "note" }, "Does not render H3. Studio " + (d.this.version || "") + ".")),
+      d.workers.map(row),
+      el("div", { class: "row", style: "margin-top:10px" }, el("button", { class: "fit", disabled: !d.workers.length, onclick: () => spkDo("/api/sparks/check", {}) }, "Check all"), el("span")),
+      el("h3", {}, "Add a Spark"),
+      el("div", { class: "note" }, "Its address as you would type it after ssh. The worker needs the Studio installed once, with the FastH3 models. Update and start sends this Studio's code and starts its app on 127.0.0.1. No key is stored in this app. If ssh asks for a password, set up a key login first."),
+      el("div", { class: "row" }, field("Address", bind(f, "address", el("input", { placeholder: "10.100.10.5  or  user@spark-5" }))), field("Studio folder there, under the home folder", bind(f, "folder", el("input", { placeholder: d.folder }))),
+        el("button", { class: "primary fit", onclick: async () => { if (!f.address.trim()) return toast("Give the Spark's address"); await spkDo("/api/sparks/workers", { address: f.address.trim(), folder: f.folder.trim() || null }); f.address = ""; } }, "Add")));
+    return box;
+  }
   put(box, el("div", { class: "note" }, "A job may use more than one DGX Spark. Choose how many here, in the queue, or where you queue a job: this Spark counts as one. Several clips render one per Spark, side by side; one clip renders on one Spark. Each other Spark runs its own copy of this Studio, closed to the network: this app reaches it through an ssh tunnel it opens itself, so you need a key login to it as the user who runs this app."),
     sparksPick({ clips: 8 }, "Sparks for new jobs"),
     el("h3", {}, "This Spark and " + (d.listed - 1) + " other" + (d.listed === 2 ? "" : "s") + " · " + d.available + " available"),

@@ -2,6 +2,7 @@
 python3 tests/test_sparks.py. No GPU, no ssh, no other machine: a worker is a small stand-in for another Spark's app
 that answers the calls this app makes to one (its page's own API), and ssh, rsync and the tunnel are stood in for."""
 import ast
+import contextlib
 import json
 import os
 import pytest
@@ -641,6 +642,9 @@ vm.runInThisContext(`(async () => { const out = {};
   out.buttons = buttons.map(b => text(b)); out.on = buttons.filter(b => b.attrs.class.includes(" on")).map(b => text(b)); out.far = buttons.filter(b => b.attrs.class.includes(" far")).map(b => text(b));
   out.says = text(pick); out.sent = calls.filter(c => c[0] === "/api/sparks/plan").map(c => c[1])[0]; out.kept = calls.some(c => c[0] === "/api/sparks" && c[1] && c[1].sparks === 5);
   tab = "Sparks"; out.page = text(viewSparks());
+  const ctrl = { supported: true, slot: false, role: "controller", limit: 5, available: 1, eligible: 1, listed: 1, default: 1, note: "This machine does not render H3.", this: { name: "linux", state: "ready", version: "3.0.1" }, workers: [five.workers[0]] };
+  out.workerCount = spkCount(ctrl, 1); out.none = spkCount({ supported: true, slot: false, available: 0, eligible: 0 }, 1);
+  SPK.data = ctrl; out.controller = text(viewSparks());
   SPK.data = { supported: false, limit: 5, available: 1, note: "Multi-Spark rendering is for DGX Sparks: on a Mac every job renders on this machine.", workers: [], this: {} }; spkSet(5);
   const mac = sparksPick(); out.mac = [SPK.n, all(mac, "button").map(b => text(b)), text(mac)];
   console.log(JSON.stringify(out)); })().catch(e => { console.error(e); process.exit(1); });`);
@@ -662,9 +666,146 @@ def test_the_page_draws_the_chooser_and_the_list():
     for words in ("gx10-5482", "10.100.10.5", "116.1 GB of memory available", "FastH3 clips", "no LoRAs", "It stopped answering for 60 s", "Update and start", "Add a Spark", "3 available"):
         assert words in out["page"], words
     assert out["mac"][0] == 1 and out["mac"][1] == ["1"] and "DGX Sparks" in out["mac"][2]
+    assert out["workerCount"] == "1 worker" and out["none"] == "no worker"
+    assert "not a GPU slot" in out["controller"] and "Does not render H3" in out["controller"] and "gx10-5482" in out["controller"]
+    assert "this Spark counts as one" not in out["controller"]
     # every job the page queues carries the number
     page = (ROOT / "app/static/index.html").read_text()
     assert 'body = { sparks: SPK.n, ...body }' in page and '"Sparks"' in page and "Sparks: viewSparks" in page
+
+
+@contextlib.contextmanager
+def as_controller():
+    """This process as a controller: no local H3 admission, no local video render."""
+
+    import capabilities
+
+    saved = (hub.spark, hub.controller, server.SPARK, server.memory_of)
+    calls = {"memory": 0}
+
+    def refuse_local(*_args, **_kwargs):
+        calls["memory"] += 1
+        raise AssertionError("local H3 admission was asked")
+
+    hub.spark, hub.controller = False, True
+    server.SPARK = False
+    server.memory_of = refuse_local
+    capabilities.use("controller")
+    local_render.now = local_render.most = 0
+    try:
+        yield calls
+    finally:
+        hub.spark, hub.controller, server.SPARK, server.memory_of = saved
+        capabilities.use("spark")
+
+
+def test_ssh_uses_an_identity_only_when_both_files_exist(tmp_path, monkeypatch):
+    assert sparks.ssh_base() == sparks.SSH
+    monkeypatch.setenv("STUDIO_SSH_IDENTITY", str(tmp_path / "missing"))
+    monkeypatch.setenv("STUDIO_SSH_KNOWN_HOSTS", str(tmp_path / "missing-hosts"))
+    assert sparks.ssh_base() == sparks.SSH
+    key, hosts = tmp_path / "id", tmp_path / "known_hosts"
+    key.write_text("not-a-real-key\n")
+    hosts.write_text("example ssh-ed25519 AAAA\n")
+    monkeypatch.setenv("STUDIO_SSH_IDENTITY", str(key))
+    monkeypatch.setenv("STUDIO_SSH_KNOWN_HOSTS", str(hosts))
+    command = sparks.ssh_base()
+    assert command[0] == "ssh" and command[1:5] == ["-i", str(key), "-o", "IdentitiesOnly=yes"]
+    assert f"UserKnownHostsFile={hosts}" in command and "BatchMode=yes" in command
+    monkeypatch.setenv("STUDIO_SSH_IDENTITY", "-oProxyCommand")
+    assert sparks.ssh_base() == sparks.SSH
+
+
+def test_a_controller_queues_a_clip_the_worker_renders_and_this_machine_does_not():
+    one = Worker("spark-a")
+    with as_controller() as calls:
+        fresh(one)
+        scout = client.post("/api/jobs", json={"kind": "scout", "params": {"prompt": "a harbour"}})
+        assert scout.status_code == 400 and scout.json()["code"] == "unmeasured_configuration"
+        bad = client.post("/api/jobs", json={"kind": "video", "params": {"prompt": "  ", "preset": PRESET, "quality": QUALITY, "frames": 22}})
+        assert bad.status_code == 400 and "prompt" in bad.json()["error"]
+        frames = client.post("/api/jobs", json={"kind": "video", "params": {"prompt": "a walk", "preset": PRESET, "quality": QUALITY, "frames": 10}})
+        assert frames.status_code == 400
+        seen = client.get("/api/sparks").json()
+        assert seen["slot"] is False and seen["eligible"] == 1 and seen["available"] == 1 and seen["listed"] == 1
+        job = queue(1)
+        assert job["sparks"]["chosen"] == 1 and "worker" in job["sparks"]["says"]
+        exported = client.post("/api/jobs", json={"kind": "export", "params": {"clips": []}})
+        assert exported.status_code == 200, exported.text
+        done = finished([job["id"], exported.json()["id"]])
+        clip, made = done
+        assert clip["status"] == "done" and clip["spark"] == "spark-a" and calls["memory"] == 0
+        assert made["status"] == "failed" and "timeline" in made["error"]
+        assert local_render.most == 0 and one.most == 1
+        assert sparks.LOST == 60
+
+
+def test_a_controller_does_not_render_when_workers_refuse_or_vanish():
+    one = Worker("spark-a")
+    with as_controller():
+        fresh()
+        alone = finished([queue(1)["id"]])
+        assert alone[0]["status"] == "failed" and sparks.NOT_HERE in alone[0]["error"] and "No worker" in alone[0]["error"]
+        assert local_render.most == 0
+        fresh(one)
+        one.fits = False
+        refused = finished([queue(1)["id"]])
+        assert refused[0]["status"] == "failed" and sparks.NOT_HERE in refused[0]["error"] and "refused" in refused[0]["error"]
+        assert not one.jobs and not one.uploads and local_render.most == 0
+        one.fits = True
+        one.code = {**hub.code(), "app/server.py": "an older one"}
+        client.post(f"/api/sparks/workers/{one.address}/check", json={})
+        settle()
+        mismatched = finished([queue(1)["id"]])
+        assert mismatched[0]["status"] == "failed" and not one.jobs and local_render.most == 0
+        one.code = None
+        client.post(f"/api/sparks/workers/{one.address}/check", json={})
+        settle()
+        one.takes = 30
+        running = queue(1)
+        until = time.time() + 10
+        while time.time() < until and client.get(f"/api/jobs/{running['id']}").json()["status"] != "running":
+            time.sleep(0.05)
+        assert client.post(f"/api/jobs/{running['id']}/cancel", json={}).json()["status"] == "cancelled"
+        finished([running["id"]])
+        assert client.get(f"/api/jobs/{running['id']}").json()["status"] == "cancelled"
+        assert local_render.most == 0
+        one.takes = TAKES
+
+
+def test_a_controller_does_not_render_a_clip_whose_worker_stops_answering():
+    one = Worker("spark-a")
+    one.takes = 30
+    with as_controller():
+        fresh(one)
+        had = sparks.LOST
+        sparks.LOST = 0.6
+        try:
+            job = queue(1)
+            until = time.time() + 10
+            while time.time() < until and not one.jobs:
+                time.sleep(0.05)
+            assert one.jobs, "the worker did not take the clip"
+            one.dead = True
+            done = finished([job["id"]], 30)
+        finally:
+            sparks.LOST = had
+            one.dead = False
+            one.takes = TAKES
+        assert sparks.LOST == 60
+        assert done[0]["status"] == "failed" and sparks.NOT_HERE in done[0]["error"]
+        assert "stopped answering" in done[0]["error"]
+        assert local_render.most == 0
+        assert client.get("/api/sparks").json()["workers"][0]["state"] == "down"
+
+
+def test_a_direct_local_video_on_a_controller_fails_before_the_script():
+    with as_controller():
+        job = {"id": "ctrl-local", "kind": "video", "status": "running", "title": "clip", "log": "", "outputs": [],
+               "created": time.time(), "params": {"prompt": "a walk", "preset": PRESET, "quality": QUALITY, "frames": 22, "shot_check": False}}
+        server.perform(job)
+        assert job["status"] == "failed" and sparks.NOT_HERE in job["error"]
+        assert local_render.most == 0
 
 
 if __name__ == "__main__":
