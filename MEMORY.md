@@ -145,9 +145,9 @@ Recorded 2026-10-21. Commit `4718c9e` (not pushed). The app-only image is `imagi
 
 `/api/state` was 200: home `/data`, engine `none`, `image_models` `[]`, `local_render` false, mode `app-only`, platform label `LINUX · NO GPU · APP-ONLY`. The container has no `nvidia-smi`, so the lead reason inside it is `unavailable_hardware`. On the host, with the RTX 3060 visible, the lead reason remains `unmeasured_configuration`. Export stays enabled. A video job is refused. The update message is "This Studio is a container image. Rebuild the image and recreate the container to update."
 
-Compose publishes `127.0.0.1:7870` only. `HOST` is unset. Inside the bridge, `STUDIO_BIND=0.0.0.0` so the proxy can reach the app. The measured export was about 59–69 MiB RSS, 8–9 pids, and under 35% of one core. The applied ceiling is headroom over that run: memory 1 GiB, memswap 1 GiB (no extra swap), pids 64, CPUs 1. That ceiling does not replace the 8000 MB floor. An export completed under it.
+Compose publishes `127.0.0.1:7870` and `192.168.50.22:7870`. `HOST` is unset. Inside the bridge, `STUDIO_BIND=0.0.0.0` so the proxy can reach the app. The measured export was about 59–69 MiB RSS, 8–9 pids, and under 35% of one core. The applied ceiling is headroom over that run: memory 1 GiB, memswap 1 GiB (no extra swap), pids 64, CPUs 1. That ceiling does not replace the 8000 MB floor. An export completed under it.
 
-Projects, a Slate edit, an upload, a probe, and a 1-second ffmpeg export survived recreation on volume `imagination-studio-app-data`. Those workflow checks ran on image `sha256:63de09e728d224e54e87a615ee350f785b24dcea94dc8bf727e23b3eb19f20bd` (tag `658fb1a-dirty`). The committed rebuild reused those filesystem layers and changed the revision to `4718c9e`. `docker stop -t 20` exits 143: uvicorn re-raises SIGTERM after the lifespan shutdown. No owned GPU lock remained on the volume. The container is stopped. Port 7870 is free.
+Projects, a Slate edit, an upload, a probe, and a 1-second ffmpeg export survived recreation on volume `imagination-studio-app-data`. Those workflow checks ran on image `sha256:63de09e728d224e54e87a615ee350f785b24dcea94dc8bf727e23b3eb19f20bd` (tag `658fb1a-dirty`). The committed rebuild reused those filesystem layers and changed the revision to `4718c9e`. `docker stop -t 20` exits 143: uvicorn re-raises SIGTERM after the lifespan shutdown. No owned GPU lock remained on the volume. The container is published on `127.0.0.1:7870` and `192.168.50.22:7870`. There is no login. Updates, Brains, and Agents stay limited to loopback and Tailscale.
 
 | Run | Result |
 | --- | --- |
@@ -157,7 +157,7 @@ The 8 skips match Phase 1. In the browser, on the pre-commit image, Make image a
 
 ## Next steps
 
-1. Phase 4 of `docs/BUILD_PLAN.md`: host RAM, cgroup, and VRAM admission, plus renderer and lock ownership. Keep unsupported models disabled. Do not lower the 8000 MB floor. Keep the shared ComfyUI service, its models, and the container on port 8190 unchanged. The app container is stopped and port 7870 is free.
+1. Phase 4 of `docs/BUILD_PLAN.md`: host RAM, cgroup, and VRAM admission, plus renderer and lock ownership. Keep unsupported models disabled. Do not lower the 8000 MB floor. Keep the shared ComfyUI service, its models, and the container on port 8190 unchanged. The app container is published on `127.0.0.1:7870` and `192.168.50.22:7870`.
 2. Verify and benchmark the existing SDXL Turbo file under the guarded managed route once sufficient host RAM is available; establish limits from measurements before enabling it in the UI.
 3. Optionally implement controller-only support for eligible H3 video jobs on a capable worker. Keep other job types within their current execution constraints.
 4. Complete shutdown, persistence, backup/restore, rollback and documentation checks before calling a release ready.
