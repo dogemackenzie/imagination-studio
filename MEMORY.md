@@ -200,6 +200,6 @@ Phase 0 added `scripts/doctor.py` and ran it. At the end of that slice the only 
 
 ## Maintenance
 
-Commit each finished slice before starting the next one. Push only when asked.
+Commit each finished slice before starting the next one. Push that slice to the fork `https://github.com/dogemackenzie/imagination-studio` (`fork`). Pull the original from `https://github.com/wassermanproductions/imagination-studio` (`origin`). Do not push to `origin` unless asked. The fork adds to the original. It stays able to take upstream updates.
 
 Update this file when decisions are made or work is completed. Record what changed, validation results, unresolved issues, and the next concrete step. Keep proposals distinct from implemented behavior. Never store credentials, access tokens, or private prompt/media contents here.
