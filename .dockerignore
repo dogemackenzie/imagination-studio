@@ -7,7 +7,9 @@
 payload
 outputs
 samples
-docs
+docs/screenshots
+docs/shootout
+docs/brand
 .playwright-mcp
 **/*.safetensors
 **/*.ckpt
