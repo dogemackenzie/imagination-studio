@@ -222,7 +222,7 @@ Phase 0 added `scripts/doctor.py` and ran it. At the end of that slice the only 
 
 ## Maintenance
 
-Commit each finished slice before starting the next one. Push that slice to the fork `https://github.com/dogemackenzie/imagination-studio` (`fork`). Pull updates from `https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman` (`origin`). `wasserman` is the previous remote. Do not push to `origin`. The fork adds to the original. It stays able to take upstream updates.
+Commit each finished slice before starting the next one. Push that slice to the fork `https://github.com/dogemackenzie/imagination-studio` (`fork`). Pull updates from `https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman` (`origin`). `wasserman` is the previous remote. Do not push to `origin`. The fork adds to the original. It stays able to take upstream updates. Commits from this checkout use `112769895+dogemackenzie@users.noreply.github.com`, the GitHub noreply form the source uses (`id+login@users.noreply.github.com`).
 
 GitHub on this machine is this checkout only. The CLI is logged in as dogemackenzie with `GH_CONFIG_DIR=/home/spark/.config/imagination-studio-gh`. The binary is `/home/spark/.local/share/imagination-studio/gh/bin/gh`. The credential helper is set on this repo's `fork` remote. Do not run `gh auth setup-git`, and do not give other projects that config.
 
