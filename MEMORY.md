@@ -173,7 +173,9 @@ The 8 skips match Phase 1.
 
 ## Phase 5 SDXL Turbo on the shared ComfyUI
 
-Recorded 2026-10-21. The operator corrected the route: pictures go to the shared ComfyUI at `http://127.0.0.1:8188`. Studio does not start a second server, and it does not start, stop, interrupt, unload, or clear that service. Spark `call()` and `stop_comfy` still refuse port 8188. The published container was not rebuilt. It is still `imagination-studio-app:4718c9e` on `127.0.0.1:7870` and `192.168.50.22:7870`.
+Recorded 2026-10-21. The operator corrected the route: pictures go to the shared ComfyUI at `http://127.0.0.1:8188`. Studio does not start a second server, and it does not start, stop, interrupt, unload, or clear that service. Spark `call()` and `stop_comfy` still refuse port 8188.
+
+Rebuilt 2026-10-21 as `imagination-studio-app:a8edb67` (`sha256:8acb2d19d02c40850db99d3161e70775af7df6fe76701f156f6eaf2c2e4bdf60`, 788 MB), healthy on `127.0.0.1:7870` and `192.168.50.22:7870`. `GET /api/health` returned `{"ok":true,"version":"3.0.1","revision":"a8edb67","container":true}`. `/api/state` lists one picture model, `sdxl-turbo` at 512×512 and 1 step. `local_render` stays false. Scout and video stay disabled. The lead reason inside the container stays `unavailable_hardware`. From `192.168.50.22`, `/api/updates`, `/api/brains`, and `/api/agent/tools` return 403, and `/api/state` returns 200. The checkpoint is mounted read-only at `/models/sd_xl_turbo_1.0_fp16.safetensors`. No GPU is attached. An in-container budget check was ok: host available 13535 MB, free VRAM 11706 MiB, shared URL `http://172.17.0.1:8188`. It did not submit a prompt. Two projects were still listed. Home's Picture chip says SDXL Turbo and Picture Generate is enabled. Clip, Voice, and Song Generate stay disabled. Create offers only 512×512, and Make image was left unclicked. `comfyui.service` stayed active, MainPID 897018, NRestarts 0. `studio-studio-1` stayed healthy on `192.168.50.22:8190` and `:8443`.
 
 The checkpoint size matches 6,938,081,905 bytes. The sha256 is the Phase 0 value; this run did not re-read the file. The licence is the Stability AI Non-Commercial Research Community License. The recipe is 512×512, one step, ComfyUI cfg 1.0, `euler_ancestral`, `sgm_uniform`, batch size 1, count 1. The running server is the installed tree `e0a32bce84f4603f2b61b16b50f8958e68fd6171`. Pinned ComfyUI remains `b9b290e43f1eb379946dfeb013faf9bbefa1a618`. Spark's `--use-ck-attention` is unchanged.
 
@@ -184,12 +186,13 @@ One still finished. Prompt id `24757f89-dd49-404b-960b-8cfd462bab86`, seed 1, 51
 | Run | Result |
 | --- | --- |
 | Full `pytest tests` with `--timeout=240` (pytest 9.1.1), after the shared ComfyUI still | **672 passed, 8 skipped, 0 failed**, 155.76 s. Exit 0. Log `/tmp/phase5-shared2.log` |
+| Full `pytest tests` with `--timeout=240` (pytest 9.1.1), after the container still path | **674 passed, 8 skipped, 0 failed**, 157.47 s. Exit 0. Log `/tmp/phase5-container.log` |
 
 The 8 skips match Phase 1. The earlier route suite, before this correction, was 672 passed, 8 skipped, 159.38 s, log `/tmp/phase5-suite.log`.
 
 ## Next steps
 
-1. A later SDXL Turbo still submits to the shared ComfyUI only when the queue is empty and host available is at or above 8000 MB. The floor stays. Do not unload or restart pid 897018 to make that memory. The app container stays `imagination-studio-app:4718c9e` until a rebuild is asked for. Keep the models and the container on port 8190 unchanged. Phase 6 waits.
+1. The published app is `imagination-studio-app:a8edb67` on `127.0.0.1:7870` and `192.168.50.22:7870`. A still submits to the shared ComfyUI at `http://172.17.0.1:8188` only when its queue is empty and host available is at or above 8000 MB. The floor stays. Do not unload or restart pid 897018. Port 8188 is not published, and no GPU is attached to the app container. Keep the models and the container on port 8190 unchanged. Phase 6 waits.
 2. Optionally implement controller-only support for eligible H3 video jobs on a capable worker. Keep other job types within their current execution constraints.
 3. Complete shutdown, persistence, backup/restore, rollback and documentation checks before calling a release ready.
 
