@@ -139,15 +139,30 @@ The page no longer titles this host as a Mac. Home Generate, Make image, and Que
 
 The 8 skips match Phase 1: `tests/test_shot.py` (PyAV), `test_mend_paints_over_dull_green_residue`, `test_frame_from_a_clip`, two motion-link tests, two music soundtrack tests, and `test_the_delivery_sound_is_resampled_only_when_asked`. Browser check on `http://127.0.0.1:7870` used a temporary `STUDIO_HOME` and `STUDIO_DISCOVER_DELAY=-1`. Shared ComfyUI and `studio-studio-1` were not restarted or given jobs. Local rendering stays off. Phase 3 was not started.
 
+## Phase 3 app container
+
+Recorded 2026-10-21. Commit `4718c9e` (not pushed). The app-only image is `imagination-studio-app:4718c9e`, id `sha256:9b07ed901a8ec4c3be9b6e40a4954ad54c5ed15e399d6d5a81e6972e90c61a98`, 788 MB. It contains no model weights. Base digests are pinned for linux/amd64. `requirements.lock` is unchanged. The runtime has ffmpeg and ffprobe, uid 10001, and no gcc, git, nvcc, or pip. `GET /api/health` on that image returned `{"ok":true,"version":"3.0.1","revision":"4718c9e","container":true}`.
+
+`/api/state` was 200: home `/data`, engine `none`, `image_models` `[]`, `local_render` false, mode `app-only`, platform label `LINUX · NO GPU · APP-ONLY`. The container has no `nvidia-smi`, so the lead reason inside it is `unavailable_hardware`. On the host, with the RTX 3060 visible, the lead reason remains `unmeasured_configuration`. Export stays enabled. A video job is refused. The update message is "This Studio is a container image. Rebuild the image and recreate the container to update."
+
+Compose publishes `127.0.0.1:7870` only. `HOST` is unset. Inside the bridge, `STUDIO_BIND=0.0.0.0` so the proxy can reach the app. The measured export was about 59–69 MiB RSS, 8–9 pids, and under 35% of one core. The applied ceiling is headroom over that run: memory 1 GiB, memswap 1 GiB (no extra swap), pids 64, CPUs 1. That ceiling does not replace the 8000 MB floor. An export completed under it.
+
+Projects, a Slate edit, an upload, a probe, and a 1-second ffmpeg export survived recreation on volume `imagination-studio-app-data`. Those workflow checks ran on image `sha256:63de09e728d224e54e87a615ee350f785b24dcea94dc8bf727e23b3eb19f20bd` (tag `658fb1a-dirty`). The committed rebuild reused those filesystem layers and changed the revision to `4718c9e`. `docker stop -t 20` exits 143: uvicorn re-raises SIGTERM after the lifespan shutdown. No owned GPU lock remained on the volume. The container is stopped. Port 7870 is free.
+
+| Run | Result |
+| --- | --- |
+| Full `pytest tests` with `--timeout=240` (pytest 9.1.1), after the container-mode edits | **643 passed, 8 skipped, 0 failed**, 156.14 s. Exit 0. Log `/tmp/phase3-build/suite3.log` |
+
+The 8 skips match Phase 1. In the browser, on the pre-commit image, Make image and Queue this clip were disabled with "No GPU is available for a local render on this machine." Home Generate, the Voice render control, and Music Generate were disabled. The credits "Built with Fish Audio" and "MiniMax-Music3" were still shown. Updates showed the container rebuild sentence. A fresh Create load reported no console errors. Shared `comfyui.service` stayed active, MainPID 897018, NRestarts 0. `studio-studio-1` stayed healthy on `192.168.50.22:8190` and `:8443`. Local rendering stays off. Phase 4 was not started.
+
 ## Next steps
 
-1. Phase 3 of `docs/BUILD_PLAN.md`: an app-only container on `127.0.0.1:7870`, with persistent storage, loopback binding, health checks, and a pinned dependency set. Do not enable a renderer. Keep the shared ComfyUI service, its models, and the container on port 8190 unchanged. Do not lower the 8000 MB floor.
-2. Add host-RAM, cgroup and VRAM admission plus renderer/lock ownership checks. Keep unsupported models disabled.
-3. Verify and benchmark the existing SDXL Turbo file under the guarded managed route once sufficient host RAM is available; establish limits from measurements before enabling it in the UI.
-4. Optionally implement controller-only support for eligible H3 video jobs on a capable worker. Keep other job types within their current execution constraints.
-5. Complete shutdown, persistence, backup/restore, rollback and documentation checks before calling a release ready.
+1. Phase 4 of `docs/BUILD_PLAN.md`: host RAM, cgroup, and VRAM admission, plus renderer and lock ownership. Keep unsupported models disabled. Do not lower the 8000 MB floor. Keep the shared ComfyUI service, its models, and the container on port 8190 unchanged. The app container is stopped and port 7870 is free.
+2. Verify and benchmark the existing SDXL Turbo file under the guarded managed route once sufficient host RAM is available; establish limits from measurements before enabling it in the UI.
+3. Optionally implement controller-only support for eligible H3 video jobs on a capable worker. Keep other job types within their current execution constraints.
+4. Complete shutdown, persistence, backup/restore, rollback and documentation checks before calling a release ready.
 
-Phase 0 added `scripts/doctor.py` and ran it. The only container was a disposable `nvidia-smi` probe; the Studio app image was not built. No runtime packages were installed, no model weights were downloaded, and the shared ComfyUI service was not changed.
+Phase 0 added `scripts/doctor.py` and ran it. At the end of that slice the only container was a disposable `nvidia-smi` probe. No model weights were downloaded, and the shared ComfyUI service was not changed. The app image arrived in Phase 3.
 
 ## Maintenance
 

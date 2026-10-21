@@ -168,6 +168,16 @@ Proposed files: `Dockerfile.studio`, `.dockerignore`, `compose.yaml`, `.env.exam
 
 **Acceptance:** container builds without downloading weights; projects and media survive recreation; the existing ComfyUI service is unchanged; listeners remain loopback; imports, Slate edits, media playback/probing, and a small FFmpeg export work as the unprivileged user; stopping the container leaves no owned renderer or stale lock.
 
+**Recorded 2026-10-21:** `Dockerfile.studio`, `compose.yaml`, and the app-only entrypoint ship that container. Base images are pinned by linux/amd64 digest. `requirements.lock` is unchanged. The runtime image has ffmpeg and ffprobe, runs as uid 10001, and has no gcc, git, nvcc, or pip. `GET /api/health` returns ok, version, revision, and container, and does not scan disks or load models. In-place git and pip updates are off. The container sentence is "This Studio is a container image. Rebuild the image and recreate the container to update." Discovery uses named roots only. Managed ComfyUI nodes are staged at build and are not copied at runtime. Compose publishes `127.0.0.1:7870` only. `HOST` stays unset. `STUDIO_BIND` is `0.0.0.0` inside the bridge so the published loopback port works.
+
+The measured app-only export was about 59–69 MiB RSS, 8–9 pids, and under 35% of one core. The ceiling is headroom over that run: 1 GiB memory, 1 GiB memswap (no extra swap), 64 pids, 1 CPU. It does not replace the 8000 MB admission floor. An export finished under that ceiling. A video job returns 400 `unavailable_hardware` because this image has no `nvidia-smi`. On the host, with the RTX 3060 visible, the lead reason remains `unmeasured_configuration`.
+
+Projects, a Slate edit, an upload, a probe, and a 1-second ffmpeg export survived recreation on volume `imagination-studio-app-data`. `docker stop -t 20` exits 143 because uvicorn re-raises SIGTERM after shutdown. The owned GPU lock was absent afterward. Shared `comfyui.service` stayed active, MainPID 897018, NRestarts 0. Container `studio-studio-1` stayed healthy on `192.168.50.22:8190` and `:8443`.
+
+Full non-GPU suite (`pytest tests`, pytest 9.1.1, `--timeout=240`): **643 passed, 8 skipped, 0 failed**, 156.14 s. Exit 0. Log `/tmp/phase3-build/suite3.log`. The 8 skips are the same ffmpeg/PyAV set as Phase 1. In the browser, on the pre-commit image, Make image and Queue this clip were disabled with "No GPU is available for a local render on this machine." Home Generate, Voice, and Music render controls were disabled. Voice still says "Built with Fish Audio" and Music still says "MiniMax-Music3". A fresh load of Create reported no console errors.
+
+The committed image is `imagination-studio-app:4718c9e` (`sha256:9b07ed901a8ec4c3be9b6e40a4954ad54c5ed15e399d6d5a81e6972e90c61a98`, 788 MB). Its filesystem layers match the image that ran the workflow checks (`sha256:63de09e728d224e54e87a615ee350f785b24dcea94dc8bf727e23b3eb19f20bd`, revision `658fb1a-dirty`). After the commit, only the revision label changed. `GET /api/health` on `4718c9e` returned `{"ok":true,"version":"3.0.1","revision":"4718c9e","container":true}`. `/api/state` was 200: home `/data`, engine `none`, `image_models` `[]`, `local_render` false, platform label `LINUX · NO GPU · APP-ONLY`. The container was stopped afterward. Port 7870 is free. Local rendering stays off.
+
 ## Phase 4 Add RTX admission and guarded lifecycle
 
 **Outcome:** rendering is allowed only when host memory, container memory, GPU memory, and ownership requirements all pass.
@@ -268,4 +278,4 @@ The first useful release is A–D plus the app-only parts of H. GPU validation m
 
 ## Immediate next work
 
-Phase 2 is done. Start Phase 3 (the app-only container at `127.0.0.1:7870`). Do not enable a local render route. Preserve the shared ComfyUI service, its model files, and the container that publishes port 8190. Treat unmeasured hardware and the 8000 MB floor as rendering gates. Do not lower the floor. Local rendering stays off.
+Phase 3 is done. Start Phase 4 (RTX host, cgroup, and VRAM admission, and renderer ownership). The app container is stopped and port 7870 is free. Preserve the shared ComfyUI service, its model files, and the container that publishes port 8190. Treat unmeasured hardware and the 8000 MB floor as rendering gates. Do not lower the floor. Local rendering stays off until a measured profile exists.
