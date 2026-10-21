@@ -22,6 +22,24 @@ os.environ.setdefault("BOLT_BACKEND", "external")
 # The access key (app/access.py) stays off unless tests/test_access.py turns it on for its own requests.
 os.environ.setdefault("STUDIO_ACCESS_KEY", "off")
 
+# A named RTX card, with memory above the floor. Tests that describe this card pin it, so a runner
+# with no GPU still checks the same refusal. It is not a claim that the runner has this card.
+RTX_OBS = {
+    "os": "linux", "arch": "x86_64", "cpu": "", "product": "",
+    "gpu": {"name": "NVIDIA GeForce RTX 3060", "family": "nvidia-rtx", "uuid": "", "memory_mib": 12288, "driver": ""},
+    "memory_mb": {"total": 16000, "available": 15000},
+}
+
+
+@pytest.fixture
+def named_rtx():
+    """Observe a named RTX card for one test, then read the machine again."""
+
+    import hardware
+    hardware.use_observation(RTX_OBS)
+    yield RTX_OBS
+    hardware.clear()
+
 
 def _server():
     return sys.modules.get("server")

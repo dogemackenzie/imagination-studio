@@ -195,7 +195,7 @@ def test_a_clear_budget_does_not_enable_the_model(tmp_path, monkeypatch):
     assert memory_guard.ESTIMATES == {"int8": (54_500, 215), "int8-lora": (54_500, 215), "bf16": (75_000, 47)}
 
 
-def test_the_queue_refuses_sdxl_until_a_profile_exists(tmp_path, monkeypatch):
+def test_the_queue_refuses_sdxl_until_a_profile_exists(tmp_path, monkeypatch, named_rtx):
     # The committed profile may be enabled. This test pins a missing one so it cannot enqueue a real still.
     monkeypatch.setenv("SDXL_PROFILE", str(tmp_path / "missing.json"))
     before = set(server.jobs)
@@ -220,7 +220,7 @@ def test_the_queue_refuses_sdxl_until_a_profile_exists(tmp_path, monkeypatch):
     assert "measured profile" in str(caught.value.detail)
 
 
-def test_an_offered_still_is_512_and_does_not_open_video(measured):
+def test_an_offered_still_is_512_and_does_not_open_video(measured, named_rtx):
     assert S.offered() is True
     assert server.image_models() == ["sdxl-turbo"]
     assert "qwen" not in server.image_models()

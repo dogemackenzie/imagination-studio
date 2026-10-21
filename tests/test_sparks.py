@@ -761,7 +761,7 @@ def as_controller():
         capabilities.use(saved[4])
 
 
-def test_a_controller_queues_a_clip_the_worker_renders_and_this_machine_does_not():
+def test_a_controller_queues_a_clip_the_worker_renders_and_this_machine_does_not(named_rtx):
     one = Worker("spark-a")
     with as_controller() as calls:
         fresh(one)

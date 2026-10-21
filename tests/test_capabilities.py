@@ -1,5 +1,6 @@
-"""Hardware and capability boundaries. This file stays on the real machine except where a test pins a mode
-and restores it. An RTX host is app-only: the GPU is reported, and no generative route is enabled.
+"""Hardware and capability boundaries. A test that describes an RTX card pins that card. The live machine
+is read only for what it actually reports. An RTX host is app-only: the GPU is named, and no generative
+route is enabled.
 """
 import subprocess
 import sys
@@ -26,12 +27,17 @@ def reset_mode():
     capabilities.use(None)
 
 
-def test_this_machine_is_an_rtx_and_not_a_spark():
+def test_this_machine_is_not_a_spark():
     obs = hardware.observe()
     assert obs["arch"] == "x86_64"
-    assert obs["gpu"]["family"] == "nvidia-rtx"
-    assert "RTX 3060" in obs["gpu"]["name"]
     assert hardware.is_spark() is False
+    name = (obs["gpu"]["name"] or "").strip()
+    if "RTX 3060" in name:
+        assert obs["gpu"]["family"] == "nvidia-rtx"
+    elif not name:
+        assert obs["gpu"]["family"] == "none"
+    else:
+        assert obs["gpu"]["family"] == hardware.family_of(name, obs.get("product") or "")
     assert hardware.family_of("NVIDIA GB10") == "nvidia-spark"
     assert hardware.family_of("Something", "NVIDIA DGX Spark") == "nvidia-spark"
     assert hardware.family_of("NVIDIA GeForce RTX 3060") == "nvidia-rtx"
@@ -43,7 +49,7 @@ def test_this_machine_is_an_rtx_and_not_a_spark():
     }
 
 
-def test_state_is_app_only_and_names_the_gpu():
+def test_state_is_app_only_and_names_the_gpu(named_rtx):
     state = client.get("/api/state").json()
     assert state["platform"] == "linux"
     assert "RTX 3060" in state["platform_label"]
@@ -77,7 +83,7 @@ def test_state_is_app_only_and_names_the_gpu():
     assert state["sparks"]["supported"] is server.SPARK
 
 
-def test_a_direct_generative_post_is_refused_and_not_queued():
+def test_a_direct_generative_post_is_refused_and_not_queued(named_rtx):
     before = set(server.jobs)
     video = client.post("/api/jobs", json={"kind": "video", "params": {"prompt": "a harbour at dawn", "preset": "small",
                                                                        "quality": "fh8", "seconds": 5}})
@@ -131,7 +137,7 @@ def test_a_missing_gpu_and_a_free_machine_stay_closed():
     assert capabilities.refusal("picture", False)["code"] == "unmeasured_configuration"
 
 
-def test_a_controller_does_not_open_a_local_render(capsys):
+def test_a_controller_does_not_open_a_local_render(named_rtx, capsys):
     capabilities.use("controller")
     assert capabilities.mode(False) == "controller"
     assert capabilities.renders(False) is False
@@ -146,11 +152,15 @@ def test_a_controller_does_not_open_a_local_render(capsys):
 
 
 def test_scripts_refuse_before_the_spark_handoff():
+    # A new process reads this machine. A named GPU says the route is unmeasured. No GPU says none is available.
+    items = capabilities.reasons(hardware.is_spark())
+    assert items
+    reason = items[0]["reason"]
     done = subprocess.run(["bash", str(ROOT / "scripts/require-route.sh"), "video"], capture_output=True, text=True, timeout=30)
-    assert done.returncode == 1 and "measured" in done.stderr.lower()
+    assert done.returncode == 1 and reason in done.stderr
     image = subprocess.run(["bash", str(ROOT / "scripts/image.sh"), "a lighthouse", "/tmp/studio-should-not-render.png"],
                            capture_output=True, text=True, timeout=30)
-    assert image.returncode == 1 and "measured" in image.stderr.lower()
+    assert image.returncode == 1 and reason in image.stderr
     assert "spark/image.sh" not in image.stderr and not Path("/tmp/studio-should-not-render.png").exists()
 
 
@@ -172,5 +182,7 @@ def test_host_profiles_keep_each_machines_routes(host):
     else:
         assert capabilities.mode(server.SPARK) == "app-only"
         assert capabilities.renders(server.SPARK) is False
-        assert "RTX 3060" in server.machine()[1]
+        label = server.machine()[1]
+        name = ((hardware.observe().get("gpu") or {}).get("name") or "").strip()
+        assert (name.upper() in label) if name else label == "LINUX"
     assert server.SPARK is (host == "spark")
