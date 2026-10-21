@@ -11,8 +11,8 @@ members, sizes, a safetensors header, a sha256 where the studio knows one) and l
 - ``unlink``: undoes a link the studio made, never a link of the user's own.
 
 Nothing is moved, copied, deleted or downloaded. A scan runs in a background thread, one at a time, at a low
-priority, never inside a request handler: once after the app starts (``STUDIO_DISCOVER_DELAY``, 20 s) and on
-demand, for at most ``STUDIO_SCAN_SECONDS`` (120). ``python3 app/discover.py --scan [--link]`` runs one from a
+priority, never inside a request handler: once after the app starts (``schedule``, ``STUDIO_DISCOVER_DELAY``,
+20 s) and on demand, for at most ``STUDIO_SCAN_SECONDS`` (120). ``python3 app/discover.py --scan [--link]`` runs one from a
 shell (the one-shot installers do, before each download). Standard library only at the top, so the installers'
 Python can run it.
 """
@@ -1235,8 +1235,47 @@ def start_scan() -> bool:
     return True
 
 
+_scheduled: threading.Timer | None = None
+_schedule_lock = threading.Lock()
+
+
+def schedule(delay: float | None = None) -> None:
+    """Arm the one scan that follows app start. A delay below 0 arms nothing, so a test can import the app
+    without walking this machine's disks. ``attach`` does not call this: startup does."""
+
+    global _scheduled
+    if delay is None:
+        try:
+            delay = float(os.environ.get("STUDIO_DISCOVER_DELAY", "20"))
+        except (TypeError, ValueError):
+            delay = 20.0
+    if delay < 0:
+        return
+
+    def fire() -> None:
+        start_scan()
+
+    with _schedule_lock:
+        if _scheduled is not None:
+            _scheduled.cancel()
+        timer = threading.Timer(delay, fire)
+        timer.daemon = True
+        _scheduled = timer
+        timer.start()
+
+
+def cancel() -> None:
+    """Drop a scan that has not started. One that is already walking finishes inside its own time budget."""
+
+    global _scheduled
+    with _schedule_lock:
+        if _scheduled is not None:
+            _scheduled.cancel()
+            _scheduled = None
+
+
 def attach(home_folder: Path, prefix_folder: Path):
-    """The API (GET /api/discover, POST /api/discover/scan|use|unlink) and the scan after start."""
+    """The API (GET /api/discover, POST /api/discover/scan|use|unlink). The scan after start is ``schedule``."""
 
     from fastapi import APIRouter, HTTPException, Request
 
@@ -1319,11 +1358,6 @@ def attach(home_folder: Path, prefix_folder: Path):
             raise HTTPException(400, str(error))
         return state()
 
-    delay = float(os.environ.get("STUDIO_DISCOVER_DELAY", 20))
-    if delay >= 0:
-        timer = threading.Timer(delay, start_scan)
-        timer.daemon = True
-        timer.start()
     return router
 
 

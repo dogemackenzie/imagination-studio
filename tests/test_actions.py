@@ -2,9 +2,12 @@
 Run: python3 -m pytest tests/test_actions.py (or python3 tests/test_actions.py)."""
 
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 import actions  # noqa: E402
@@ -152,6 +155,8 @@ def test_plate_fills_from_other_frames():
 
 
 def test_mend_paints_over_dull_green_residue():
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is not installed")
     import numpy as np
 
     sys.path.insert(0, str(PACK / "spark"))

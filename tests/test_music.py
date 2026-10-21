@@ -3,6 +3,7 @@ The soundtrack tests need ffmpeg and are skipped without it."""
 import json
 import math
 import os
+import pytest
 import shutil
 import struct
 import subprocess
@@ -24,6 +25,16 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 client = TestClient(server.app)
 voice.LOCK = Path(os.environ["STUDIO_GPU_LOCK"])
+
+
+@pytest.fixture(autouse=True)
+def stand_in_songs_are_not_this_machines_ram(monkeypatch):
+    """Song admission uses the Spark measurements. These stand-ins do not load them, and the tests that hold the
+    measurements pass their own available_mb. This host's free RAM must not refuse the stand-in."""
+
+    import memory_guard
+
+    monkeypatch.setattr(memory_guard, "meminfo", lambda text=None: {"MemTotal": 124_500, "MemAvailable": 118_000, "MemFree": 100_000})
 
 # `python -I -m tensorfold.music3 --model M --serve`, stood in for: the protocol of TensorFold's music3-mlx (6844b413)
 MLX_SERVE = r"""
@@ -86,6 +97,7 @@ def fake_mlx(folder: Path, streams: bool = False) -> "music.Mlx":
         for key in ("MUSIC3_VENV", "MUSIC3_MODEL"):
             os.environ.pop(key)
     one.known, one.NEED_GB, one.streams = (time.time(), ""), 0, streams
+    one.guard_gb = 0  # the stand-in process is a few kilobytes; the host's free memory must not kill it
     return one
 
 
@@ -528,7 +540,7 @@ def test_the_metal_engine_makes_a_song_under_the_lock_and_does_not_stream():
     with Mac(folder):
         one = music.engine()
         assert isinstance(one, music.Metal)
-        one.NEED_GB, one.known = 0, (time.time(), "")
+        one.NEED_GB, one.known, one.guard_gb = 0, (time.time(), ""), 0
         try:
             music.qa.ready = lambda: {"transcript": False, "runs": True, "missing": []}
             state = client.get("/api/music/state").json()
@@ -555,7 +567,7 @@ def test_the_cuda_engine_makes_a_song_stops_comfy_first_and_is_unloaded_before_o
     with Spark(folder):
         one = music.engine()
         assert isinstance(one, music.Cuda)
-        one.NEED_GB, one.known = 0, (time.time(), "")
+        one.NEED_GB, one.known, one.guard_gb = 0, (time.time(), ""), 0
         one.comfy_holds = lambda: "video" if comfy["up"] else ""
 
         def stop_comfy():
@@ -618,7 +630,7 @@ def test_the_cuda_engine_unloads_when_idle_and_gives_the_lock_back():
     had_up = voice.comfy_up
     with Spark(folder, MUSIC3_IDLE_S="1"):
         one = music.engine()
-        one.NEED_GB, one.known = 0, (time.time(), "")
+        one.NEED_GB, one.known, one.guard_gb = 0, (time.time(), ""), 0
         try:
             voice.comfy_up = lambda port=None: False
             done = wait(client.post("/api/music/takes", json={"caption": "lo-fi", "seconds": 10, "asr": False}).json()["id"])
@@ -716,7 +728,7 @@ def level(path: Path, start: float, end: float, filters: str) -> float:
 
 def test_a_song_is_laid_under_a_clip_ducked_under_speech_and_never_clips():
     if not shutil.which("ffmpeg"):
-        return
+        pytest.skip("ffmpeg is not installed")
     folder = Path(tempfile.mkdtemp())
     sound, song = folder / "dialogue.wav", folder / "song.wav"
     # the clip: silence, then a 1 kHz "voice" from 2 to 4 s; the song: a loud 110 Hz line, longer than the clip
@@ -745,7 +757,7 @@ def test_a_song_is_laid_under_a_clip_ducked_under_speech_and_never_clips():
 
 def test_soundtrack_and_export_jobs_take_a_song():
     if not shutil.which("ffmpeg"):
-        return
+        pytest.skip("ffmpeg is not installed")
     folder = server.HOME / "music"
     folder.mkdir(parents=True, exist_ok=True)
     tone(folder / "song-t.wav", 4, [(220, 0.5, 0, 4)], rate=44100)
@@ -776,5 +788,9 @@ def test_soundtrack_and_export_jobs_take_a_song():
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
-            test()
+            try:
+                test()
+            except pytest.skip.Exception as skipped:
+                print("skipped", name, skipped)
+                continue
             print("ok", name)

@@ -1,6 +1,7 @@
 """The studio's frame and its rooms (app/static/shell.js, home.js, engines.js, machine.js, agent.js, suite.js, updates.js), run in node with
 the page's helpers stood in for: python3 tests/test_shell_page.py. Skipped where node is not installed."""
 import json
+import pytest
 import shutil
 import subprocess
 import tempfile
@@ -43,7 +44,7 @@ vm.runInThisContext(`(async () => { const out = {}; ${fs.readFileSync(process.ar
 
 def run(code: str) -> dict:
     if not shutil.which("node"):
-        return None
+        pytest.skip("node is not installed")
     with tempfile.TemporaryDirectory() as scratch:
         (Path(scratch) / "harness.js").write_text(HARNESS)
         (Path(scratch) / "test.js").write_text(code)

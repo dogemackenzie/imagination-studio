@@ -4,6 +4,7 @@ that answers the calls this app makes to one (its page's own API), and ssh, rsyn
 import ast
 import json
 import os
+import pytest
 import shutil
 import subprocess
 import sys
@@ -23,7 +24,6 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 client = TestClient(server.app)
 hub = server.hub
-hub.spark = True  # the scheduler is the same on any machine once ssh and the renders are stood in for
 PRESET = "small" if "small" in server.PRESETS else next(iter(server.PRESETS))
 QUALITY = "fh8"
 TAKES = 0.35  # how long a stand-in render takes, here and on a worker
@@ -76,15 +76,19 @@ class Worker:
                     outer.most = max(outer.most, sum(1 for j in outer.jobs.values() if j["status"] == "running"))
 
                     def finish():
-                        time.sleep(outer.takes)
-                        if job["status"] != "running":
-                            return
-                        if outer.fails:
-                            job.update(status="failed", error="ComfyUI stopped: the memory floor")
-                            return
-                        outer.files[f"renders/{job['id']}.mp4"] = f"made on {outer.name}".encode()
-                        job.update(status="done", outputs=[f"renders/{job['id']}.mp4"])
+                        try:
+                            time.sleep(outer.takes)
+                            if job["status"] != "running":
+                                return
+                            if outer.fails:
+                                job.update(status="failed", error="ComfyUI stopped: the memory floor")
+                                return
+                            outer.files[f"renders/{job['id']}.mp4"] = f"made on {outer.name}".encode()
+                            job.update(status="done", outputs=[f"renders/{job['id']}.mp4"])
+                        finally:
+                            flight.leave()
 
+                    flight.enter()
                     threading.Thread(target=finish, daemon=True).start()
                     return self.answer(job)
                 if path.startswith("/api/jobs/") and path.endswith("/cancel"):
@@ -109,6 +113,7 @@ class Worker:
         self.http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.base = f"http://127.0.0.1:{self.http.server_address[1]}"
         self.address = f"10.9.9.{self.http.server_address[1] % 250 + 1}"
+        OPEN.append(self)
         threading.Thread(target=self.http.serve_forever, daemon=True).start()
 
 
@@ -130,6 +135,7 @@ class Line:
 
 
 WORKERS: dict[str, Worker] = {}
+OPEN: list[Worker] = []  # every stand-in server, so teardown can close one a later fresh() dropped
 SENT = []  # rsync, stood in for: (address, folder)
 SHELLS = []  # every command ssh was asked to run
 
@@ -142,11 +148,38 @@ def stand_in_shell(address, command, timeout=30):
     return 0, "\n".join([f"host {worker.name}", "version 2.6.6", "pack yes", "install yes", "MemTotal: 127599612 kB", "MemAvailable: 118784000 kB", "app yes", "ours yes"])
 
 
+class InFlight:
+    """How many stand-in renders are inside their take at once, on this machine and on workers together."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.now = 0
+        self.most = 0
+
+    def enter(self) -> None:
+        with self.lock:
+            self.now += 1
+            self.most = max(self.most, self.now)
+
+    def leave(self) -> None:
+        with self.lock:
+            self.now -= 1
+
+    def reset(self) -> None:
+        with self.lock:
+            self.now = 0
+            self.most = 0
+
+
+flight = InFlight()
+
+
 def local_render(job, command, env, label=""):
     """This machine's render, stood in for: the clip appears at its path after a moment."""
 
     local_render.now += 1
     local_render.most = max(local_render.most, local_render.now)
+    flight.enter()
     try:
         time.sleep(TAKES)
         if job["status"] == "cancelled":
@@ -155,14 +188,65 @@ def local_render(job, command, env, label=""):
         return True
     finally:
         local_render.now -= 1
+        flight.leave()
 
 
 local_render.now = local_render.most = 0
-server.run = local_render
-server.memory_of = lambda *args, **kwargs: {"fits": True, "reason": ""}  # this machine's guard has its own tests
-hub.shell, hub.copy = stand_in_shell, lambda pack, address, folder, timeout=900: (SENT.append((address, folder)), (0, ""))[1]
-hub.dial = lambda address: Line(WORKERS[address])
-threading.Thread(target=hub.loop, daemon=True).start()
+
+
+def memory_fits(*_args, **_kwargs):
+    return {"fits": True, "reason": ""}
+
+
+def tools_present():
+    """The stand-in renders never run ffmpeg. A chain test stubs the frame cut and must not depend on the host tool."""
+
+    return {"ffmpeg": True, "ffprobe": True}
+
+
+def install_stands():
+    """Stand in for ssh, rsync, the tunnel and this machine's render, and start the dispatch loop.
+
+    Done from the module fixture (and from ``python3 tests/test_sparks.py``), never while the module is imported:
+    an import-time replacement of ``memory_of`` used to disable the guard for every later test.
+    """
+
+    saved = (server.run, server.memory_of, server.media_tools, hub.shell, hub.copy, hub.dial, hub.spark)
+    local_render.now = local_render.most = 0
+    flight.reset()
+    server.run = local_render
+    server.memory_of = memory_fits
+    server.media_tools = tools_present
+    hub.shell = stand_in_shell
+    hub.copy = lambda pack, address, folder, timeout=900: (SENT.append((address, folder)), (0, ""))[1]
+    hub.dial = lambda address: Line(WORKERS[address])
+    hub.spark = True  # the scheduler is the same on any machine once ssh and the renders are stood in for
+    hub.stopped.clear()
+    hub.thread = threading.Thread(target=hub.loop, daemon=True, name="sparks-test-loop")
+    hub.thread.start()
+    return saved
+
+
+def remove_stands(saved) -> None:
+    hub.stop_loop()
+    for worker in list(OPEN):
+        try:
+            worker.http.shutdown()
+            worker.http.server_close()
+        except OSError:
+            pass
+    OPEN.clear()
+    if hub.thread is not None and hub.thread.is_alive():
+        hub.thread.join(timeout=5.0)  # a glance in flight has its own short timeout; don't restore real ssh under it
+    server.run, server.memory_of, server.media_tools, hub.shell, hub.copy, hub.dial, hub.spark = saved
+    assert server.memory_of.__module__ == "server"
+
+
+@pytest.fixture(autouse=True, scope="module")
+def stand_ins():
+    saved = install_stands()
+    yield
+    remove_stands(saved)
 
 
 def fresh(*workers: Worker) -> None:
@@ -177,6 +261,7 @@ def fresh(*workers: Worker) -> None:
         server.jobs.clear()
         server.order.clear()
     local_render.most = 0
+    flight.reset()
     for worker in workers:
         WORKERS[worker.address] = worker
         added = client.post("/api/sparks/workers", json={"address": worker.address})
@@ -293,14 +378,12 @@ def test_queued_clips_render_one_per_spark_and_come_back_here():
     fresh(one, two)
     picture = server.HOME / "uploads" / "first.png"
     picture.write_bytes(b"a first frame")
-    started = time.time()
     ids = [queue(3, seed=10 + n, image="uploads/first.png", output=f"projects/p1/seg{n}.mp4" if n == 0 else None)["id"] for n in range(6)]
     done = finished(ids)
-    wall = time.time() - started
     assert all(job["status"] == "done" for job in done), [(job["status"], job["error"]) for job in done]
     assert {job["spark"] for job in done} == {hub.name, "spark-a", "spark-b"}
     assert one.most == 1 and two.most == 1 and local_render.most == 1  # one job on a Spark at a time
-    assert wall < 6 * TAKES * 0.75, wall  # three machines, not one after another
+    assert flight.most >= 2  # the machines overlapped; a wall-clock budget is not the evidence
     made = hub.takes()
     for job in done:
         clip = server.HOME / job["outputs"][0]
@@ -559,7 +642,7 @@ vm.runInThisContext(`(async () => { const out = {};
 
 def test_the_page_draws_the_chooser_and_the_list():
     if not shutil.which("node"):
-        return
+        pytest.skip("node is not installed")
     with tempfile.TemporaryDirectory() as scratch:
         (Path(scratch) / "harness.js").write_text(PAGE)
         done = subprocess.run(["node", str(Path(scratch) / "harness.js"), str(ROOT / "app/static/sparks.js")], capture_output=True, text=True, timeout=60)
@@ -578,7 +661,15 @@ def test_the_page_draws_the_chooser_and_the_list():
 
 
 if __name__ == "__main__":
-    for name, test in list(globals().items()):
-        if name.startswith("test_"):
-            test()
-            print("ok", name)
+    saved = install_stands()
+    try:
+        for name, test in list(globals().items()):
+            if name.startswith("test_"):
+                try:
+                    test()
+                except pytest.skip.Exception as skipped:
+                    print("skipped", name, skipped)
+                    continue
+                print("ok", name)
+    finally:
+        remove_stands(saved)

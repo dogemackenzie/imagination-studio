@@ -294,6 +294,8 @@ class Hub:
         self.live: dict[str, dict] = {}   # address -> state, why, info, base, tunnel, job, working, checked
         self.mutex = threading.RLock()    # over self.live; taken after the queue's lock, never before it
         self.kick = threading.Event()
+        self.stopped = threading.Event()  # ends loop(); the worker action named stop is a different thing
+        self.thread: threading.Thread | None = None
         self.mine: dict | None = None
         self.shell, self.copy, self.dial = shell, copy, lambda address: Tunnel(address)  # stood in for by the tests
         self.started = False
@@ -688,8 +690,10 @@ class Hub:
         """Hands queued clips to idle workers, one each; looks at every connected worker now and then."""
 
         looked = 0.0
-        while True:
+        while not self.stopped.is_set():
             self.kick.wait(timeout=1.0)
+            if self.stopped.is_set():
+                return
             self.kick.clear()
             try:
                 with self.lock:
@@ -733,13 +737,25 @@ class Hub:
 
         if self.started or not self.spark:
             return
+        self.stopped.clear()
         self.started = True
         self.sweep()
         atexit.register(self.close)
-        threading.Thread(target=self.loop, daemon=True).start()
+        self.thread = threading.Thread(target=self.loop, daemon=True, name="sparks-loop")
+        self.thread.start()
         for worker in self.workers():
             if worker.get("enabled", True):
                 self.act(worker["address"], "check")
+
+    def stop_loop(self) -> None:
+        """Stop the dispatch loop and join it. This is not the worker action ``stop`` (that one is ``act(..., "stop")``)."""
+
+        self.stopped.set()
+        self.kick.set()
+        thread = self.thread
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=2.0)
+        self.started = False
 
     # ---- one clip on a worker -----------------------------------------------------------------------------------------
 

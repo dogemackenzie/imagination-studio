@@ -677,13 +677,14 @@ class Cuda(Served):
         if live:  # played while it is made: the engine writes each part's raw PCM there as it goes (/live)
             folder.mkdir(exist_ok=True)
             LIVE[job["id"]] = {"parts": [folder / f"{i}.pcm" for i in range(len(parts))], "done": False, "finished": 0, "gap_s": self.GAP_S}
+        answers, files = [], []
+        began = loaded = time.time()
         with self.mutex:
             began = time.time()
-            if not self.start(job):
-                return None
-            loaded = time.time()
-            answers, files = [], []
             try:
+                if not self.start(job):
+                    return None
+                loaded = time.time()
                 for index, part in enumerate(parts):
                     if managed():
                         submission_check()
@@ -710,7 +711,9 @@ class Cuda(Served):
                     self.last_used = time.time()
             finally:
                 self.last_used = time.time()
-                if live:
+                # end the stream even when the load fails before the first part: /live would otherwise wait out its
+                # ten quiet minutes (the page, and a test, both read the body until the generator returns)
+                if live and job["id"] in LIVE and not LIVE[job["id"]]["done"]:
                     LIVE[job["id"]]["done"] = True
                     # the raw parts go a minute later: a page may still be playing the end of the live take
                     threading.Timer(60, forget_live, args=(job["id"], folder)).start()

@@ -1,6 +1,7 @@
 """Studio Vault → Looks (app/static/looks.js), run in node with the page's helpers stood in for:
 python3 tests/test_looks_page.py. Skipped where node is not installed."""
 import json
+import pytest
 import shutil
 import subprocess
 import tempfile
@@ -50,7 +51,7 @@ HUB.groups = [{ id: "wasserman", name: "Wasserman" }, { id: "camera", name: "Cam
 
 def run(code: str) -> dict:
     if not shutil.which("node"):
-        return None
+        pytest.skip("node is not installed")
     with tempfile.TemporaryDirectory() as scratch:
         (Path(scratch) / "harness.js").write_text(HARNESS)
         (Path(scratch) / "test.js").write_text(SETUP + code)

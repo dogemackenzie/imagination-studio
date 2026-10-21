@@ -127,6 +127,7 @@ def fake_cuda(folder: Path) -> "voice.Cuda":
         for key in ("DRAMA3_CUDA_BIN", "DRAMA3_CUDA_MODEL", "DRAMA3_CUDA_CODEC"):
             os.environ.pop(key)
     one.NEED_GB = 0  # the machine's memory is not this test's business
+    one.guard_gb = 0  # the stand-in process is a few kilobytes; the host's free memory must not kill it
     return one
 
 
@@ -491,6 +492,7 @@ def fake_mlx_server(folder: Path) -> "voice.Mlx":
     finally:
         os.environ.pop("DRAMA3_VENV")
     one.known, one.streams, one.serves, one.NEED_GB = (time.time(), ""), True, True, 0
+    one.guard_gb = 0  # the stand-in process is a few kilobytes; the host's free memory must not kill it
     return one
 
 

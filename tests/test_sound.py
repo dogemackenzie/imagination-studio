@@ -3,6 +3,7 @@ Nothing real runs: the sound environment's python is a stand-in that writes a sh
 runner writes, so the job, its checks, the takes list and the Library are tested end to end."""
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,8 +40,23 @@ print("[sound] done")
 '''
 
 
+def ffmpeg_is_present(monkeypatch):
+    """These tests build commands and queue stand-ins. A missing ffmpeg is its own check; here it is present."""
+
+    real = shutil.which
+
+    def which(cmd, mode=os.F_OK, path=None):
+        found = real(cmd, mode=mode, path=path)
+        if found is None and cmd in ("ffmpeg", "ffprobe"):
+            return f"/usr/bin/{cmd}"
+        return found
+
+    monkeypatch.setattr(shutil, "which", which)
+
+
 @pytest.fixture
 def ready(tmp_path, monkeypatch):
+    ffmpeg_is_present(monkeypatch)
     models = tmp_path / "models"
     (models / "stable-audio-open-1.0").mkdir(parents=True)
     (models / "stable-audio-open-1.0" / "model_index.json").write_text("{}")
@@ -147,6 +163,8 @@ def spark(tmp_path, monkeypatch):
     """A Spark install as app/sound.py looks for it: the studio's venv and ComfyUI, kijai's nodes, the weights."""
 
     import memory_guard
+
+    ffmpeg_is_present(monkeypatch)
     prefix, models = tmp_path / "prefix", tmp_path / "spark-models"
     for path in ("venv/bin/python", "ComfyUI/main.py", "ComfyUI/custom_nodes/ComfyUI-MMAudio/nodes.py"):
         (prefix / path).parent.mkdir(parents=True, exist_ok=True)

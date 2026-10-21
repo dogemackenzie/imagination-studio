@@ -250,9 +250,6 @@ def learn_own_names() -> dict:
     return {"labels": {one for one in labels if one}, "tailnet": tailnet}
 
 
-threading.Thread(target=lambda into=OWN: into.update(learn_own_names()), daemon=True, name="own-names").start()
-
-
 def trusted_host(host: str) -> bool:
     """Whether a request's Host is one a page from elsewhere cannot point at this app (DNS rebinding): localhost, an
     address written as numbers (the app is opened to a LAN with HOST=0.0.0.0, so a LAN or tailnet address stays
@@ -1672,19 +1669,27 @@ def perform(job: dict, worker: dict | None = None) -> None:
             job["finished"] = time.time()
 
 
+# The queue thread is started by begin(), not by importing this module. Tests collect the app with pytest already
+# loaded and no current test, so that import stays free of threads; a real start and a script that imports the app
+# still call begin() below.
+_worker_stop = threading.Event()
+_worker_thread: threading.Thread | None = None
+_began = False
+_begin_lock = threading.Lock()
+
+
 def work() -> None:
-    while True:
+    while not _worker_stop.is_set():
         wake.wait()
         with lock:
+            if _worker_stop.is_set():  # shutdown asked while this thread waited: do not claim a job on the way out
+                return
             job = hub.claim()  # the next job for this machine; on a DGX Spark a worker may have taken others (sparks.py)
             if job is None:
                 wake.clear()
                 continue
         perform(job)
         hub.kick.set()
-
-
-threading.Thread(target=work, daemon=True).start()
 
 
 def public(job: dict) -> dict:
@@ -1867,6 +1872,10 @@ def queue_job(body: dict) -> dict:
         if not LONGEST < total <= max(LONG):
             raise HTTPException(400, f"a long video is over {LONGEST} seconds and at most {max(LONG) // 60} minutes")
         pieces = plan(total, int(params.get("segment_seconds", LONGEST)))
+        # before build: build asks the memory guard on a Spark, and that refusal would hide a missing ffmpeg
+        missing = without_ffmpeg(kind, params)
+        if missing:
+            raise HTTPException(400, missing)
         build("video", {**params, "seconds": pieces[0], "output": None}, "check")
     if kind not in ("export", "edit", "foley") + actions.KINDS and not (params.get("prompt") or "").strip():
         raise HTTPException(400, "a prompt is needed")
@@ -2470,6 +2479,53 @@ except ImportError:
     discover = None
 if discover is not None:
     app.include_router(discover.attach(HOME, Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-studio")).expanduser()))
+
+
+def begin() -> None:
+    """Start the queue, this machine's name lookup, and the delayed model scan. Idempotent.
+
+    Called from startup, and from import when this process is not pytest collecting tests. A second call does nothing
+    until end()."""
+
+    global _began, _worker_thread
+    with _begin_lock:
+        if _began:
+            return
+        _worker_stop.clear()
+        _worker_thread = threading.Thread(target=work, daemon=True, name="studio-queue")
+        _worker_thread.start()
+        threading.Thread(target=lambda into=OWN: into.update(learn_own_names()), daemon=True, name="own-names").start()
+        if discover is not None:
+            discover.schedule()
+        _began = True
+
+
+def end() -> None:
+    """Stop the queue before it claims another job, and cancel a model scan that has not started."""
+
+    global _began
+    with _begin_lock:
+        if not _began:
+            return
+        with lock:
+            _worker_stop.set()
+            wake.set()
+        if discover is not None:
+            discover.cancel()
+        thread = _worker_thread
+        _began = False
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout=2.0)
+
+
+app.router.on_startup.append(begin)
+if hasattr(app.router, "on_shutdown"):
+    app.router.on_shutdown.insert(0, end)  # before the updater and before hub.close, so a stopping app claims nothing
+
+# pytest is already imported while it collects modules, and PYTEST_CURRENT_TEST is unset until a test runs. A test
+# that first imports the app during its own run still starts the queue. A script and `python app/server.py` do too.
+if not ("pytest" in sys.modules and not os.environ.get("PYTEST_CURRENT_TEST")):
+    begin()
 
 
 @app.middleware("http")

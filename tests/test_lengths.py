@@ -44,13 +44,13 @@ def test_a_job_asks_by_frames_or_by_seconds():
 
 
 def test_the_job_gets_the_frames_it_asked_for():
-    _, env, _ = server.build("video", {"prompt": "a harbour", "preset": PRESET, "quality": QUALITY, "frames": 209}, "j1")
+    _, env, _ = server.build("video", {"prompt": "a harbour", "preset": PRESET, "quality": QUALITY, "frames": 209}, "j1", room=False)
     assert env["FRAMES"] == 209
-    _, env, _ = server.build("video", {"prompt": "a harbour", "preset": PRESET, "quality": QUALITY, "seconds": 10}, "j2")
+    _, env, _ = server.build("video", {"prompt": "a harbour", "preset": PRESET, "quality": QUALITY, "seconds": 10}, "j2", room=False)
     assert env["FRAMES"] == 243
-    _, env, _ = server.build("video", {"prompt": "a harbour", "preset": PRESET, "quality": QUALITY, "seconds": 12.5}, "j3")
+    _, env, _ = server.build("video", {"prompt": "a harbour", "preset": PRESET, "quality": QUALITY, "seconds": 12.5}, "j3", room=False)
     assert env["FRAMES"] == 294
-    assert "17n + 5" in refused(lambda: server.build("video", {"prompt": "x", "preset": PRESET, "quality": QUALITY, "frames": 200}, "j4"))
+    assert "17n + 5" in refused(lambda: server.build("video", {"prompt": "x", "preset": PRESET, "quality": QUALITY, "frames": 200}, "j4", room=False))
     reply = client.post("/api/jobs", json={"kind": "video", "params": {"prompt": "x", "preset": PRESET, "quality": QUALITY, "frames": 200}})
     assert reply.status_code == 400 and "nearest is 192 or 209" in reply.json()["error"]
 

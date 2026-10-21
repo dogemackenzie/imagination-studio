@@ -1,6 +1,7 @@
 """Machine → Models & weights (app/static/discover.js), run in node with the page's helpers stood in for:
 python3 -m pytest tests/test_discover_page.py. Skipped where node is not installed."""
 import json
+import pytest
 import shutil
 import subprocess
 import tempfile
@@ -48,7 +49,7 @@ STATE = {"scanning": False, "platform": "spark", "note": "Nothing is moved, copi
 
 def run(code: str) -> dict:
     if not shutil.which("node"):
-        return None
+        pytest.skip("node is not installed")
     with tempfile.TemporaryDirectory() as scratch:
         (Path(scratch) / "harness.js").write_text(HARNESS)
         (Path(scratch) / "test.js").write_text(code)

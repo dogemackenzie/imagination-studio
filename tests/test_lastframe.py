@@ -2,6 +2,7 @@
 Run: python3 -m pytest tests/test_lastframe.py (or python3 tests/test_lastframe.py). Needs ffmpeg for the frame test."""
 
 import os
+import pytest
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,8 @@ import server  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+HOME = server.HOME  # one app per process: a run that already imported the server keeps that folder
+os.environ["STUDIO_HOME"] = str(HOME)
 for name in ("renders", "uploads"):
     (HOME / name).mkdir(parents=True, exist_ok=True)
 client = TestClient(server.app)
@@ -38,17 +41,17 @@ def test_lead():
 def test_build_carries_the_last_frame():
     first, last = picture("a.png"), picture("b.png")
     base = {"prompt": "x", "preset": next(iter(server.PRESETS)), "quality": next(iter(server.QUALITIES)), "seconds": 5}
-    _, env, _ = server.build("video", {**base, "image": first, "last_image": last}, "t1")
+    _, env, _ = server.build("video", {**base, "image": first, "last_image": last}, "t1", room=False)
     assert env["LAST_FRAME"] == str(HOME / last) and env["IMAGE_FILE"] == str(HOME / first)
-    _, env, _ = server.build("video", {**base, "last_image": last}, "t2")  # a last frame alone
+    _, env, _ = server.build("video", {**base, "last_image": last}, "t2", room=False)  # a last frame alone
     assert env["LAST_FRAME"] == str(HOME / last) and "IMAGE_FILE" not in env
-    _, env, _ = server.build("video", {**base, "image": first, "last_same": True}, "t3")  # the clip returns to its start
+    _, env, _ = server.build("video", {**base, "image": first, "last_same": True}, "t3", room=False)  # the clip returns to its start
     assert env["LAST_FRAME"] == str(HOME / first)
-    _, env, _ = server.build("video", {**base, "image": first}, "t4")
+    _, env, _ = server.build("video", {**base, "image": first}, "t4", room=False)
     assert "LAST_FRAME" not in env
     for bad in ({"last_image": "uploads/missing.png"}, {"last_image": "../outside.png"}):
         try:
-            server.build("video", {**base, **bad}, "t5")
+            server.build("video", {**base, **bad}, "t5", room=False)
         except HTTPException as error:
             assert error.status_code in (400, 403)
         else:
@@ -62,7 +65,7 @@ def test_long_videos_refuse_a_last_frame():
 
 def test_frame_from_a_clip():
     if not shutil.which("ffmpeg"):
-        return
+        pytest.skip("ffmpeg is not installed")
     clip = HOME / "renders" / "bars.mp4"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=2", "-pix_fmt",
                     "yuv420p", str(clip)], check=True)
@@ -79,5 +82,9 @@ def test_frame_from_a_clip():
 if __name__ == "__main__":
     for name, test in list(globals().items()):
         if name.startswith("test_"):
-            test()
+            try:
+                test()
+            except pytest.skip.Exception as skipped:
+                print("skipped", name, skipped)
+                continue
             print("ok", name)

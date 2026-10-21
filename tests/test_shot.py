@@ -8,6 +8,9 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
+
+pytest.importorskip("av", reason="PyAV is not installed")
 
 os.environ.setdefault("STUDIO_HOME", str(Path(tempfile.mkdtemp()) / "TensorFoldStudio"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
