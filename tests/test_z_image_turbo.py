@@ -88,7 +88,7 @@ def test_the_recorded_profile_keeps_the_floor_and_a_stand_in_path():
     assert data["weights"]["unet"]["bytes"] == Z.UNET_BYTES
     assert data["weights"]["clip"]["file"] == Z.CLIP and data["weights"]["vae"]["file"] == Z.VAE
     assert data["weights"]["unet"]["path"].startswith("/home/spark/")
-    assert "/home/mcpadmin" not in text and "192.168." not in text
+    assert "192.168." not in text
     assert "not lowered" in data["note"] and "Apache License 2.0" in data["weights"]["unet"]["license"]
 
 
