@@ -192,7 +192,7 @@ The 8 skips match Phase 1. The earlier route suite, before this correction, was 
 
 ## Next steps
 
-1. The published app is `imagination-studio-app:a8edb67` on `127.0.0.1:7870` and `192.168.50.22:7870`. A still submits to the shared ComfyUI at `http://172.17.0.1:8188` only when its queue is empty and host available is at or above 8000 MB. The floor stays. Do not unload or restart pid 897018. Port 8188 is not published, and no GPU is attached to the app container. Keep the models and the container on port 8190 unchanged. Phase 6 waits.
+1. The published app is `imagination-studio-app:4a24378` (`sha256:c6e3ace6ad9095b542f442fa9372284f62ffe849b9a4e563bd8ec4b1df3b6f86`) on `127.0.0.1:7870` and `192.168.50.22:7870`. The sidebar says "for your own machine". Apple silicon and DGX Spark stay the measured homes of the full engines. A still submits to the shared ComfyUI at `http://172.17.0.1:8188` only when its queue is empty and host available is at or above 8000 MB. The floor stays. Do not unload or restart pid 897018. Port 8188 is not published, and no GPU is attached to the app container. Keep the models and the container on port 8190 unchanged. Phase 6 waits.
 2. Optionally implement controller-only support for eligible H3 video jobs on a capable worker. Keep other job types within their current execution constraints.
 3. Complete shutdown, persistence, backup/restore, rollback and documentation checks before calling a release ready.
 
