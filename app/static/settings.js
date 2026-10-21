@@ -270,13 +270,19 @@ function setEmbedded(section) { const [name, data] = SET_VIEWS[section], view = 
     const now = JSON.stringify(data() || null); if (now !== seen && !(document.activeElement && document.activeElement.matches && document.activeElement.matches("input,textarea,select"))) { seen = now; render(); } }, 1500);
   if (SET.embedTimer && SET.embedTimer.unref) SET.embedTimer.unref();
   return [el("div", { class: "st-embed", "data-embed": section }, view())]; }
+function settingsSections() {
+  // The published app reports access_key false. A native install leaves the section in place.
+  return SET_SECTIONS.filter(([id]) => id !== "access" || !(S && S.access_key === false));
+}
 function viewSettings() {
+  const sections = settingsSections();
+  if (!sections.some(([id]) => id === SET.section)) SET.section = sections[0][0];
   const draw = { appearance: setAppearance, layout: setLayout, presets: setPresets, connections: setConnections, access: setAccess, about: setAbout,
     models: () => setEmbedded("models"), sparks: () => setEmbedded("sparks"), brains: () => setEmbedded("brains"), updates: () => setEmbedded("updates") }[SET.section] || setAppearance;
   return el("div", { class: "settings" },
     typeof pageHead === "function" ? pageHead("Studio Vault", "Settings", "How the studio looks, what it shows, and what it connects to.") : el("h1", { class: "display" }, "Settings"),
     el("div", { class: "st-wrap" },
-      el("nav", { class: "st-rail", "aria-label": "Settings sections" }, SET_SECTIONS.map(([id, name, one]) => el("button", { type: "button", class: SET.section === id ? "on" : "", "aria-current": SET.section === id ? "page" : false, "data-section": id,
+      el("nav", { class: "st-rail", "aria-label": "Settings sections" }, sections.map(([id, name, one]) => el("button", { type: "button", class: SET.section === id ? "on" : "", "aria-current": SET.section === id ? "page" : false, "data-section": id,
         onclick: () => { SET.section = id; render(); } }, el("b", {}, name), el("span", {}, one)))),
       el("div", { class: "st-body" }, draw()))); }
 // open Settings at one section (⌘K, the Agent room's and Brains' links)

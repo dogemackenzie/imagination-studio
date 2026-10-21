@@ -9,7 +9,9 @@ key, ``<studio folder>/access-key`` (made once, mode 0600, kept across restarts 
 - the header ``X-Studio-Key`` (or ``Authorization: Bearer``), from a tool on another machine.
 
 ``scripts/studio-key.sh`` prints the key and the addresses. ``STUDIO_ACCESS_KEY=off`` turns the check off (the tests
-do); Settings → Access key, or deleting the file and restarting, makes a new key and signs every device out."""
+do). A published container (``STUDIO_CONTAINER=1``) is off unless ``STUDIO_ACCESS_KEY=on``: that app has no login,
+and a later image must not start asking. A native install with the variable unset still asks. Settings → Access key,
+or deleting the file and restarting, makes a new key and signs every device out."""
 from __future__ import annotations
 
 import hmac
@@ -24,7 +26,17 @@ YEAR = 400 * 24 * 3600  # a browser's longest cookie
 
 
 def enabled() -> bool:
-    return os.environ.get("STUDIO_ACCESS_KEY", "on").strip().lower() not in ("off", "0", "no", "false")
+    """Whether another device must present the key.
+
+    ``off``, ``0``, ``no`` and ``false`` turn the check off. Anything else that is set, including ``on``,
+    turns it on. Unset stays on for a native install and off for the published container, so a rebuild that
+    forgets the variable does not put the sign-in back.
+    """
+
+    choice = os.environ.get("STUDIO_ACCESS_KEY")
+    if choice is None:
+        return os.environ.get("STUDIO_CONTAINER") != "1"
+    return choice.strip().lower() not in ("off", "0", "no", "false")
 
 
 def path(home: Path) -> Path:

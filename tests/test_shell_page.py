@@ -339,6 +339,21 @@ def test_settings_shows_its_five_sections_and_the_look_saves():
     assert "Any local model works here" in out["brains"] and "Settings → Connections" in out["brains"]
 
 
+def test_settings_hides_the_access_key_when_this_studio_does_not_ask():
+    out = run("""go("Settings"); const rail = () => find(viewSettings(), n => n.attrs && n.attrs.class === "st-rail").kids.map(text);
+      out.shown = rail();
+      S.access_key = false; SET.section = "access"; viewSettings();
+      out.hidden = rail(); out.section = SET.section;
+      S.access_key = true; SET.section = "access"; SET.key = null; viewSettings(); await new Promise(r => setTimeout(r, 0));
+      out.again = text(viewSettings()).includes("Make a new key");""")
+    assert any("Access key" in row for row in out["shown"])
+    assert not any("Access key" in row for row in out["hidden"])
+    assert out["section"] == "appearance"
+    assert out["again"] is True
+    page = (ROOT / "app" / "static" / "index.html").read_text()
+    assert 'S.access_key === false ? all.filter(lesson => lesson.id !== "access")' in page
+
+
 def test_layout_hides_and_orders_rooms_and_a_hidden_room_stays_in_the_palette():
     out = run("""for (const k of ["#rooms", "#roomname", "#subtabs"]) NODES[k] = el("div", {});
       SET.data = { layout: { hidden: ["looks", "learn"], order: [] } };

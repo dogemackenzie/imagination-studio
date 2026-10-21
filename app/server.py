@@ -593,6 +593,8 @@ def key_share(request: Request):
     """For a signed-in browser (the key guards this route): the key and the addresses that sign another device in,
     this computer's and its Tailscale name's (a phone, after `tailscale serve --bg PORT`)."""
 
+    if not access.enabled():
+        raise HTTPException(404, "This studio does not use an access key.")
     links = [{"label": "This computer", "url": f"http://127.0.0.1:{APP_PORT}/?key={ACCESS_KEY}"}]
     if on_network():  # opened to the network: another computer there signs in at this one's address
         links = [{"label": f"Your network ({address})", "kind": "network", "url": f"http://{address}:{APP_PORT}/?key={ACCESS_KEY}"}
@@ -611,6 +613,8 @@ def key_new(request: Request):
     """A new key: every other browser and phone is signed out; this browser keeps working with the new one."""
 
     global ACCESS_KEY
+    if not access.enabled():
+        raise HTTPException(404, "This studio does not use an access key.")
     ACCESS_KEY = access.rotate(HOME)
     return keyed_answer({"ok": True}, request, ACCESS_KEY)
 
@@ -620,6 +624,8 @@ async def take_typed_key(request: Request):
     """The key typed on the page's prompt (a phone, a browser the launcher did not open): kept as this app's cookie.
     A wrong key waits a second before it is refused."""
 
+    if not access.enabled():
+        return {"ok": True}
     try:
         offered = str((await request.json()).get("key") or "").strip()
     except (ValueError, AttributeError):
@@ -2220,6 +2226,8 @@ def state() -> dict:
             "qualities": {k: v[0] for k, v in QUALITIES.items()}, "durations": DURATIONS, "long": LONG,
             "home": str(HOME), "pack": str(PACK), "version": (PACK / "VERSION").read_text().strip(),
             "revision": image_revision(), "container": in_container(),
+            # false on the published app: Settings hides Access key, and the page does not ask
+            "access_key": access.enabled(),
             "zig": zig_ready() and mac, "turbo": turbo_ready() and mac, "x2": mac,
             "ref2va": ref2va_ready() and rendering, "ref2va_turbo": ref2va_turbo_ready() and rendering, "reference_limit": REFERENCE_LIMIT,
             # reference videos and audio: wherever Ref2VA is installed, and only on a machine that renders

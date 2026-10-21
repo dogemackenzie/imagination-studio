@@ -29,6 +29,10 @@ services:
       # Inside the container only, so the published loopback port can reach the app.
       # HOST is unset: 0.0.0.0 would open the LAN with no login.
       STUDIO_BIND: "0.0.0.0"
+      # No sign-in on the published app. The entrypoint also defaults this to off, and a container
+      # with the variable unset does not ask, so a later source update does not put the lock back.
+      # Set on only when a phone should sign in. This does not open Updates, Brains, or Agents.
+      STUDIO_ACCESS_KEY: "off"
       STUDIO_COMFY_STATE: /data/comfy
       STUDIO_GPU_LOCK: /data/studio-gpu.lock.d
       STUDIO_STAGED_NODES: /opt/studio/staged-nodes

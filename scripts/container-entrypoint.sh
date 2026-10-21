@@ -17,6 +17,8 @@ if [ "$host" = "0.0.0.0" ] || [ "$host" = "::" ] || [ "$host" = "::0" ]; then
 fi
 
 export STUDIO_CONTAINER=1
+# The published app has no login. Unset stays off; an explicit on still asks.
+export STUDIO_ACCESS_KEY="${STUDIO_ACCESS_KEY:-off}"
 export HOME=/home/studio
 export STUDIO_HOME="${STUDIO_HOME:-/data}"
 export STUDIO_DISCOVER_DELAY="${STUDIO_DISCOVER_DELAY:--1}"

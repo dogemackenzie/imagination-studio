@@ -6,7 +6,10 @@ The commands match `compose.yaml`, `Dockerfile.studio`, `scripts/container-entry
 
 The app listens on `127.0.0.1:7870` and `192.168.50.22:7870`. There is no login. The container does not
 attach a GPU. It does not publish 8188, 8190, 8191, or 8443. `HOST` stays unset. `STUDIO_BIND` is `0.0.0.0`
-only inside the container so the published addresses can reach the app.
+only inside the container so the published addresses can reach the app. `STUDIO_ACCESS_KEY=off` is set for
+this service. The entrypoint defaults that variable to off, and a container with it unset does not ask, so
+a later source update does not show “Sign this device in”. `STUDIO_ACCESS_KEY=on` is the only way to ask.
+Updates, Brains, and Agents stay limited to this computer.
 
 Leave the shared ComfyUI service and the container that publishes port 8190 as they are. Studio does not
 start, stop, interrupt, unload, or clear that ComfyUI. `spark/comfy.sh` is the DGX Spark renderer and is

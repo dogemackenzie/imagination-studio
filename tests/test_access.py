@@ -72,7 +72,52 @@ def test_the_key_typed_on_the_page(keyed):
 
 def test_off_when_asked(monkeypatch):
     monkeypatch.setenv("STUDIO_ACCESS_KEY", "off")
-    assert TestClient(server.app).get("/api/state").status_code == 200
+    client = TestClient(server.app)
+    assert client.get("/api/state").status_code == 200
+    assert client.get("/api/state").json()["access_key"] is False
+    assert client.get("/api/key/share").status_code == 404
+    assert client.post("/api/key/new", json={}).status_code == 404
+    assert client.post("/api/key", json={"key": "nope"}).json() == {"ok": True}
+
+
+def test_a_published_container_does_not_ask_unless_the_key_is_turned_on(monkeypatch):
+    """The published app has no login. Unset in a container stays off, so a later image that forgets
+    STUDIO_ACCESS_KEY still does not ask. A native install with it unset still asks. Updates, Brains,
+    and Agents stay closed from another computer."""
+
+    monkeypatch.delenv("STUDIO_ACCESS_KEY", raising=False)
+    monkeypatch.setenv("STUDIO_CONTAINER", "1")
+    assert access.enabled() is False
+    phone = TestClient(server.app, client=("8.8.8.8", 50000))
+    for host in ("studio.tail1234.ts.net", "8.8.8.8:7870", "192.168.50.22:7870", "100.64.1.2:7870"):
+        said = phone.get("/api/state", headers={"host": host})
+        assert said.status_code == 200 and said.json()["access_key"] is False, host
+        assert phone.get("/api/key", headers={"host": host}).json()["needed"] is False
+    lan = TestClient(server.app, client=("192.168.50.52", 50000))
+    for path in ("/api/updates", "/api/brains", "/api/agent/tools"):
+        assert lan.get(path, headers={"host": "192.168.50.22:7870"}).status_code == 403, path
+    assert phone.get("/api/updates", headers={"host": "studio.tail1234.ts.net"}).status_code == 403
+    assert phone.get("/api/key/share", headers={"host": "8.8.8.8:7870"}).status_code == 404
+    monkeypatch.delenv("STUDIO_CONTAINER", raising=False)
+    assert access.enabled() is True
+    asked = phone.get("/api/state", headers={"host": "8.8.8.8:7870"})
+    assert asked.status_code == 401 and asked.json()["access"] == "key"
+    monkeypatch.setenv("STUDIO_CONTAINER", "1")
+    monkeypatch.setenv("STUDIO_ACCESS_KEY", "on")
+    assert access.enabled() is True
+    still = phone.get("/api/state", headers={"host": "8.8.8.8:7870"})
+    assert still.status_code == 401 and still.json()["access"] == "key"
+    monkeypatch.setenv("STUDIO_ACCESS_KEY", "off")
+    assert access.enabled() is False
+    assert phone.get("/api/state", headers={"host": "8.8.8.8:7870"}).status_code == 200
+
+
+def test_the_published_files_keep_the_key_off():
+    compose = (ROOT / "compose.yaml").read_text()
+    entry = (ROOT / "scripts" / "container-entrypoint.sh").read_text()
+    assert 'STUDIO_ACCESS_KEY: "off"' in compose
+    assert 'export STUDIO_ACCESS_KEY="${STUDIO_ACCESS_KEY:-off}"' in entry
+    assert "STUDIO_ACCESS_KEY=off" in (ROOT / "docs" / "OPERATIONS.md").read_text()
 
 
 def test_the_key_file_is_made_once_private_and_kept(tmp_path):
