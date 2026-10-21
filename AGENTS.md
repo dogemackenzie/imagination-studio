@@ -1,12 +1,12 @@
 # Agent one-shot — Wasserman Slate AI Studio, powered by TensorFold: Qwen-Image-2.1 + MiniMax H3 (MLX, Apple Silicon)
 
-**Repo:** https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3  
+**Repo:** https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman  
 **Carrier image:** `ghcr.io/drowzeys/keys-tensorfold-studio:2.9.1` (one for both builds, not a runtime; for a Mac the TensorFold wheel + lock + render scripts + the native FastH3 engine, for a DGX Spark the prebuilt CUDA engines: H3, and MiniMax Music 3's `music3-generate`)  
-**Engine:** TensorFold 0.6.5 + H3 and Qwen-Image families @ `drowzeys/TensorFold` `a2068c03`, own venv, int8 tensor-unit kernels
+**Engine:** TensorFold 0.6.5 + H3 and Qwen-Image families @ `drowzeys/TensorFold` `a2b592fe`, own venv, int8 tensor-unit kernels
 
 ```bash
-git clone https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3.git
-cd keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3
+git clone https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman.git
+cd Imagination-Studio-by-keys-Wasserman
 brew install python@3.11 uv ffmpeg
 bash oneshot-setup.sh               # image model, FastH3 and its text encoder and decoders (175 GB) and a test clip; --image-only for 33 GB; --turbo adds MiniMax H3 Turbo (64 GB more, 128 GB of memory); --ref2va adds reference pictures to video (64 GB more, 128 GB)
 bash scripts/studio.sh "the picture" "what happens in the clip" out.mp4   # text -> image -> video with sound
@@ -36,8 +36,9 @@ Do these in order on the person's Mac, and report each result plainly.
    rendering `outputs/test.mp4`; confirm that file exists and plays.
 5. `bash scripts/make-app.sh` builds `~/Applications/Wasserman Slate AI Studio.app`. If the models are not in the default
    folders, export `QWEN_MODEL_DIR`, `H3_MODEL_DIR`, `FASTH3_DIR` first: the app records them. Do not set
-   `HOST=0.0.0.0` unless the person asks to reach it from other machines; there is no login.
-6. `open "$HOME/Applications/Wasserman Slate AI Studio.app"`, then check `curl -s http://127.0.0.1:7870/api/state` answers.
+   `HOST=0.0.0.0` unless the person asks to reach it from other machines; every request carries the studio's access key
+   (`app/access.py`; `bash scripts/studio-key.sh` prints it and the address that opens the page with it).
+6. `open "$HOME/Applications/Wasserman Slate AI Studio.app"`, then check `curl -s -H "X-Studio-Key: $(bash scripts/studio-key.sh --key)" http://127.0.0.1:7870/api/state` answers (every request to the app carries its access key, `app/access.py`).
 7. Tell the person: double-click Wasserman Slate AI Studio in Applications; renders land in `~/ImaginationStudio`; the log is
    `~/Library/Logs/TensorFoldStudio.log`; to stop it run the app's executable with `stop`.
 
@@ -50,17 +51,31 @@ to video and for clips from an image alike, and prints `[tensorfold] engine: zig
 generation and the Turbo path are MLX. Do not apply the base-model audio step to FastH3 clips:
 the owner compared it by ear and chose FastH3's own sound. Use 20 passes when a prompt has several actions.
 `scripts/build-zig-engine.sh` builds the payload on a Mac (zig 0.17); never commit the binary.
+A style LoRA on FastH3 stays on the native engine when its `h3_case.py` takes `--lora`: the block projections'
+factors are added to the bf16 weights in float32 on the GPU and rounded to int8 with them, in memory, as the MLX
+engine merges them (never into a saved copy). Measured at 864x480, 22 frames, 4 passes: 16.9 s against 24.3 s on MLX (1.01 s a pass against 1.71 s; the MLX merge took 7.4 to 41.6 s of load);
+the merged weights equal the MLX merge's exactly, and the first velocity's error against a float32 reference with
+the LoRA (relative 0.378) stays near the engine's own without one (0.337; 0.579 when the LoRA is left out). An
+adapter that changes anything else the native tool reads (a norm, a dense correction) is refused there (status 3)
+and the clip renders on MLX.
 
 FastH3 and long videos: `scripts/fast.sh` (STEPS=4|8|20, RES=480p|720p, UPSCALE=1); `ENGINE=fasth3` works with
 `studio.sh` and `FIRST_FRAME` too, though FastVideo trained it on text to video only. Videos over 15 s are chains of
 clips made by the web app's `long` job (each opens on the last frame of the one before); only an 18 s chain has been
 rendered, so do not promise the look of a 30 minute one.
 
-Web app: `bash scripts/app.sh` (http://127.0.0.1:7870; `HOST=0.0.0.0` to open it to the LAN, no login). It runs the
+Web app: `bash scripts/app.sh` (http://127.0.0.1:7870; `HOST=0.0.0.0` to open it to the LAN; every request carries the access key of `app/access.py`). It runs the
 same scripts through a one-at-a-time queue and stores everything under `~/ImaginationStudio`.
 
 Rules:
 
+- The access key (`app/access.py`, README *The access key*) guards remote access: a request to `/api/` or `/files/`
+  from another device carries it; a request from this computer itself (a loopback client naming a loopback Host, or,
+  opened to the network, a client on one of its own addresses naming its own address or name: `access.local`,
+  `server.this_computer`) needs none, by the owner's decision. `tailscale serve` arrives from a loopback address under a
+  `.ts.net` name and is asked: keep both conditions. Only `access.OPEN` is answered without it from elsewhere. The key
+  lives only in `<studio folder>/access-key` (0600): never put it in a job's params, a log, a saved URL, a report or
+  the repo. Settings → Access key shows it, a QR code for a phone, and makes a new one.
 - This is not a server. `tensorfold serve` routes neither model; render with the scripts.
 - Qwen-Image-2.1-Turbo is non-commercial (Qwen Research License). MiniMax H3 has territory limits.
   Do not redistribute weights, and say so when asked to use the outputs commercially.
@@ -146,6 +161,12 @@ Rules:
   `shot_frames`; the tempo is the user's. `tests/test_slate_page.py` runs the page code in node: keep it passing.
 - A clip from another machine's app is read through `app/remote.py` (`/api/qa`, `/api/slate/takes`): addresses are
   `http://host:port` only and paths are media files inside that app's folder. Do not widen either.
+- Checking every feature on a running app (a Mac or a DGX Spark): `python3 scripts/studio-check.py` on that machine
+  queues the jobs each tab queues (smallest sizes, one realistic clip and song), checks the files with ffprobe and
+  writes `report.json` and `report.md`; what the platform does not offer is n/a with the app's reason, never a pass.
+  `--base` twice runs two machines at once, `--merge` puts two reports side by side. `scripts/studio-check-ui.cjs`
+  opens every tab and clicks every button with writes blocked (open it through 127.0.0.1, e.g. `ssh -L`, so the
+  local-only routes answer). The first clears what it made, the second writes nothing.
 - Nothing a request handler calls may run a tool without a time limit (`tests/test_api_answers.py`); the GPU's name
   is asked of nvidia-smi once and kept.
 - `app/shot.py` checks a finished single clip: first and last frame held, no cut inside one shot. Its thresholds are
@@ -176,7 +197,12 @@ Rules:
   before a clip is sent. A worker silent for `LOST` seconds is marked down and its clip goes back to the queue; do
   not make that wait longer, and never retry a worker that went down without a person's *Check*. `MEASURED` is one
   measured run: change it only with a new one. One clip split across Sparks (the engine's `h3-cuda-multispark`
-  branch) is measured and is not in the app: do not wire part of it in.
+  branch) is measured and is not in the app: do not wire part of it in. The app on a Mac leads Sparks the same way
+  (`docs/multi-spark.md`, *A Mac at the head*): `capable` hands a Spark only what it renders with its own settings (the
+  presets and qualities its `/api/spark/self` lists; never a text encoder file of the Mac's), and a worker's `via` is
+  a Spark the Mac reaches that logs in to the worker with its own key (`Relay`: a socket in `~/.cache/studio-sparks`
+  there, ended with the Mac's ssh or its heartbeat). Never add the Mac's key to a worker for it, and never open the
+  relay to a network.
 - Voice (`app/voice.py`, `app/static/voice.js`, README *Voice (Fish Audio Drama 3)*): Fish Audio Drama 3 runs on this
   machine only, as a TensorFold process outside the app, never imported into the app's venv. Never call Fish Audio's
   cloud API. `DRAMA3_BACKEND=mlx|cuda` (`mlx` on a Mac, `cuda` on a DGX Spark). Both engines run as a persistent
@@ -209,10 +235,23 @@ Rules:
   Qwen's and a FLUX3-K edit refuses them. FLUX Kommunity
   License: say so when asked about commercial use, and do not redistribute the weights.
 - MOSS-Image (`moss-image` in `IMAGE_MODELS`, `oneshot-setup-spark.sh --moss`, `moss_workflow` in
-  `spark/spark_generate.py`): OpenMOSS's model, Apache 2.0, on a DGX Spark only, inside ComfyUI's workflow (v0.42.0 and
-  later, `COMFY_COMMIT`), never as standalone code. It is offered only where its files and ComfyUI's
+  `spark/spark_generate.py`): OpenMOSS's model, Apache 2.0, inside ComfyUI's workflow (v0.42.0 and
+  later, `COMFY_COMMIT`) on both machines (on a Mac the ComfyUI of the next rule, `oneshot-setup.sh --moss`, through
+  `scripts/image.sh`), never as standalone code. It is offered only where its files and ComfyUI's
   `nodes_moss_image.py` are (`moss_ready`). The settings are ComfyUI's template's (25 steps er_sde, CFG 2.5, its
   negative prompt): change them only with new measurements. It does not edit pictures; the prompt goes as written.
+- A Mac's ComfyUI (`mac/comfy.sh`, `scripts/setup-comfy.sh`, `oneshot-setup.sh --upscale | --remove | --moss`): Upscale,
+  Find and Remove a person and MOSS-Image run the Spark's own graphs (`spark/spark_workflows.py`,
+  `spark/spark_generate.py`, `MAC`) and the authors' node packs at the Spark's pins, on PyTorch's Metal device in
+  `$PREFIX/comfy-venv`, never in the Studio's MLX venv and never as standalone model code. Keep
+  `--use-pytorch-cross-attention`: ComfyUI's default attention on a Mac adds the text mask as a bias. MiniMax H3 is read
+  from the Mac's own files through pointer files (`mac/comfy_files.py`, `mac/studio_files`): its fused q/k/v rows are
+  regrouped into ComfyUI's order and its text encoder is cut after layer 50 (without either, the pictures are noise);
+  the text encoder's tensors are assigned from the file, a LoRA's backup and an unloaded transformer go back to the
+  file's pages, and a 3D convolution on Metal is a sum of 2D ones (PyTorch's own took 177 GB for nine frames). Each was
+  measured as the reason a run failed or was killed: keep them. The server is stopped after every job
+  (`mac_release`, `MAC_COMFY_KEEP=1` keeps it) and holds a kill-guard (`MAC_COMFY_GUARD_GB`, 16). The turnaround sheet
+  stays the MLX engine's.
 - Music (`app/music.py`, `app/static/music.js`, README *Music (MiniMax Music 3)*): MiniMax-Music3 makes a song from
   lyrics (section tags) and a style caption, on this machine only, never imported into the app's venv. The tab, every
   song and any page that plays one show "MiniMax-Music3" (its licence requires it in a commercial UI): keep it. On a
@@ -234,11 +273,32 @@ Rules:
   `start_s` (the measured no-stall start, `NO_STALL_S`, and `HOLD_MARGIN_S`) and `lead_s`; those are measurements, change
   them only with new ones. The kept song is the engine's finished WAV. A Spark does not stream, on the CUDA engine or ComfyUI's route.
   Lyric accuracy is Whisper's rough count on sung words.
+- The brain engine (`app/bolt.py`, `app/bolt_leash.py`, README *The brain engine*): NVIDIA Nemotron 3.5 Bolt run by
+  the Studio as the brains' local server, the lifecycle of Voice and Music: loaded on the first brain or agent request
+  (`bolt.request`) on a loopback port, under the leash (it ends with the app) and a kill-guard (`BOLT_GUARD_GB`, 8;
+  MemAvailable, vm_stat on a Mac), unloaded after `BOLT_IDLE_S` (600, `never` allowed) and **before any other local
+  job of the queue whose measured peak does not fit beside it** (`bolt.admit` at the top of `server.perform`,
+  `server.bolt_need`: the memory guard's estimate on a Spark, `MAC_PEAK_GB` on a Mac; unmeasured kinds unload it),
+  then held until the queue is empty (`bolt.queue_empty` in `work`). A request in flight is never cut: a release
+  waits for it. A local-harness turn's answers wait while Bolt is held (the turn's own clip renders with Bolt
+  unloaded), and no idle unload runs while a turn is open (`bolt.turn`). Do not make the render wait for the turn: the
+  turn waits for its clip in `wait_for_jobs`, so that deadlocks. It never takes `~/studio-gpu.lock.d` (a resident brain
+  must not hold the updater or the render scripts). `BOLT_BACKEND=cuda|metal|llamacpp|external`: `cuda` is Mia's
+  recipe (MiaAI-Lab/Nemotron-3.5-Bolt-TensorFold-DGX-Spark, MIT, TensorFold 46a08c18 + patches), installed by
+  `spark/build-bolt.sh` into `$PREFIX/bolt`, never run in Docker; `metal` is TensorFold's Metal port (branch
+  `nemotron-bolt-metal`, same command line) when built into `$PREFIX/bolt-metal`; `llamacpp` only when set (a Mac may
+  run Bolt in its own llama.cpp service). The engine serves when the brains' address is empty or `studio:bolt`; a
+  typed address stays external. Weights: NVIDIA's checkpoint a326822a and LiLiCorr drafter 4c6a5613
+  (`scripts/setup-bolt.sh`, `--bolt`), OpenMDW 1.1. `NEED_GB`, `RESIDENT_GB` and `MAC_PEAK_GB` are measurements:
+  change them only with new ones. Never start a second Bolt on a machine with `vm.panic_on_oom=1`.
 - Sound effects and foley (`app/sound.py`, `sound_generate.py`, `scripts/setup-sound.sh`, `app/static/sound.js`): jobs
   `sfx` (Stable Audio Open 1.0, Stability AI Community License, gated on Hugging Face) and `foley` (MMAudio large_44k_v2,
   weights CC-BY-NC 4.0: non-commercial; say so when asked about commercial use) in `$PREFIX/sound-venv`, never the
   Studio's venv. Foley is laid under the clip's own sound (speech stays, peaks under -1 dBFS) unless asked to replace
-  it. On a DGX Spark (`oneshot-setup-spark.sh --sound`) both go through the ComfyUI server of `spark/comfy.sh` as
+  it. On a Mac Stable Audio Open's transformer runs in float16 and MMAudio's modules are built without random initial
+  values (`sound_generate.py`; measured on an M5 Ultra: 8 s of sfx in 16 s instead of 32 to 35 s, the same take within
+  0.1 dB of long-term spectrum; foley 17.6 s instead of 23.5 s, bit-identical); `SOUND_PRECISION=fp32` keeps float32.
+  On a DGX Spark (`oneshot-setup-spark.sh --sound`) both go through the ComfyUI server of `spark/comfy.sh` as
   `spark_generate.py sfx|foley` (the same flags as `sound_generate.py`): ComfyUI's own Stable Audio nodes
   (`sfx_workflow`), and kijai's ComfyUI-MMAudio (pinned `MMA_COMMIT`) with the Studio's `StudioMMAudioSampler`
   (`spark/studio_mmaudio`, `foley_workflow`): kijai's own sampler reads one frame stream as both 8 and 25 fps, so keep
@@ -246,8 +306,23 @@ Rules:
   kind renders on a Spark only when `memory_guard.SOUND_ESTIMATE` has its measured line (`sound_check`, asked when
   the job is queued and in `spark_generate.py` before anything loads); `SOUND_ESTIMATE` and `SOUND_MEASURED` are
   measurements, added only from runs on a worker Spark under the DGX Spark memory rules above.
+- A card with memory of its own (an RTX Pro 6000 Blackwell, docs/rtx-pro-6000.md): every room check is the smaller of the
+  machine's RAM and the card's free memory (`memory_guard.device`, `voice.mem_available_gb`); keep it that way, a
+  check on RAM alone lets Drama 3 load beside a 62 GB ComfyUI on a 96 GB card. `STUDIO_VRAM_GB` pretends to be such a
+  card on a Spark (it keeps the GB10's page-cache release). The engines build for the card's own sm (`TF_SM`).
 - mflux, minimax-h3-mlx, flux3-mlx, TensorFold's music3-mlx, MMAudio and ComfyUI-MMAudio are pinned by commit and used at run time. Do not unpin.
 
-**Credits:** keep CREDITS.md in sync. Qwen team (Qwen-Image-2.1), Black Forest Labs (FLUX 3 Image Klein), OpenMOSS (MOSS-Image), Stability AI (Stable Audio Open), Ho Kei Cheng et al. (MMAudio), kijai (ComfyUI-MMAudio), felix-ab (flux3-mlx), MiniMax (H3, MiniMax-Music3), Ash Hart (TensorFold), antirez (h3.c),
+**No personal information, ever:** no real email, phone number, home or postal address, account name, private IP,
+host name, tailnet name, key or token goes into this repo: not in a file, not in a commit's author, committer or
+trailer. Commit with a GitHub noreply address; in examples use stand-ins (`example.invalid`, `/Users/you`,
+`192.168.1.10`, `tail1234.ts.net`). `tests/test_no_personal_info.py` and the workflow's commit check enforce it. People
+reach the project through GitHub only: Issues, Discussions, and private vulnerability reporting (`SECURITY.md`).
+
+**Credits, in the repo and on the page:** anything the repo or the studio uses (a model, LoRA, node pack, engine,
+library, conversion, idea, prompt or someone's code) is credited in CREDITS.md in the same change that brings it in,
+and the maker is named in the page's Credits list (`app/static/settings.js`); the page's *Every credit* panel shows
+CREDITS.md and THIRD_PARTY_NOTICES.md themselves (`/api/credits`). `tests/test_credits.py` checks both.
+
+**Credits:** keep CREDITS.md in sync. Qwen team (Qwen-Image-2.1), Black Forest Labs (FLUX 3 Image Klein), OpenMOSS (MOSS-Image), Stability AI (Stable Audio Open), Ho Kei Cheng et al. (MMAudio), kijai (ComfyUI-MMAudio), felix-ab (flux3-mlx), MiniMax (H3, MiniMax-Music3), NVIDIA (Nemotron 3.5 Bolt), MiaAI-Lab (the Bolt TensorFold recipe), Ash Hart (TensorFold), antirez (h3.c),
 RobZombAI (H3MLX), mrbizarro (minimax-h3-mlx / Phosphene), Filip Strand and mflux contributors, Viggle, speach1sdef178, LightX2V,
 NVIDIA Research, FastVideo, Sam Wasserman (Slate: the film workflow in Production; keep app/static/slate/NOTICE. Motion Previs Studio: the Motion Previs tab's analysis is a modified Python port of it; keep LICENSES/Motion-Previs-Studio-NOTICE, THIRD_PARTY_NOTICES.md and the headers of app/motion*.py, and keep the link to the original), Apple MLX. Authors only — no credit hyperlinks, except the link to Motion Previs Studio.

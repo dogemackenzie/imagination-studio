@@ -17,6 +17,7 @@ os.environ.setdefault("STUDIO_HOME", str(Path(tempfile.mkdtemp()) / "Imagination
 sys.path.insert(0, str(ROOT / "app"))
 import server  # noqa: E402
 import sound  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 client = TestClient(server.app)
@@ -135,6 +136,20 @@ def test_each_setting_is_checked_before_the_job_is_queued(ready):
         assert words in answer.json()["error"], (kind, params, answer.json())
 
 
+def test_a_clip_too_short_for_foley_is_refused_when_it_is_queued(ready):
+    """A 22-frame clip (0.92 s) was queued, unloaded Music 3 and failed 14 s later in the runner on a Mac."""
+    clip = server.HOME / "renders" / "short.mp4"
+    clip.parent.mkdir(parents=True, exist_ok=True)
+    clip.write_bytes(b"not really a clip")
+    lengths = {"short": (0.92, True), "unread": (None, None)}
+    build = sound.attach(server.HOME, ROOT, False, server.inside, server.relative, None, lambda path: lengths[Path(path).stem])[1]
+    with pytest.raises(HTTPException) as refused:
+        build("foley", {"video": "renders/short.mp4"}, "j1")
+    assert refused.value.status_code == 400 and "0.92 s" in refused.value.detail and "at least 1 s" in refused.value.detail
+    (server.HOME / "renders" / "unread.mp4").write_bytes(b"x")
+    assert "--video" in build("foley", {"video": "renders/unread.mp4"}, "j2")[0]  # not measured here: the runner decides
+
+
 def test_what_is_missing_is_said(ready, monkeypatch, tmp_path):
     (ready["models"] / "stable-audio-open-1.0" / "model_index.json").unlink()
     state = sound.attach(server.HOME, ROOT, False, server.inside, server.relative)[0]
@@ -155,6 +170,8 @@ def test_the_runner_names_its_licences_and_lays_foley_under_the_speech():
     assert "StableAudioPipeline" in text and "large_44k_v2" in text and "CC-BY-NC 4.0" in text
     assert "gaussian_noise_on_metal" in text  # Stable Audio Open on Metal: the Brownian tree never ends there (measured)
     assert "amix=inputs=2" in text and "limit=0.84" in text  # under the clip's own sound, peaks under -1 dBFS
+    # on Metal: Stable Audio Open's transformer in float16, MMAudio built without random initial values (measured)
+    assert "half_on_metal(pipe.transformer)" in text and "without_initial_values()" in text and "SOUND_PRECISION" in text
     setup = (ROOT / "scripts/setup-sound.sh").read_text()
     assert "MMAUDIO_COMMIT=\"974010a026c731054592d8f777218bd9d85a6c24\"" in setup and "sudo" not in setup
 
@@ -181,6 +198,7 @@ def spark(tmp_path, monkeypatch):
     monkeypatch.setenv("SPARK_MODELS", str(models))
     monkeypatch.delenv("SOUND_PYTHON", raising=False)
     monkeypatch.setattr(memory_guard, "meminfo", lambda text=None: {"MemTotal": 124_500, "MemAvailable": 118_000, "MemFree": 100_000})
+    monkeypatch.setattr(memory_guard, "device", lambda fresh=False: None)  # a Spark has no discrete card; this host's RTX must not answer
     monkeypatch.setattr(memory_guard, "SOUND_ESTIMATE", {"sfx": (8_000, 10), "foley": (9_000, 50)})
     clip = server.HOME / "renders" / "walk.mp4"
     clip.parent.mkdir(parents=True, exist_ok=True)

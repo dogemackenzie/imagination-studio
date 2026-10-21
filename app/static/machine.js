@@ -42,9 +42,11 @@ function statusRows(t) { const row = (k, v, cls) => el("div", { class: "kv m-row
   return [row("Rolling", cur ? cur.title : "nothing"), row("Queue", (t.jobs ? t.jobs.queued : 0) + " waiting"),
     row("GPU lock", t.gpu_lock ? (t.gpu_lock.held ? "held" + (t.gpu_lock.holder ? " by " + t.gpu_lock.holder : "") : "free") : "–"),
     row("Renderer", t.renderer && t.renderer.comfy ? (t.renderer.comfy.running ? "ComfyUI up on " + t.renderer.comfy.port : "idle, models unloaded") : "–"),
+    // NVIDIA Nemotron 3.5 Bolt run by the Studio (app/bolt.py): what it holds of the memory, when loaded
+    t.engines && t.engines.bolt && t.engines.bolt.managed ? row("Bolt brain", boltLine(t.engines.bolt) + " · " + (t.engines.bolt.backend || "")) : null,
     row("Workload governor", t.governor ? (t.governor.status || "answering") + (Array.isArray(t.governor.reservations) ? " · " + count(t.governor.reservations.length, "reservation") : "") + (t.governor.alert_temperature_c ? " · alert at " + t.governor.alert_temperature_c + "°C" : "") : "not on this machine", t.governor && t.governor.status && t.governor.status !== "ok" ? "warn" : ""),
     row("Processor", t.cpu ? "load " + (t.cpu.load1 ?? "–") + " on " + (t.cpu.cores || "?") + " cores" : "–"),
-    row("Host", t.host || "–")]; }
+    row("Host", t.host || "–")].filter(Boolean); }
 // eight muted colours (--c1 to --c8 in studio.css), one a folder, in order of size
 const bucketTone = i => "c" + (i % 8 + 1);
 function storagePanel() {
@@ -89,8 +91,11 @@ function viewMachine() {
 /* ---------- Brains & tools: the user's own subscriptions and the MCP tools an agent may use ---------- */
 const BR = { data: null, tools: null, testing: {}, said: {}, checking: {}, checked: {}, status: {}, sign: {}, signOpen: null, signTimer: null, signSig: "", codeDraft: {} };
 // each brain shows its own mark (brand/, THIRD-PARTY-MARKS.md); a local model server and the tools show a plain sign
-const BRAIN_MARK = { claude: "claude", codex: "codex", gemini: "gemini", grok: "grok", openai: "openai", chatgpt: "openai" };
-const brainLogo = id => el("span", { class: "logo" }, BRAIN_MARK[id] ? mark(BRAIN_MARK[id], "") : icon("machine"));
+const BRAIN_MARK = { claude: "claude", codex: "codex", gemini: "gemini", grok: "grok", hermes: "hermes", openai: "openai", chatgpt: "openai" };
+// the local brain wears NVIDIA's mark when it is the Studio's own Nemotron 3.5 Bolt engine
+const isBolt = b => !!b && (!!b.engine || /nemotron|bolt/i.test(b.label || ""));
+const brainMarkOf = (id, b) => id === "local" ? (isBolt(b || ((BR.data && BR.data.backends) || []).find(x => x.id === "local")) ? "nvidia" : null) : BRAIN_MARK[id] || null;
+const brainLogo = (id, b) => el("span", { class: "logo" }, brainMarkOf(id, b) ? mark(brainMarkOf(id, b), "") : icon("machine"));
 const toolLogo = id => el("span", { class: "logo" }, id === "studio" ? el("img", { src: "brand/aperture-mark-color.svg", alt: "Imagination Studio", width: 20, height: 20 }) : icon(id === "blockout" ? "library" : id === "blender" ? "previs" : "suite"));
 async function brainsLoad() { try { BR.data = await api("/api/brains"); } catch (e) { BR.data = { error: e.message }; } try { BR.tools = await api("/api/agent/tools"); } catch { BR.tools = null; } if (tab === "Brains") render(); }
 /* ---------- signing a brain in: the CLI's own login run by the studio (app/agents.py, the signin section) ----------
@@ -243,6 +248,7 @@ function brainWord(b) { if (!b || b.kind !== "cli") return [b && b.found ? "Read
   return ["Not signed in", "connect", "Connect"]; }
 // the Connect button's click: a tab is opened now (a click may open one, a timer may not) and pointed at the sign-in page later
 function cnPrepareTab(b) { const st = BR.status[b.id];
+  if (b.id === "hermes" && !CN.hermesProvider) return;  // the tab opens on the provider's click, not on Connect's
   if (b.found && b.signin_flow === "pty" && !(st && st.state === "signed_in") && typeof window !== "undefined" && typeof window.open === "function") {
     try { const w = window.open("", "_blank"); if (w) { CN.win = w; try { w.document.title = "Signing in…"; w.document.body.innerHTML = "<p style='font:16px system-ui;padding:24px'>Opening the sign-in page…</p>"; } catch {} } } catch {} } }
 function cnCloseTab() { if (CN.win) { try { CN.win.close(); } catch {} CN.win = null; } }
@@ -270,7 +276,8 @@ function cnAdvance(id) { const d = CN.data[id], b = cnBrain(id), tried = CN.trie
   if (!d.find.found) { cnCloseTab(); return cnWatch(); }
   if (st.state !== "signed_in") {
     if (sign && SIGN_RUNNING.includes(sign.state)) return cnWatch();
-    if (b && b.signin_flow === "pty" && !["broken", "missing"].includes(st.state) && !tried.signin) { tried.signin = true; cnSignin(id); }
+    // Hermes signs in to a provider the person picks (cnSteps shows the choice): it is never started without one
+    if (b && b.signin_flow === "pty" && id !== "hermes" && !["broken", "missing"].includes(st.state) && !tried.signin) { tried.signin = true; cnSignin(id); }
     return cnWatch(); }
   cnCloseTab();
   if (!d.verify && !tried.verify) { tried.verify = true; cnVerify(id); return; }
@@ -359,12 +366,14 @@ function cnSteps(b, d) { const where = cnWhere(b), on = where ? "on " + where : 
   else if (st.state === "broken") steps.push(["signin", "Sign in", "failed", st.detail, st.hint ? el("div", { class: "note m-flat" }, st.hint) : null, el("button", { type: "button", class: "small", onclick: () => cnInstall(b.id) }, "Update " + b.label)]);
   else if (b.signin_flow !== "pty") steps.push(["signin", "Sign in", "wait", b.label + " signs in inside its own terminal" + (where ? " on " + where : "") + ". Run this there; this ticks by itself when it is done:",
     el("div", { class: "signin-cmd" }, el("code", {}, b.signin_command || ""), el("button", { type: "button", class: "small", onclick: () => copyText(b.signin_command || "", "Command") }, "Copy"))]);
+  else if (b.id === "hermes") steps.push(["signin", "Sign in", "wait", st.state === "asking" || !st.state ? "Asking whether it is signed in…" : "Which account should Hermes use? It signs in there, then picks a model that account has.",
+    el("div", { class: "chips" }, HERMES_PROVIDERS.map(([provider, label]) => el("button", { type: "button", class: "small", onclick: () => { CN.hermesProvider = provider; cnPrepareTab(b); cnSignin(b.id, { provider }); } }, label)))]);
   else steps.push(["signin", "Sign in", "wait", st.state === "asking" || !st.state ? "Asking whether it is signed in…" : "Not signed in yet.", el("div", {}, el("button", { type: "button", class: "primary", onclick: () => { cnPrepareTab(b); cnSignin(b.id); } }, "Sign in"))]);
   // c. one real answer
   const v = d.verify, signed = st.state === "signed_in";
   if (CN.verifying[b.id]) steps.push(["verify", "Check it answers", "running", "Asking " + b.label + " to say ok (one short answer, a minute at most)…"]);
   else if (v && v.ok) steps.push(["verify", "Check it answers", "done", "Answered “" + v.text + "” in " + ((v.elapsedMs || 0) / 1000).toFixed(1) + " s"]);
-  else if (v) { const fix = v.fix || { action: "verify", label: "Check again" }, act = { install: () => cnInstall(b.id), signin: () => { cnPrepareTab(b); cnSignin(b.id); }, link: () => { CN.linkOpen = true; render(); }, verify: () => cnVerify(b.id) }[fix.action];
+  else if (v) { const fix = v.fix || { action: "verify", label: "Check again" }, act = { install: () => cnInstall(b.id), signin: () => { cnPrepareTab(b); cnSignin(b.id, b.id === "hermes" && CN.hermesProvider ? { provider: CN.hermesProvider } : undefined); }, link: () => { CN.linkOpen = true; render(); }, verify: () => cnVerify(b.id) }[fix.action];
     steps.push(["verify", "Check it answers", "failed", "", el("div", { class: "note m-flat vt-bad cn-error" }, v.error), act ? el("div", {}, el("button", { type: "button", class: "primary", onclick: act }, fix.label)) : el("div", { class: "note m-flat" }, fix.label)]); }
   else steps.push(["verify", "Check it answers", signed ? "wait" : "todo", signed ? "" : "After it is signed in.", signed ? el("button", { type: "button", class: "small", onclick: () => cnVerify(b.id) }, "Check") : null]);
   // d. the default
@@ -457,13 +466,40 @@ function connectNudge(where) { if (typeof BR === "undefined") return null;
   if (clis.some(b => b.found && (!BR.status[b.id] || BR.status[b.id].state === "asking"))) return null;  // not yet known: nothing flashes up
   if (clis.some(b => BR.status[b.id] && BR.status[b.id].state === "signed_in")) return null;
   const order = CN_ORDER.map(id => clis.find(b => b.id === id)).filter(Boolean), pick = order.find(b => b.found) || order[0];
+  const localB = (BR.data.backends || []).find(b => b.id === "local" && b.found && !b.error);
   if (!pick) return null;
   return el("section", { class: "panel cn-nudge", "data-card": "connect", "data-where": where },
     el("div", { class: "cn-nudge-h" }, el("div", { class: "m-min" }, el("span", { class: "eyebrow" }, "One click"), el("h2", {}, "Connect your agent"),
       el("p", { class: "note m-flat" }, "Claude Code, Codex, Hermes, Gemini or Grok, with the subscription you already have. The studio finds it (or installs it), signs you in, checks it answers and makes it your default.")),
       where === "home" ? el("button", { type: "button", class: "small ghost", "aria-label": "Hide this card", onclick: () => { try { localStorage.setItem(CN_DISMISS, "1"); } catch {} render(); } }, "Not now") : null),
     el("div", { class: "chips" }, el("button", { type: "button", class: "primary", onclick: () => connectGo(pick) }, brainLogo(pick.id), "Connect " + pick.label),
-      order.filter(b => b !== pick).map(b => el("button", { type: "button", class: "small", onclick: () => connectGo(b) }, b.label)))); }
+      order.length > 1 || localB ? el("span", { class: "cn-or" }, "or") : null,
+      order.filter(b => b !== pick).map(b => el("button", { type: "button", class: "small cn-alt", onclick: () => connectGo(b) }, brainMarkOf(b.id, b) ? mark(brainMarkOf(b.id, b), "") : null, b.label)),
+      localB ? el("button", { type: "button", class: "small cn-alt" + (BR.data.default === "local" ? " on" : ""), "aria-pressed": BR.data.default === "local" ? "true" : "false", onclick: () => cnUseLocal(localB) },
+        brainMarkOf("local", localB) ? mark(brainMarkOf("local", localB), "") : null, localName(localB) + (BR.data.default === "local" ? " · in use" : "")) : null)); }
+// the local brain needs no sign-in: choosing it makes it the default brain (and the Agent room's, when it drives the Studio)
+const localName = b => (b.label || "Local model").replace(/ \(Studio engine\)$/, "") + " (local)";
+async function cnUseLocal(b) { try { const r = await api("/api/brains/local/default", {});
+    if (BR.data) { BR.data.default = r.settings.default; BR.data.settings = r.settings; }
+    toast(localName(b) + " is your default brain" + (b.harness ? ", and the Agent room's" : ""));
+  } catch (e) { toast(e.message); } cnRedraw(); }
+// NVIDIA Nemotron 3.5 Bolt run by the Studio itself (app/bolt.py): its state and backend, what it holds, Load and Unload
+const BOLT_WORD = { loaded: "Loaded", unloaded: "Unloaded", loading: "Loading…", held: "Unloaded for a render", external: "Not managed here" };
+const gbOf = x => x == null ? "" : (Math.round(x * 10) / 10) + " GB";
+function boltLine(e) { return BOLT_WORD[e.state] + (e.state === "loaded" && e.memory_gb != null ? " · " + gbOf(e.memory_gb) : "") + (e.state === "held" && e.held_for ? " (" + e.held_for + ")" : ""); }
+function boltPanel(e) {
+  const act = async (what) => { BR.boltBusy = true; render();
+    try { const r = await api("/api/bolt/" + what, {}); toast(what === "load" ? (r.state === "loaded" ? "Bolt is loaded" : "Loading Bolt (about " + Math.round(r.load_s || 40) + " s)") : "Bolt unloaded: its memory is back");
+      BR.data = null; await brainsLoad(); } catch (err) { toast(err.message, 6000); } BR.boltBusy = false; render(); };
+  if (e.state === "loading" && !BR.boltTimer) BR.boltTimer = setTimeout(() => { BR.boltTimer = null; if (tab === "Brains") { BR.data = null; brainsLoad(); } }, 3000);
+  return el("div", { class: "stack m-bolt", "data-bolt": e.state },
+    el("div", { class: "kv m-row" }, el("span", {}, "Studio engine"), el("b", { class: e.state === "loaded" ? "vt-ok" : e.error ? "warn" : "" }, boltLine(e))),
+    el("div", { class: "kv m-row" }, el("span", {}, "Backend"), el("b", {}, e.backend_label || e.backend)),
+    el("div", { class: "note m-flat" }, e.available === false && e.why ? e.why : "Loaded on the first question (about " + Math.round(e.load_s || 40) + " s), unloaded " + (e.idle_unload_s ? "after " + Math.round(e.idle_unload_s / 60) + " idle minutes" : "only by hand") + " and before a render that needs its memory, never while it answers. Needs about " + Math.round(e.need_gb || 40) + " GB free to load; holds about " + Math.round(e.resident_gb || 28) + " GB."),
+    e.error && e.state !== "loaded" ? el("div", { class: "note m-flat vt-bad" }, e.error) : null,
+    el("div", { class: "m-acts" },
+      el("button", { class: "small", disabled: BR.boltBusy || e.state === "loaded" || e.state === "loading" || e.state === "held" || e.available === false, onclick: () => act("load") }, e.state === "loading" ? "Loading…" : "Load"),
+      el("button", { class: "small", disabled: BR.boltBusy || e.state !== "loaded" || e.in_flight > 0, title: e.in_flight > 0 ? "It is answering now" : "", onclick: () => act("unload") }, "Unload"))); }
 function viewBrains() {
   const wrap = el("div");
   const head = () => pageHead("Studio Vault", "Brains & tools", "Your own AI sign-ins, and the tools an agent may use.");
@@ -479,8 +515,9 @@ function viewBrains() {
   const clis = (d.backends || []).filter(b => b.kind !== "http" && b.id !== "local").map(b => ({ kind: "cli", ...b })), localB = (d.backends || []).find(b => b.kind === "http" || b.id === "local");
   put(wrap, el("div", { class: "sectionhead" }, el("h2", {}, "Your agents"), el("span", { class: "note" }, "Connect one: the studio installs it, signs you in and checks it.")),
     el("div", { class: "tri" }, clis.map(b => connectCard(b)),
-      localB ? el("div", { class: "brain" + (d.default === "local" ? " on" : ""), "data-brain": "local" }, el("div", { class: "head" }, brainLogo("local"), el("div", { class: "m-min" }, el("b", {}, localB.label),
-          el("span", { class: "cn-word " + (localB.found ? "ok" : "bad") }, localB.found ? "Ready" : "Not answering", localB.models && localB.models.length ? " · " + localB.models.length + " models" : ""))),
+      localB ? el("div", { class: "brain" + (d.default === "local" ? " on" : ""), "data-brain": "local" }, el("div", { class: "head" }, brainLogo("local", localB), el("div", { class: "m-min" }, el("b", {}, localB.label),
+          el("span", { class: "cn-word " + (localB.found ? "ok" : "bad") }, localB.found ? "Ready" : "Not answering", localB.found && localB.model ? " · running " + localB.model : localB.models && localB.models.length ? " · " + localB.models.length + " models" : ""))),
+        localB.engine ? boltPanel(localB.engine) : null,
         el("div", { class: "m-acts" }, d.default === "local" ? el("span", { class: "tag2 t", title: d.automatic ? "Nobody chose a default brain, and this local server answers: it leads until you make another brain the default" : "" }, d.automatic ? "default · automatic" : "default") : el("button", { class: "small", disabled: !localB.found, onclick: () => save({ default: "local" }) }, "Make default"))) : null));
   put(wrap, el("div", { class: "m-gap" }, linkPanel(),
     el("details", { class: "fold m-fold", open: CN.linkOpen || false }, el("summary", {}, "Set the other computer by hand"),

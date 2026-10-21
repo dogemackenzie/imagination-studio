@@ -2,6 +2,7 @@
 # =============================================================================
 # One-shot: TensorFold Studio on Apple Silicon: Qwen-Image-2.1-Turbo (text to image) + FastH3 (video + audio)
 #
+#   bash oneshot-setup.sh --all --app   # every feature this Mac's memory runs (said with why for what it leaves out), the app
 #   bash oneshot-setup.sh               # install, fetch the image model, FastH3 and what it needs of MiniMax H3, render a test clip
 #   bash oneshot-setup.sh --app         # the same, plus the double-clickable app: the full one-shot
 #   bash oneshot-setup.sh --turbo       # also MiniMax H3's own transformer and its Turbo adapter (64 GB more, 128 GB of memory)
@@ -14,10 +15,19 @@
 #   bash oneshot-setup.sh --music       # also MiniMax Music 3 for the Music tab (scripts/setup-music.sh: TensorFold's
 #                                       # music3-mlx in its own venv, 22 GB of weights, 64 GB of memory; MiniMax-Music3
 #                                       # Community License: commercial use allowed, a commercial UI shows "MiniMax-Music3")
+#   bash oneshot-setup.sh --bolt        # also NVIDIA Nemotron 3.5 Bolt as the Studio's brain engine (scripts/setup-bolt.sh:
+#                                       # NVIDIA's 24 GB checkpoint and LiLiCorr drafter, about 25 GB; OpenMDW 1.1, commercial
+#                                       # use allowed). Until TensorFold's Metal engine lands, BOLT_BACKEND=llamacpp runs it
+#                                       # through llama.cpp's server with NVIDIA's GGUF
 #   bash oneshot-setup.sh --sound       # also sound effects and foley (scripts/setup-sound.sh: Stable Audio Open 1.0,
 #                                       # Stability AI Community License, gated; MMAudio, weights CC-BY-NC 4.0; about 13 GB)
 #   bash oneshot-setup.sh --flux3       # also FLUX3-K (BFL's FLUX 3 Image Klein) as picture models beside Qwen-Image
 #                                       # (scripts/setup-flux3.sh: flux3-mlx in its own venv, 41 GB; FLUX Kommunity License)
+#   bash oneshot-setup.sh --upscale     # also the Library's Upscale (scripts/setup-comfy.sh: ComfyUI on PyTorch's Metal device in
+#                                       # its own venv, dntpi's H3 Video Upsampler, 2.3 GB with the venv; needs --ref2va)
+#   bash oneshot-setup.sh --remove      # also Find a person and Remove a person (the same ComfyUI, Akatz Labs' H3 Relay, Meta's
+#                                       # SAM 3.1: 1.7 GB more; needs --ref2va)
+#   bash oneshot-setup.sh --moss        # also MOSS-Image (OpenMOSS, Apache 2.0) as a picture model, on the same ComfyUI (28 GB)
 #   bash oneshot-setup.sh --image-only  # the image model only (33 GB), render a test image
 #   bash oneshot-setup.sh --no-render   # install and fetch only
 #   bash oneshot-setup.sh --no-loras    # skip the essential LoRA bundle (about 4 GB from the LoRAs' authors; --loras=camera,style
@@ -38,14 +48,16 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # One command on either machine: on Linux with an NVIDIA GPU this hands over to the DGX Spark installer (CUDA build).
-# The options both know (--image-only, --no-render, --verify, --motion, --upgrade) pass through; the Mac-only ones are dropped with a note.
+# The options both know pass through to oneshot-setup-spark.sh (it adds --h3-base, which is the Spark's own); --upscale and
+# --remove come with the Spark's --ref2va; the Mac-only ones (--turbo, --app) are dropped with a note.
 if [ "$(uname -s)" = Linux ]; then
   SPARK_ARGS=()
   for arg in "$@"; do
     case "$arg" in
-      --image-only|--no-render|--verify|--motion|--upgrade|--voice|--flux3|--music|--loras|--loras=*|--no-loras|--lora-bundle=*) SPARK_ARGS+=("$arg");;
+      --all|--image-only|--no-render|--verify|--motion|--upgrade|--voice|--flux3|--music|--moss|--bolt|--sound|--ref2va|--image-edit|--h3-base|--loras|--loras=*|--no-loras|--lora-bundle=*) SPARK_ARGS+=("$arg");;
+      --upscale|--remove) echo "note: on a DGX Spark $arg comes with --ref2va (spark/setup-workflows.sh): adding --ref2va"; SPARK_ARGS+=("--ref2va");;
       --fasth3) ;;
-      --turbo|--app|--ref2va|--sound) echo "note: $arg is for the Mac build and does nothing on a DGX Spark";;
+      --turbo|--app) echo "note: $arg is for the Mac build and does nothing on a DGX Spark";;
       *) echo "unknown option $arg" >&2; exit 2;;
     esac
   done
@@ -57,7 +69,7 @@ H3_MODEL_DIR="${H3_MODEL_DIR:-$HOME/h3-models/MiniMax-H3}"
 QWEN_MODEL_DIR="${QWEN_MODEL_DIR:-$HOME/qwen-models/Qwen-Image-2.1-Turbo}"
 FASTH3_DIR="${FASTH3_DIR:-$HOME/h3-models/FastH3-8-Step-V2}"
 FASTH3_REPO="FastVideo/FastVideo-FastH3-8-Step-V2"
-IMAGE="${IMAGE:-ghcr.io/drowzeys/keys-tensorfold-studio:2.9.1}"
+IMAGE="${IMAGE:-ghcr.io/drowzeys/keys-tensorfold-studio:3.1.0}"
 # the carrier under its name up to 2.2, with the same Mac payload
 IMAGE_BEFORE="ghcr.io/drowzeys/keys-mac-tensorfold-studio:2.2"
 TF_REPO="https://github.com/drowzeys/TensorFold.git"
@@ -65,9 +77,10 @@ TF_COMMIT="a2b592fef5366bf16d4729651b6549094981d3fe"
 REF_REPO="https://github.com/mrbizarro/minimax-h3-mlx.git"
 REF_COMMIT="79190205258454b43e6c9e50e577de234222419c"
 # the native engine for FastH3: TensorFold 1.0.4's Zig + Metal runtime with the H3 family, from the same fork
-ZIG_COMMIT="b7e309e042e48b72e75e9fb87342df4e9bf22f37"
-ZIG_ENGINE_URL="https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3/releases/download/v2.3/zig-engine-b7e309e0-macos-arm64.tar.gz"
-ZIG_ENGINE_SHA256="d142b1d3c57d3c5bfc4d2a0d4f83ca5bf91e8091ac6357cda52759a250fd391c"
+# (its pin is scripts/build-zig-engine.sh's, which the updater also reads, so the two never differ)
+ZIG_COMMIT="$(sed -n 's/^ZIG_COMMIT="\${ZIG_COMMIT:-\([0-9a-f]\{40\}\)}"$/\1/p' "$HERE/scripts/build-zig-engine.sh")"
+ZIG_ENGINE_URL="https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman/releases/download/v3.1.0/zig-engine-${ZIG_COMMIT:0:8}-macos-arm64.tar.gz"
+ZIG_ENGINE_SHA256="775e9163d77a9d4e7ff8d608e3a59f146fb1c97754b4234b7e5fb6bd685387ab"
 MFLUX_REPO="https://github.com/mflux-community/mflux.git"
 MFLUX_COMMIT="add5164e62c07cbcc9aec7a95c2e19c75605880c"
 H3_ADAPTER_NAME="lightx2v_v1.0_768p_ourlayout.safetensors"
@@ -81,9 +94,10 @@ REF_ADAPTER_NAME="lightx2v_ref2v_4step_v0.1_ourlayout.safetensors"
 X2_REPO="speach1sdef178/MiniMax-H3-X2-Detail-VAE"
 X2_NAME="MiniMax-H3-X2-Detail-v1.safetensors"
 X2_SHA256="2296840f4acedcaa976688e7d7b97f7bf570b136e400385d3f46224011897aac"
-MODE=""; VIDEO=1; TURBO=0; APP=0; REF2VA=0; MOTION=0; UPGRADE=0; LORAS=""; IMAGE_EDIT=0; VOICE=0; FLUX3=0; MUSIC=0; SOUND=0
+ALL=0; MODE=""; VIDEO=1; TURBO=0; APP=0; REF2VA=0; MOTION=0; UPGRADE=0; LORAS=""; IMAGE_EDIT=0; VOICE=0; FLUX3=0; MUSIC=0; SOUND=0; BOLT=0; COMFY_ARGS=()
 for arg in "$@"; do
   case "$arg" in
+    --all) ALL=1;;  # every feature this Mac's memory runs (chosen after the preflight reads the chip and the memory)
     --image-only) VIDEO=0;;
     --fasth3) ;;  # FastH3 is the default video engine since 2.1; the flag is kept so older commands still run
     --turbo) TURBO=1;;
@@ -92,7 +106,9 @@ for arg in "$@"; do
     --voice) VOICE=1;;
     --flux3) FLUX3=1;;
     --music) MUSIC=1;;
+    --bolt) BOLT=1;;
     --sound) SOUND=1;;
+    --upscale|--remove|--moss) COMFY_ARGS+=("$arg");;
     --image-edit) IMAGE_EDIT=1;;
     --app) APP=1;;
     --verify|--no-render) MODE="$arg";;
@@ -122,6 +138,22 @@ step "Preflight"
 [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || die "Apple silicon macOS only"
 CHIP=$(sysctl -n machdep.cpu.brand_string); RAM=$(( $(sysctl -n hw.memsize) / 1073741824 ))
 ok "$CHIP, macOS $(sw_vers -productVersion), ${RAM} GB"
+# --all: every feature this Mac runs, by its memory (each a job's measured peak on an M5 Ultra, one job at a time:
+# the Studio unloads one model before the next). What is left out is said, with why.
+if [ "$ALL" = 1 ]; then
+  if [ "$RAM" -lt 64 ]; then VIDEO=0; echo "  --all on ${RAM} GB: pictures only (video, voice and music need 64 GB)"
+  else
+    MOTION=1; VOICE=1; MUSIC=1; FLUX3=1; SOUND=1; IMAGE_EDIT=1; COMFY_ARGS+=(--moss)
+    case "$CHIP" in *M[5-9]*) BOLT=1;; *) echo "  --all: NVIDIA Nemotron 3.5 Bolt left out: its Metal engine is measured on an M5 only (add --bolt to try it)";; esac
+    if [ "$RAM" -ge 128 ]; then TURBO=1; REF2VA=1; else echo "  --all on ${RAM} GB: MiniMax H3 Turbo and Ref2VA left out (128 GB)"; fi
+    if [ "$RAM" -ge 192 ]; then COMFY_ARGS+=(--upscale --remove); else echo "  --all on ${RAM} GB: Upscale and Remove a person left out (their peaks are 125 and 135 GB: 192 GB)"; fi
+  fi
+fi
+# Upscale and Remove a person hold MiniMax H3's bf16 Ref2VA transformer and text encoder at once (125 and 135 GB at
+# their peaks, measured; the app keeps 16 GB free beside them): a Mac with less is refused here, not halfway through a job
+for one in ${COMFY_ARGS[@]+"${COMFY_ARGS[@]}"}; do
+  case "$one" in --upscale|--remove) [ "$RAM" -ge 192 ] || die "$one needs a Mac with 192 GB or more (its measured peak is over 125 GB); this one has ${RAM} GB";; esac
+done
 # --upgrade moves an existing install to this version: the engine, the scripts and the Motion Previs environment.
 # A video install stays a video install and an image-only one image-only; the studio folder is not touched.
 INSTALLED="$(cat "$PREFIX/VERSION" 2>/dev/null || echo "2.6 or earlier")"
@@ -415,6 +447,10 @@ if [ "$MUSIC" = 1 ] || { [ "$MODE" = "--verify" ] && [ -x "$PREFIX/music3-venv/b
   PREFIX="$PREFIX" bash "$HERE/scripts/setup-music.sh" $([ "$MODE" = "--verify" ] && echo --verify) \
     || [ "$MUSIC" = 1 ] || echo "  ! MiniMax Music 3 is not fully set up: bash scripts/setup-music.sh"
 fi
+if [ "$BOLT" = 1 ]; then  # NVIDIA Nemotron 3.5 Bolt, the brains' Studio-managed engine: its weights (scripts/setup-bolt.sh)
+  PREFIX="$PREFIX" bash "$HERE/scripts/setup-bolt.sh" $([ "$MODE" = "--verify" ] && echo --verify) \
+    || echo "  ! NVIDIA Nemotron 3.5 Bolt is not fully set up: bash scripts/setup-bolt.sh"
+fi
 if [ "$SOUND" = 1 ] || { [ "$MODE" = "--verify" ] && [ -x "$PREFIX/sound-venv/bin/python" ]; }; then  # sound effects and foley: their own venv and weights
   PREFIX="$PREFIX" bash "$HERE/scripts/setup-sound.sh" $([ "$MODE" = "--verify" ] && echo --verify) \
     || [ "$SOUND" = 1 ] || echo "  ! Sound effects are not fully set up: bash scripts/setup-sound.sh"
@@ -422,6 +458,11 @@ fi
 if [ "$FLUX3" = 1 ] || [ -x "$PREFIX/flux3-venv/bin/python" ]; then  # FLUX3-K picture models: their own venv and weights
   PREFIX="$PREFIX" bash "$HERE/scripts/setup-flux3.sh" $([ "$MODE" = "--verify" ] || [ "$UPGRADE" = 1 ] && echo --verify) \
     || [ "$FLUX3" = 1 ] || echo "  ! FLUX3-K is not fully set up: bash scripts/setup-flux3.sh"
+fi
+if [ ${#COMFY_ARGS[@]} -gt 0 ] || [ -d "$PREFIX/ComfyUI" ]; then  # Upscale, Remove a person, MOSS-Image: ComfyUI in its own venv
+  PREFIX="$PREFIX" H3_MODEL_DIR="$H3_MODEL_DIR" bash "$HERE/scripts/setup-comfy.sh" ${COMFY_ARGS[@]+"${COMFY_ARGS[@]}"} \
+    $([ "$MODE" = "--verify" ] || [ "$UPGRADE" = 1 ] || [ ${#COMFY_ARGS[@]} = 0 ] && echo --verify) \
+    || [ ${#COMFY_ARGS[@]} -gt 0 ] || echo "  ! ComfyUI's actions are not fully set up: bash scripts/setup-comfy.sh --verify says what is missing"
 fi
 if [ "$MODE" = "--verify" ] || [ "$MODE" = "--no-render" ]; then
   echo; echo "DONE. Image: bash $HERE/scripts/image.sh \"a prompt\" out.png"

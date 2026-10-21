@@ -9,7 +9,7 @@ const SET_DEFAULTS = {
   hermes_profile: "", hermes_command: "" };
 const SET = { data: null, loaded: false, section: "appearance", saving: false, local: { endpoint: null, found: null, finding: false, said: null, testing: false }, about: null };
 const SET_SECTIONS = [["appearance", "Appearance", "type, glow, poster, accent"], ["layout", "Studio layout", "what the sidebar shows"],
-  ["presets", "Presets & preferences", "what a new take starts from"], ["connections", "Connections", "subscriptions, local models, tools"],
+  ["presets", "Presets & preferences", "what a new take starts from"], ["connections", "Connections", "subscriptions, local models, tools"], ["access", "Access key", "sign in your phone, a new key"],
   ["models", "Models & weights", "what the studio needs, found and linked"], ["sparks", "Sparks", "one to five DGX Sparks for a job"],
   ["brains", "Brains & tools", "your agents, another computer, MCP tools"], ["updates", "Updates", "the version and the branch it follows"], ["about", "About", "version, credits, licences"]];
 // Machine's own pages, opened here too: each is the same view, and its data is drawn again when it arrives
@@ -111,7 +111,7 @@ function setPresets() { const p = prefs().presets, put1 = patch => settingsSave(
     setRow("Renders go to", "The studio folder, set when the studio starts (STUDIO_HOME)", el("code", { class: "st-path" }, (S && S.home) || "the studio folder")))]; }
 
 /* ---------- 4. Connections ---------- */
-const LOCAL_PRESETS = [["Ollama", "http://127.0.0.1:11434/v1"], ["LM Studio", "http://127.0.0.1:1234/v1"], ["vLLM", "http://127.0.0.1:8000/v1"], ["llama.cpp", "http://127.0.0.1:8080/v1"], ["Hermes proxy", ""]];
+const LOCAL_PRESETS = [["Studio engine · Bolt", "studio:bolt"], ["Ollama", "http://127.0.0.1:11434/v1"], ["LM Studio", "http://127.0.0.1:1234/v1"], ["vLLM", "http://127.0.0.1:8000/v1"], ["llama.cpp", "http://127.0.0.1:8080/v1"], ["Hermes proxy", ""]];
 // the Local models card: on Settings → Connections and at the top of Machine → Brains & tools
 function localModelsCard() {
   const b = (typeof BR !== "undefined" && BR.data && BR.data.backends || []).find(x => x.id === "local"), set = typeof BR !== "undefined" && BR.data && BR.data.settings || {};
@@ -135,8 +135,11 @@ function localModelsCard() {
       el("button", { type: "button", class: "small", onclick: () => save1({ local_endpoint: L.endpoint.trim() }) }, "Save"),
       el("button", { type: "button", class: "small", disabled: L.testing || !(found && found.found), onclick: async () => { L.testing = true; render();
         try { L.said = await api("/api/brains/test", { backend: "local" }); } catch (e) { L.said = { ok: false, error: e.message }; } L.testing = false; render(); } }, L.testing ? "Asking…" : "Test")),
-    found ? el("div", { class: "note m-flat " + (found.found ? "vt-ok" : "") }, found.found ? (b && b.named && b.endpoint === found.endpoint ? b.label + " · " : "") + "Found at " + found.endpoint + " · " + found.models.length + " model" + (found.models.length === 1 ? "" : "s") : found.error || "Nothing answered there. Left empty, the studio looks on 11434, 1234, 8000 and 8080.") : null,
+    found ? el("div", { class: "note m-flat " + (found.found ? "vt-ok" : "") }, found.found ? (b && b.model && b.endpoint === found.endpoint ? "Running " + b.model + " · " : "") + "Found at " + found.endpoint + " · " + found.models.length + " model" + (found.models.length === 1 ? "" : "s") : found.error || "Nothing answered there. Left empty, the studio looks on 11434, 1234, 8000 and 8080.") : null,
     model ? el("div", { class: "st-lrow" }, el("span", { class: "note m-flat" }, "Model"), model) : null,
+    // a name set here that the server no longer runs: the studio asks for, and shows, the model it does run
+    b && b.set_missing && b.endpoint === (found && found.endpoint) ? el("div", { class: "note m-flat" }, "Set to " + b.set_model + ", which this server no longer runs: the studio uses " + b.model + ". ",
+      el("button", { type: "button", class: "small", onclick: () => save1({ local_model: "" }) }, "Follow what the server runs")) : null,
     L.said ? el("div", { class: "note m-flat " + (L.said.ok ? "vt-ok" : "vt-bad") }, L.said.ok ? "Answered “" + String(L.said.text || "").slice(0, 40) + "”" : L.said.error) : null); }
 const setWhere = b => b.found ? (b.where && b.where !== "here" ? "on " + b.where.replace(/^ssh:/, "") : "found here") + (b.version ? " · " + b.version : "") : b.error || (b.where && b.where !== "here" ? "not found on " + b.where.replace(/^ssh:/, "") : "not found");
 function setBrainCard(b) { return typeof connectCard === "function" ? connectCard(b, b.id === "hermes" ? [setHermes()] : []) : el("div", { class: "brain", "data-brain": b.id }, b.label); }
@@ -165,10 +168,65 @@ function setConnections() {
           el("div", { class: "m-acts" }, el("button", { type: "button", class: "small", onclick: async () => { try { const a = await api("/api/suite"); toast((Array.isArray(a) ? a.length : 0) + " suite apps and editors are known here"); } catch (e) { toast(e.message); } } }, "Test"),
             el("button", { type: "button", class: "small", onclick: () => go("Import") }, "Open"))))) ]; }
 
+/* ---------- the access key (app/access.py): sign another device in, show the key, make a new one ---------- */
+const keyCopy = async (text, what) => { try { await navigator.clipboard.writeText(text); toast(what + " copied"); } catch { toast("Copy it by hand: " + text); } };
+function setAccess() {
+  if (!SET.key) { SET.key = { loading: true }; api("/api/key/share").then(d => { SET.key = d; if (tab === "Settings") render(); }, e => { SET.key = { error: e.message }; if (tab === "Settings") render(); }); }
+  const k = SET.key, phone = (k.links || []).find(l => l.kind === "tailscale"), nets = (k.links || []).filter(l => l.kind === "network");
+  if (k.loading) return [setPanel("Access key", "Loading…")];
+  if (k.error) return [setPanel("Access key", k.error)];
+  const qr = phone && typeof qrSvg === "function" ? qrSvg(phone.url, 200) : null, netQr = nets[0] && typeof qrSvg === "function" ? qrSvg(nets[0].url, 200) : null;
+  return [setPanel("Access key", "The key is for reaching the studio from another device: a phone over Tailscale, another computer. Each signs in once and stays signed in.",
+      el("div", { class: "key-steps" },
+        el("div", { class: "key-step" }, el("b", {}, "Sign in your phone (Tailscale)"),
+          phone ? [el("p", { class: "note m-flat" }, "Scan this with the phone's camera. It opens the studio and signs the phone in; then add it to the home screen."),
+                   qr ? el("div", { class: "key-qr" }, qr) : null,
+                   el("div", { class: "m-acts" }, el("button", { type: "button", class: "small", onclick: () => keyCopy(phone.url, "The link") }, "Copy the link"))]
+                : el("p", { class: "note m-flat" }, "A phone reaches the studio through Tailscale: install it on both and run ", el("code", {}, "tailscale serve --bg " + (location.port || "7870")),
+                     " on this computer (Settings → Connections has the steps). This panel then shows a QR code for the phone.")),
+        el("div", { class: "key-step" }, el("b", {}, "Sign in another computer on your network"),
+          nets.length ? [el("p", { class: "note m-flat" }, "Open this link on the other computer (or scan the code with a phone on the same Wi-Fi): it opens this studio there, signed in. Only devices on your own network can reach it."),
+                         netQr ? el("div", { class: "key-qr" }, netQr) : null,
+                         nets.map(n => el("div", { class: "m-acts" }, el("code", { class: "key-shown" }, n.label.replace(/^Your network \((.*)\)$/, "http://$1:" + (k.port || "7870"))),
+                           el("button", { type: "button", class: "small", onclick: () => keyCopy(n.url, "The sign-in link") }, "Copy the sign-in link")))]
+                       : el("p", { class: "note m-flat" }, "This studio listens on this computer only. To open it to your home network, start it with ", el("code", {}, "HOST=0.0.0.0 bash scripts/app.sh"),
+                            " (on a Mac, build the app with HOST=0.0.0.0 bash scripts/make-app.sh); this step then shows a link and a QR code for the other computer. Keep that to a network you trust.")),
+        el("div", { class: "key-step" }, el("b", {}, "On this computer"),
+          el("p", { class: "note m-flat" }, "Nothing to do: a browser on the computer running the studio (localhost) never needs the key, and neither do updates there.")),
+        el("div", { class: "key-step" }, el("b", {}, "The key itself"),
+          el("p", { class: "note m-flat" }, "For a tool, or to type on a device: kept in ", el("code", {}, k.file || "access-key"), " (only you can read it)."),
+          el("div", { class: "m-acts" }, el("code", { class: "key-shown" }, SET.keyShown ? k.key : "•".repeat(12)),
+            el("button", { type: "button", class: "small", onclick: () => { SET.keyShown = !SET.keyShown; render(); } }, SET.keyShown ? "Hide" : "Show"),
+            el("button", { type: "button", class: "small", onclick: () => keyCopy(k.key, "The key") }, "Copy"))))),
+    setPanel("Make a new key", "If the key got out, or a device you signed in is gone: every other browser and phone is signed out and asks again. This browser stays signed in.",
+      el("div", {}, el("button", { type: "button", onclick: async () => { if (!confirm("Make a new key? Every other device is signed out.")) return;
+        try { await api("/api/key/new", {}); SET.key = null; SET.keyShown = false; toast("New key made: sign your other devices in again"); render(); } catch (e) { toast(e.message); } } }, "Make a new key")))]; }
+
 /* ---------- 5. About ---------- */
 // Keys and Wasserman Productions: their sites and code
 const ABOUT_LINKS = [["Keys", [["X @u1tra_instinct", "https://x.com/u1tra_instinct"], ["GitHub", "https://github.com/drowzeys"]]],
   ["Sam Wasserman / Wasserman Productions", [["wassermanproductions.com", "https://wassermanproductions.com"], ["X @SamJWasserman", "https://x.com/SamJWasserman"], ["GitHub", "https://github.com/wassermanproductions"]]]];
+// CREDITS.md and THIRD_PARTY_NOTICES.md as the repo has them (/api/credits), drawn with el() only: headings, bullets,
+// paragraphs, **bold** and `code`; nothing of the file becomes markup
+function mdInline(text) { return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/).filter(Boolean).map(p =>
+  p.startsWith("**") ? el("b", {}, p.slice(2, -2)) : p.startsWith("`") ? el("code", {}, p.slice(1, -1)) : p); }
+function mdBlocks(text) { const out = []; let list = null, para = null;
+  const end = () => { if (para) out.push(el("p", { class: "note m-flat" }, mdInline(para))); para = null; };
+  for (const raw of (text || "").split("\n")) { const line = raw.trimEnd();
+    if (!line.trim()) { end(); list = null; continue; }
+    const head = /^(#{1,3}) (.*)$/.exec(line), item = /^\s*- (.*)$/.exec(line);
+    if (head) { end(); list = null; out.push(el(head[1].length === 1 ? "h3" : "h4", { class: "st-md-head" }, mdInline(head[2]))); }
+    else if (item) { end(); if (!list) out.push(list = el("ul", { class: "st-credits" })); list.appendChild(el("li", {}, mdInline(item[1]))); }
+    else if (list && /^\s/.test(raw) && list.lastChild) list.lastChild.append(" ", ...mdInline(line.trim()));
+    else { list = null; para = para ? para + " " + line.trim() : line.trim(); } }
+  end(); return out; }
+function setFullCredits() {
+  if (!SET.credits) { SET.credits = { loading: true }; api("/api/credits").then(d => { SET.credits = d; if (tab === "Settings") render(); }, () => { SET.credits = { error: true }; }); }
+  const c = SET.credits;
+  return setPanel("Every credit", "Everyone whose work made the studio possible, as CREDITS.md and THIRD_PARTY_NOTICES.md in the repo say it.",
+    c.loading ? el("p", { class: "note m-flat" }, "Loading…") : c.error ? el("p", { class: "note m-flat" }, "CREDITS.md could not be read here: it is in the repo, github.com/drowzeys.") :
+    [el("details", { class: "st-md", open: true }, el("summary", {}, "CREDITS.md"), mdBlocks(c.credits)),
+     el("details", { class: "st-md" }, el("summary", {}, "THIRD_PARTY_NOTICES.md"), mdBlocks(c.notices))]); }
 function setAbout() { if (!SET.about && typeof updRequest === "function") { SET.about = { loading: true }; updRequest().then(d => { SET.about = d; if (tab === "Settings") render(); }, () => { SET.about = { error: true }; }); }
   const u = SET.about || {}, row = (k, v) => el("div", { class: "kv st-kv" }, el("span", {}, k), el("b", {}, v));
   return [setPanel("About", null,
@@ -184,15 +242,23 @@ function setAbout() { if (!SET.about && typeof updRequest === "function") { SET.
       "Qwen team: Qwen-Image-2.1", "Black Forest Labs: FLUX 3 Image Klein (FLUX3-K)", "OpenMOSS: MOSS-Image", "MiniMax: MiniMax H3 and MiniMax-Music3", "Built with Fish Audio: Fish Audio Drama 3",
       "Stability AI: Stable Audio Open · Ho Kei Cheng et al.: MMAudio · kijai: ComfyUI-MMAudio (sound effects and foley)",
       "Ash Hart: TensorFold",
+      "NVIDIA: Nemotron 3.5 Bolt and its LiLiCorr drafter (the Studio's brain engine) · MiaAI-Lab: the Bolt TensorFold recipe for the DGX Spark",
       "antirez: h3.c · RobZombAI: H3MLX · mrbizarro: minimax-h3-mlx (Phosphene) · Filip Strand and the mflux contributors · felix-ab: flux3-mlx",
-      "Comfy Org: ComfyUI and its MOSS-Image files · Apple: MLX · NVIDIA Research · FastVideo · LightX2V · Viggle · speach1sdef178 · rookiestar28 · ddalcu",
-      "The agents you connect: Claude Code (Anthropic), Codex (OpenAI), Gemini CLI (Google), Grok CLI (xAI), Hermes Agent (Nous Research); Ollama, LM Studio, vLLM, llama.cpp; Blender and blender-mcp",
-      "OpenAI Whisper and faster-whisper, yt-dlp, FFmpeg, PyTorch, Hugging Face diffusers and transformers, FastAPI, Geist and Instrument Serif",
-      "The community LoRA authors, by name in Looks and in CREDITS.md"].map(t => el("li", {}, t)))),
+      "comfyanonymous, Comfy Org and the ComfyUI contributors: ComfyUI, and Comfy Org's MOSS-Image and MiniMax-Music-3 files · Apple: MLX · mlx-vlm · Qwen team: Qwen3-VL · VisualInference",
+      "NVIDIA Research: Sol · FastVideo (Hao AI Lab): FastH3 · LightX2V (ModelTC) · larryvrh · TaoLiveAIGC · Viggle · speach1sdef178 · rookiestar28 · ddalcu · Kijai · DeepBeepMeep",
+      "The Library's actions: MATLOWAI (H3 Contact Sheet) · dntpi / Sandpies (H3 Video Upsampler) · LBH-123-AI · bbaudio-2025 · Alissonerdx · Akatz Labs (H3 Relay, Person Remover) · Meta: SAM 3.1",
+      "Motion Previs: Sam Wasserman's Motion Previs Studio · Google: MediaPipe · Lihe Yang et al.: Depth Anything (Xenova's ONNX conversion) · OpenCV · Microsoft: ONNX Runtime",
+      "MMAudio's models: Apple DFN5B CLIP · Synchformer (Iashin et al.) · NVIDIA BigVGAN v2 · Google: T5 · the SGLang-Omni team and Descript: Fish's codec on a Spark",
+      "The agents you connect: Claude Code (Anthropic), Codex (OpenAI), Gemini CLI (Google), Grok CLI (xAI), Hermes Agent (Nous Research); Ollama, LM Studio, vLLM, llama.cpp (Georgi Gerganov and the ggml contributors); Blender (Blender Foundation) and blender-mcp (Siddharth Ahuja)",
+      "OpenAI Whisper, faster-whisper (SYSTRAN, Mobius Labs), yt-dlp, FFmpeg, PyTorch, Hugging Face diffusers, transformers and huggingface_hub, torchsde, FastAPI, Starlette and Uvicorn (Encode), xgrammar (MLC-AI), Zig, BusyBox, uv, NumPy, Pillow, PyAV",
+      "Geist and Instrument Serif · LobeHub and Simple Icons: the agents' marks · @itxabdullaa: the Black Mirror test prompt",
+      "The community LoRA authors, by name on each card in Looks and in CREDITS.md · every one of them, with what was used and its licence, under Every credit below"].map(t => el("li", {}, t)))),
+  setFullCredits(),
   setPanel("Licences", "The studio's code is Apache-2.0. The models keep their own terms: do not redistribute their weights.",
     el("ul", { class: "st-credits" }, ["Attribution required: per the NOTICE file (Apache 2.0 §4(d)), any use, fork or redistribution keeps the NOTICE and credits Keys (github.com/drowzeys) and Sam Wasserman / Wasserman Productions (wassermanproductions.com) in its documentation and about/credits surface",
       "Qwen-Image-2.1: Qwen Research License (non-commercial)", "MiniMax H3: MiniMax H3 Community License (territory limits)", "MiniMax-Music3: its licence asks for its name in a commercial UI",
       "FLUX3-K: FLUX Kommunity License", "MOSS-Image: Apache 2.0 (commercial use allowed)", "Fish Audio Drama 3: Fish Audio Community License v1.0; a hosted voice service needs Fish's own licence",
+      "NVIDIA Nemotron 3.5 Bolt: OpenMDW License 1.1 (commercial use allowed; a copy keeps the licence and NVIDIA's notices) · its DGX Spark engine: MiaAI-Lab's recipe, MIT, on TensorFold",
       "Stable Audio Open 1.0: Stability AI Community License (free under US$1 million of yearly revenue)", "MMAudio's weights: CC-BY-NC 4.0, non-commercial",
       "Wasserman's Filmmaker Suite: each app under its own licence, Apache-2.0 (Master Canvas: MIT); the studio ships none of their code but the Slate workflow and the Motion Previs port, each with its NOTICE"].map(t => el("li", {}, t))))]; }
 
@@ -205,7 +271,7 @@ function setEmbedded(section) { const [name, data] = SET_VIEWS[section], view = 
   if (SET.embedTimer && SET.embedTimer.unref) SET.embedTimer.unref();
   return [el("div", { class: "st-embed", "data-embed": section }, view())]; }
 function viewSettings() {
-  const draw = { appearance: setAppearance, layout: setLayout, presets: setPresets, connections: setConnections, about: setAbout,
+  const draw = { appearance: setAppearance, layout: setLayout, presets: setPresets, connections: setConnections, access: setAccess, about: setAbout,
     models: () => setEmbedded("models"), sparks: () => setEmbedded("sparks"), brains: () => setEmbedded("brains"), updates: () => setEmbedded("updates") }[SET.section] || setAppearance;
   return el("div", { class: "settings" },
     typeof pageHead === "function" ? pageHead("Studio Vault", "Settings", "How the studio looks, what it shows, and what it connects to.") : el("h1", { class: "display" }, "Settings"),

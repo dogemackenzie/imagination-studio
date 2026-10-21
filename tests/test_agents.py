@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -340,9 +341,11 @@ def test_the_local_server(fake, monkeypatch):
         url = f"http://127.0.0.1:{httpd.server_port}"
         assert agents.ask("local", "s", "p", endpoint=url) == "ready from qwen3:8b"
         post("/api/brains/settings", {"local_endpoint": url, "local_model": "other"})
-        assert agents.ask("local", "s", "p") == "ready from other"
+        # "other" is set, but the server runs only qwen3:8b: that is what is asked for and shown, and the page says so
+        assert agents.ask("local", "s", "p") == "ready from qwen3:8b"
         local = client.get("/api/brains").json()["backends"][-1]
         assert local["found"] and local["models"] == ["qwen3:8b"] and local["endpoint"] == url + "/v1"
+        assert local["model"] == "qwen3:8b" and local["label"] == "qwen3:8b (local)" and local["set_model"] == "other" and local["set_missing"]
     finally:
         httpd.shutdown()
 
@@ -357,7 +360,8 @@ def test_a_local_server_that_answers_is_the_default_until_one_is_chosen(fake, mo
     # the set server answers: it leads, for a new film too, and the page is told it was not chosen
     post("/api/brains/settings", {"local_endpoint": "http://studio-box:8091"})
     assert agents.default_brain() == {"backend": "local", "endpoint": "http://studio-box:8091", "model": ""}
-    assert slate.blank("A film")["defaults"]["brain"] == "local"
+    assert slate.blank("A film")["defaults"]["brain"] == "auto" and slate.resolve_brain("auto")[0] == "local"
+    assert client.get("/api/slate/brain").json()["default"] == "local"
     answer = client.get("/api/brains").json()
     assert answer["default"] == "local" and answer["automatic"] is True
     file = agents.HOME / ".studio-agents/settings.json"
@@ -388,8 +392,12 @@ def test_the_environment_choice_wins_over_the_automatic_default(fake, monkeypatc
 
 def test_the_local_brain_is_named_by_its_model(fake, monkeypatch):
     assert agents.local_label(["NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf"]) == "NVIDIA Nemotron 3.5 Bolt (local)"
-    assert agents.local_label(["nvidia-nemotron-3.5-bolt", "qwen3:8b"], "qwen3:8b") == "Local model server"  # it answers with Qwen
-    assert agents.local_label(["qwen3:8b"]) == agents.local_label([]) == "Local model server"
+    assert agents.local_label(["nvidia-nemotron-3.5-bolt", "qwen3:8b"], "qwen3:8b") == "qwen3:8b (local)"  # it answers with Qwen
+    assert agents.local_label(["qwen3:8b"]) == "qwen3:8b (local)" and agents.local_label([]) == "Local model server"
+    # a name set in Settings that the server no longer runs: the page shows, and the Studio asks for, what it does run
+    assert agents.local_label(["DeepSeek-V4.1-Flash"], "GLM-5.3-Flash") == "DeepSeek-V4.1-Flash (local)"
+    assert agents.answering_model(["DeepSeek-V4.1-Flash"], "GLM-5.3-Flash") == "DeepSeek-V4.1-Flash"
+    assert agents.answering_model(["a", "b"], "b") == "b" and agents.answering_model([], "GLM") == "GLM"
     monkeypatch.setattr(slate, "find_local", lambda given="": ("http://studio-box:8091/v1", ["nvidia-nemotron-3.5-bolt"]))
     local = client.get("/api/brains").json()["backends"][-1]
     assert local["label"] == "NVIDIA Nemotron 3.5 Bolt (local)" and local["named"] is True
@@ -440,8 +448,10 @@ def test_the_studio_mcp_server_shakes_hands():
     tool = {"id": "studio", "label": "Studio", "command": [PY, str(ROOT / "mcp/studio-mcp.py")], "env": {"STUDIO_URL": "http://127.0.0.1:9"},
             "via": "here", "host": "", "enabled": True}
     check = agents.check_tool(tool)
-    assert check["ok"] and check["tools"] == ["studio_state", "list_library", "queue_still", "queue_clip", "queue_voice", "queue_song", "list_projects",
-                                             "add_to_timeline", "export_timeline", "job_status", "list_jobs", "upload_file"]
+    assert check["ok"] and check["tools"] == ["studio_state", "list_library", "queue_still", "queue_clip", "queue_voice", "queue_song", "queue_edit",
+                                             "queue_long", "queue_sound", "queue_soundtrack", "check_clip", "motion_previs", "cancel_job", "list_projects",
+                                             "add_to_timeline", "export_timeline", "job_status", "wait_for_jobs", "list_jobs", "slate_films",
+                                             "slate_film", "slate_new_film", "slate_add_scene", "slate_add_shot", "slate_render_shot", "upload_file"]
 
 
 def test_blender_is_started_when_its_socket_is_closed(fake):
@@ -603,3 +613,30 @@ def test_only_this_computer_may_use_them(fake):
 def test_the_update_check_does_not_wait_on_agents(fake, monkeypatch):
     monkeypatch.setenv("STUDIO_GPU_LOCK", str(fake["tmp"] / "no-lock"))
     assert server.update_busy() is False
+
+
+def test_a_hermes_without_stream_json_answers_through_its_quiet_mode(monkeypatch):
+    """Hermes v0.21 has no `chat --format stream-json` (it stops with "unrecognized arguments"): the Studio asks its
+    --help once and runs `chat -Q` instead, the answer on standard output, the session named on standard error."""
+
+    helps = {"new": "usage: hermes chat [--format {text,stream-json}]", "old": "usage: hermes chat [-q QUERY] [-Q]"}
+    for kind, text in helps.items():
+        agents.HERMES_STREAMS.clear()
+        monkeypatch.setattr(agents, "run_cli", lambda *a, **k: subprocess.CompletedProcess(a, 0, text, ""))
+        task = {"id": "t", "backend": "hermes", "_host": "", "thread": "th1", "steps": []}
+        args = agents.harness_args(task, "hermes", "", {}, "system")
+        assert ("--format" in args) == (kind == "new") and ("-Q" in args) == (kind == "old") and task["_quiet"] == (kind == "old")
+    task = {"id": "t", "backend": "hermes", "_host": "", "_quiet": True, "steps": []}
+    shown = [agents.render("hermes", line, task) for line in
+             ("  ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only\r\n", "Hi! What can I help with?\n")]
+    assert shown == ["", "Hi! What can I help with?\n"] and task["reply"] == "Hi! What can I help with?"
+    assert agents.hermes_quiet_session("Session x found but has no messages. Starting fresh.\n\nsession_id: 20261021_083328_c11ece\n") == "20261021_083328_c11ece"
+    assert agents.hermes_quiet_reply("  ⚠ tirith security scanner enabled\r\nready\n") == "ready"
+
+
+def test_the_studios_prefix_never_reaches_npm_or_the_clis(monkeypatch):
+    """PREFIX names the Studio's runtime folder, and npm reads PREFIX as its global prefix: with it, Connect's Install
+    put Claude Code and Codex into $PREFIX/bin, where nothing looks for them."""
+
+    monkeypatch.setenv("PREFIX", "/opt/studio-runtime")
+    assert "PREFIX" not in agents.child_env() and agents.child_env({"PREFIX": "/x"})["PREFIX"] == "/x"

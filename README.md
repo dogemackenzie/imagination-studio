@@ -14,6 +14,53 @@ The hardware does not decide whether it runs.**
 
 ![Imagination Studio by keys+Wasserman, powered by TensorFold: a local studio that runs on Mac, DGX Spark, and Linux](docs/screenshots/imagination-studio.webp)
 
+## Minimum hardware requirements (read this first)
+
+One machine is a complete Studio: a DGX Spark, an RTX Pro 6000 workstation **or** a Mac. You do not need more than
+one, and none needs another.
+The installers check memory and disk before they download anything and stop with the reason when the machine is
+too small.
+
+**NVIDIA DGX Spark** (GB10, 128 GB unified memory, DGX OS with CUDA 13 and Docker): every feature runs.
+
+| Install | Disk free | Command |
+|---|---|---|
+| Core: pictures and FastH3 video with sound | 125 GB | `bash oneshot-setup.sh` |
+| **Everything** | **about 400 GB** | `bash oneshot-setup.sh --all` |
+
+**NVIDIA RTX Pro 6000 Blackwell** (96 GB card, x86_64 Linux workstation: Ubuntu 22.04 or 24.04, NVIDIA driver 580 or
+newer, the CUDA 13 toolkit, 64 GB of RAM or more, 128 GB recommended): every feature, with the same one-shot recipe,
+**pending validation on the card**. The installer builds the engines for it (sm_120) and the Studio reads the card's
+own memory; the Bolt brain runs through llama.cpp there. It was simulated as a 96 GB card on a DGX Spark (the whole
+checklist and the heaviest jobs back to back passed, the card never over 72 GB), not yet run on one:
+[docs/rtx-pro-6000.md](docs/rtx-pro-6000.md).
+
+| Install | Disk free | Command |
+|---|---|---|
+| Core: pictures and FastH3 video with sound | 125 GB | `bash oneshot-setup.sh` |
+| **Everything** | **about 400 GB** | `bash oneshot-setup.sh --all` |
+
+Other NVIDIA GPUs are untested: the CUDA engines are built and measured for the GB10.
+
+**Apple-silicon Mac** (macOS 26 or later, for Metal 4). What runs depends on the memory. Every figure was measured on
+a Mac Studio M5 Ultra with 256 GB; smaller Macs and M1 to M4 follow from those measurements and are untested.
+
+| Memory | M5 family | M1 to M4 | Disk free for `--all` |
+|---|---|---|---|
+| 48 GB | Pictures only | Pictures only | 40 GB |
+| 64 GB | Pictures, FastH3 video, voice, music, sound, MOSS-Image, FLUX3-K, the Bolt brain | The same, video on the slower MLX engine, no Bolt | about 400 GB (440 on M1 to M4) |
+| 128 GB | Everything above, plus MiniMax H3 Turbo and reference pictures to video (Ref2VA) | The same, slowly | about 530 GB |
+| 192 GB or more | **Everything**, including Upscale and Remove a person (peaks of 125 and 135 GB) | The same, slowly | about 535 GB |
+
+`bash oneshot-setup.sh --all --app` installs everything your Mac's memory runs and the double-clickable app. It says
+which features it left out and why. Before that, `brew install python@3.11 uv ffmpeg`.
+
+**Accounts:** FLUX3-K and Stable Audio Open (sound effects) are gated on Hugging Face. Accept their licences with your
+account and run `hf auth login` before installing them; the installer says so when access is missing.
+
+Full recipes, every option and the measured memory of each job: [Install, and the one-click app](#install-and-the-one-click-app)
+(Mac), [DGX Spark (CUDA) build](#dgx-spark-cuda-build).
+
 *Named at the request of the TensorFold project: this is an app built on TensorFold, not a TensorFold product.*
 
 *Name, credits, colours and voice for anything public: the [brand guide](docs/BRAND.md).*
@@ -22,12 +69,61 @@ The hardware does not decide whether it runs.**
 design and build the studio in collaboration with Keys, made Wasserman's Filmmaker Suite, and shaped the production side (Slate, the Sharp Spec, Motion Previs). See
 [Big credit: Sam Wasserman and Wasserman Productions](#big-credit-sam-wasserman-and-wasserman-productions-wassermanproductionscom), below the release notes, and [CREDITS.md](CREDITS.md).*
 
-**3.0.1** · Mac, DGX Spark, and Linux · Apple-silicon Macs measured on a Mac Studio M5 Ultra 256 GB ·
+**3.1.0** · Mac, DGX Spark, and Linux · Apple-silicon Macs measured on a Mac Studio M5 Ultra 256 GB · the NVIDIA DGX Spark · the NVIDIA RTX Pro 6000 (96 GB; pending validation) ·
 [TensorFold](https://github.com/ashhart/TensorFold) **0.6.5** + two families, and TensorFold **1.0**'s native Zig
 runtime for FastH3 on Metal and on CUDA:
 **Qwen 2.1 Turbo**, **Qwen 2.1 Full**, **FLUX3-K Fast** and **FLUX3-K Full** (text to image, and Edit a picture) · **MOSS-Image** (text to image, DGX Spark) · **MiniMax H3**
 (video with sound) · **Fish Audio Drama 3** (Voice) · **MiniMax-Music3** (Music: songs with sung vocals) · int8 kernels on the M5 tensor units and on the GB10's tensor
 cores · a 2x video decoder for 2K finals on the Mac
+
+## New since 3.1.0 (on main; every install follows it by itself)
+
+- **Your phone and other devices, with an access key.** On the computer running the studio nothing is asked. A phone,
+  a tablet or another computer signs in once: **Settings → Access key** shows a QR code that signs a phone in with one
+  scan, the key itself to copy, and *Make a new key* for a lost phone. Step by step: TUTORIAL.md section 15, and
+  **Learn → Your phone and other devices** in the app. Details: [The access key](#using-it-on-your-phone).
+- **Automatic updates are on by default**, so an install stays on the latest version: checked every six hours,
+  installed when the queue is idle (Settings → Updates turns it off). Worker Sparks follow their head.
+- **NVIDIA RTX Pro 6000 Blackwell (96 GB)** may use the same one-shot recipe, pending validation on the card: engines
+  built for sm_120, the card's own memory read for every job, Bolt through llama.cpp ([docs/rtx-pro-6000.md](docs/rtx-pro-6000.md)).
+- **Every credit, in the app and in the repo.** Settings → About → *Every credit* shows CREDITS.md and the third-party
+  notices; about 25 more libraries, conversions and tools are credited, and a test keeps the two in step.
+- **No personal information in the repo**, enforced by a test and by CI; contact goes through GitHub only (Issues,
+  Discussions, private vulnerability reporting: [SECURITY.md](SECURITY.md)).
+- **The repository is now `drowzeys/Imagination-Studio-by-keys-Wasserman`**, matching the name. The old address
+  redirects, so installs that follow it keep updating.
+
+## New in 3.1.0 (2026-10-20)
+
+- **One-shot installs with everything, on both machines.** `bash oneshot-setup.sh --all` installs every feature the
+  machine runs, from prebuilt engines: the GHCR carrier `keys-tensorfold-studio:3.1.0` (the DGX Spark's H3, Music 3,
+  Drama 3 and Bolt engines) and the v3.1.0 release (the Mac's native engine and Bolt on Metal), each checksummed. The
+  minimum hardware now opens this README. Proven on a fresh DGX Spark and a fresh Mac.
+- **NVIDIA Nemotron 3.5 Bolt is the studio's own brain**, loaded and unloaded by the Studio around renders (TensorFold's
+  CUDA engine on a DGX Spark, Metal on a Mac), for the First AD, the agents and the local harness.
+- **A Mac can lead worker DGX Sparks**, and a DGX Spark head leaves clips to its idle workers.
+- **Voice on a DGX Spark in one shot** (Drama 3's CUDA engine from the carrier), and sound effects and foley measured
+  and guarded there.
+- **A LoRA on the Mac's native FastH3 engine**, merged into the int8 weights at load; sound effects on Metal twice as
+  fast.
+- **The Mac's memory read correctly** (free, file-backed and purgeable pages), so a large job no longer pushes the Mac
+  into a memory panic, and every ComfyUI job's peak is checked first.
+- Upscale, Find and Remove a person and MOSS-Image on a Mac (below), updates that refresh the renderers' copies, and
+  Sam Wasserman's CI, host-independent tests and fixes.
+
+### Upscale, Find and Remove a person on a Mac
+
+- **Upscale, Find a person and Remove a person now run on a Mac** (Mac Studio M5 Ultra), with the DGX Spark's own graphs
+  and the authors' node packs at the Spark's pins, on a ComfyUI of the Mac's own on PyTorch's Metal device
+  (`oneshot-setup.sh --upscale` and `--remove`; `scripts/setup-comfy.sh`). MiniMax H3 is read from the Mac's own Ref2VA
+  files (`--ref2va`), not downloaded again: 2.4 GB of models and a 1.6 GB environment. Measured against the DGX Spark on
+  the same clip and seeds: see [On a Mac](#on-a-mac-the-same-graphs-on-pytorchs-metal-device).
+- **MOSS-Image on a Mac** (`oneshot-setup.sh --moss`, 28 GB) on the same ComfyUI: 59 s a 1344x768 picture with the
+  model loaded (44 s on a DGX Spark), the lettering as exact as on a Spark.
+
+![MOSS-Image: DGX Spark left, Mac right, same prompt and seed](docs/shootout/moss-mac-spark-poster.jpg)
+
+![MOSS-Image: DGX Spark left, Mac right, same prompt and seed](docs/shootout/moss-mac-spark-samurai.jpg)
 
 ## New in 3.0.1
 
@@ -117,10 +213,19 @@ write a prompt, roll a clip, watch the queue, play takes from the Library, plan 
 
    Tailscale prints the address, `https://<computer>.<your-tailnet>.ts.net`. Only devices on your own tailnet can
    open it, over HTTPS, and the studio accepts its Tailscale name by itself. (On a trusted home network,
-   `HOST=0.0.0.0 bash scripts/app.sh` and `http://<computer's address>:7870` work too; there is no login, so never on
-   a shared or public network.)
-3. **Open that address on the phone** in Safari or Chrome, then *Share → Add to Home Screen* (iPhone) or *⋮ → Add to
-   Home screen* (Android). The studio then opens full screen from its own icon.
+   `HOST=0.0.0.0 bash scripts/app.sh` and `http://<computer's address>:7870` work too; the access key below still
+   guards it, but keep that to a network you trust.)
+3. **Sign the phone in, once:** on the computer, open **Settings → Access key** and scan its QR code with the phone's
+   camera. It opens the studio on the phone, signed in. The phone keeps it. Then *Share → Add to Home Screen* (iPhone) or *⋮ → Add to Home screen*
+   (Android): the studio opens full screen from its own icon.
+
+**The access key.** On the computer running the studio nothing is asked: open `http://localhost:7870` (or the
+computer's own network address or `.local` name, when it is opened to the network) and use it, updates included. Reaching it from another device (a phone over Tailscale, another computer on the network) takes the
+studio's access key, once per device: on the computer, **Settings → Access key** shows a QR code that signs a phone in
+with one scan, and the key itself to copy. The key is made once, kept in `access-key` in the studio folder (readable
+by you only) and survives restarts and updates; *Make a new key* there signs every other device out.
+`bash scripts/studio-key.sh` prints the same from a terminal. A clip read from another machine's app (Slate's
+*Import a take*) needs that app's key beside its address.
 
 On the phone:
 
@@ -136,7 +241,17 @@ On the phone:
 | :---: | :---: | :---: |
 | **Home** | **More** | **An engine: Video** |
 
+## Contact
+
+Through GitHub only; the project publishes no email address. Bugs and install trouble: **Issues**. Questions, ideas
+and what you made: **Discussions**. A security problem: the **Security** tab's *Report a vulnerability*, which only
+the maintainers see ([SECURITY.md](SECURITY.md)). Never paste a token, key or your own address into any of them.
+
 ## License & credits
+
+Everyone whose work the studio uses is named in [CREDITS.md](CREDITS.md) (with
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)), and the app shows the same files under Settings → About → Every
+credit.
 
 **Apache License 2.0** — see [LICENSE](LICENSE). Free to use, modify, fork and build on, commercially or otherwise;
 the models it downloads keep their own licences (below).
@@ -337,7 +452,7 @@ unless it says otherwise.
   see [Which picture model to use: the evidence](#which-picture-model-to-use-the-evidence).
 
 
-**[▶ Watch the 60 s demo](https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3/releases/download/v2.8.0/wasserman-studio-mac-demo.mp4)**:
+**[▶ Watch the 60 s demo](https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman/releases/download/v2.8.0/wasserman-studio-mac-demo.mp4)**:
 the Studio on one Mac Studio M5 Ultra, recorded live on 2026-10-16. It shows the app at work, two clips with sound,
 and the times and memory measured during those renders.
 
@@ -492,7 +607,12 @@ edit pictures.
   and the FLUX.2 small decoder, from Comfy-Org/MOSS-Image). It needs ComfyUI v0.42.0 or later, which this setup moves to.
 - **Settings:** ComfyUI's own template: 25 steps of er_sde at CFG 2.5, with its negative prompt. The prompt goes to the
   model as written.
-- **Mac:** not available yet; there is no MLX build.
+- **Mac:** `bash oneshot-setup.sh --moss` installs the same files (28 GB) on the Mac's own ComfyUI (the one of
+  `--upscale` and `--remove`, PyTorch's Metal device, PyTorch's attention) and `scripts/image.sh` runs the Spark's graph
+  there. Measured on 2026-10-20, 1344x768, seed 7, the same prompts on both machines: 71 s for the first picture with
+  the model load and 59 s for the next on a Mac Studio M5 Ultra, 44 s each on a DGX Spark. The lettering came out exactly
+  as written on both, and both are equally sharp; the compositions differ, because er_sde draws its noise during
+  sampling on each machine's own device, so a seed does not give the same picture on a Mac and a Spark.
 
 Tested on one DGX Spark on 2026-10-19 (bf16, one seed per prompt, judged by eye):
 
@@ -515,6 +635,12 @@ Tested on one DGX Spark on 2026-10-19 (bf16, one seed per prompt, judged by eye)
 ![The same film-still prompt: MOSS-Image at 25 and 50 steps, FLUX3-K Full, Qwen 2.1 Turbo](docs/shootout/moss-still.jpg)
 
 ## Speed: the first version on each machine, and 2.3
+
+![Benchmark: TensorFold against ComfyUI, h3.c, H3MLX, Phosphene and the Turbo LoRA, on a DGX Spark and a Mac Studio M5 Ultra](docs/benchmark/imagination-studio-benchmark.webp)
+
+*Every figure on the poster is a measurement from this README and the H3 shootout of
+[keys-Mac-TensorFold-MiniMax-H3-MLX](https://github.com/drowzeys/keys-Mac-TensorFold-MiniMax-H3-MLX). Most are one run
+each; the times include loading the model and decoding unless a row says per pass.*
 
 One run each unless a range is given; 5 second clips are 124 frames. Mac: Mac Studio M5 Ultra, 256 GB. Spark: one
 NVIDIA DGX Spark (GB10), models already loaded.
@@ -601,7 +727,7 @@ badge, or a purple `MAC · APPLE SILICON MX · H3-METAL`.
 the Qwen team for Qwen-Image-2.1-Turbo, and the ComfyUI team for the runtime this build stands on.
 
 ```bash
-git clone https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3.git && cd keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3
+git clone https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman.git && cd Imagination-Studio-by-keys-Wasserman
 sudo apt install -y git ffmpeg
 bash oneshot-setup.sh            # the same command as on a Mac: on Linux it runs oneshot-setup-spark.sh
                                  # 99 GB of models, the engine build, a test image and a 5 second test clip
@@ -619,7 +745,7 @@ and the render says so.
 #### Upgrade from 2.5 or 2.6 (DGX Spark)
 
 ```bash
-cd keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3 && git pull
+cd Imagination-Studio-by-keys-Wasserman && git pull
 bash oneshot-setup.sh --upgrade  # on Linux: oneshot-setup-spark.sh --upgrade
 ```
 
@@ -700,6 +826,11 @@ and uses five.
   Each row shows whether the Spark answers, its Studio's version, memory and disk free, what it can render
   (FastH3 clips, Ref2VA, the image model, LoRAs, ffmpeg) and whether it is busy. It needs a key login to each Spark
   and the Studio installed there once; nothing runs as root.
+- **From a Mac** the Studio leads the Sparks the same way. A Spark is given the single clips it renders with its own
+  settings (FastH3 at the sizes made without the 2x decoder); MiniMax H3 Turbo qualities, the 2x decoder presets and a
+  text encoder file of the Mac's stay on the Mac, and the page says why. A Mac that reaches only the Spark that leads
+  the others gives it as **Through**: that Spark logs in to each worker with its own key, so no key is added to a
+  worker. One-time setup and the measured run: [A Mac at the head](docs/multi-spark.md#a-mac-at-the-head).
 - **Safe by construction.** A worker's app listens only on its own `127.0.0.1`; this app reaches it through an ssh
   tunnel it opens and closes itself. One job runs on a Spark at a time. Every clip passes the worker's own memory
   guard before it is sent, and a clip with a LoRA goes only to a Spark that has the LoRA and whose guard accepts it.
@@ -921,7 +1052,7 @@ editor's timeline; ComfyUI's H3 decoder makes 32 kHz. The picture is copied unch
 
 > **2.7.3 (2026-10-15): the new name.** The studio is now *Wasserman Slate AI Studio, powered by TensorFold, built
 > with integrated Fish Audio Drama 3*, and the repository moved to
-> `drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3` (the old
+> `drowzeys/Imagination-Studio-by-keys-Wasserman` (the old
 > address redirects). Fish Audio Drama 3, a 35B text-to-speech model with up to 16 voices per scene, voice cloning and
 > direction tags, is being ported to run locally on TensorFold: natively on CUDA for the DGX Spark and on MLX for the
 > Mac. **The voice step is not in this release yet**; it arrives when both ports pass their parity checks against
@@ -1316,8 +1447,8 @@ conversion, with *Use it* and *Unlink*.
 
 ```bash
 brew install python@3.11 uv ffmpeg
-git clone https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3.git
-cd keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3
+git clone https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman.git
+cd Imagination-Studio-by-keys-Wasserman
 bash oneshot-setup.sh --app             # engine, image model, FastH3, 2x decoder, the app; ends with a test clip
 bash oneshot-setup.sh --turbo --app     # the same plus MiniMax H3 Turbo (64 GB more on disk, 128 GB of memory)
 bash oneshot-setup.sh --ref2va --app    # the same plus reference pictures to video (64 GB more on disk, 128 GB of memory)
@@ -1326,7 +1457,7 @@ bash oneshot-setup.sh --ref2va --app    # the same plus reference pictures to vi
 #### Upgrade from 2.5 or 2.6 (Mac)
 
 ```bash
-cd keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3 && git pull
+cd Imagination-Studio-by-keys-Wasserman && git pull
 bash oneshot-setup.sh --upgrade         # add --app to rebuild the double-clickable app as well
 ```
 
@@ -1347,7 +1478,7 @@ if it is not running and opens it in your browser; double-click again to come ba
 
 **Or hand it to your coding agent.** Paste this:
 
-> Clone https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3 and follow its AGENTS.md section "Install for a
+> Clone https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman and follow its AGENTS.md section "Install for a
 > person and build the one-click app". Tell me before any large download starts and when the app is ready.
 
 `--turbo` adds MiniMax H3's own transformer and its Turbo adapter, and with them a second engine card in the app;
@@ -1370,8 +1501,9 @@ example `git switch --track origin/<branch>`), and the panel follows that branch
 whatever is tracked, start Studio with `STUDIO_UPDATE_BRANCH=<branch>`; the checkout must be on that branch. A branch
 that tracks another remote, or a local branch, is not updated from the app.
 
-**Automatic updates** is off by default. Turn it on to check every six hours while Studio is open and install when
-its queue and render engine are idle. The setting is saved for this installation. Updates preserve projects, media,
+**Automatic updates** is on by default, so an install stays on the latest version: Studio checks every six hours while
+it is open and installs when its queue and render engine are idle. Turn it off in Settings → Updates; the setting is
+saved for this installation. Updates preserve projects, media,
 models and runtime environments. Updates only move the branch forward: local code changes, untracked files, commits
 of your own that are not on GitHub, or a detached checkout pause updates without discarding work. Updates requiring changes to installation
 dependencies show a message asking you to follow that version's setup instructions.
@@ -1656,8 +1788,8 @@ bfloat16. Credit and licences: [CREDITS.md](CREDITS.md), [THIRD_PARTY_NOTICES.md
 | Action | On | Does | With | Mac | DGX Spark |
 |---|---|---|---|---|---|
 | **Turnaround** | a picture | Five views of the picture's subject, turning from where it faces now, made together so they agree. Each is a picture of its own: a first frame, or reference pictures of one character. | Turnaround LoRA by matlod; contact-sheet nodes by MATLOWAI | yes: the MLX engine packs and decodes the five views itself (`h3_generate.py --sheet`) | yes |
-| **Upscale** | a clip | The clip made larger and sharper: a latent upscale, then one light re-draw in tiles that the clip itself guides. Motion, mouths and the clip's own sound stay. | Video Upscaler LoRA and H3 Video Upsampler by dntpi; latent upscaler by LBH-123-AI | no: the upscaler is a ComfyUI node pack in PyTorch and the MLX engine has no latent upscaler or guide layout (a Mac doubles a clip with the 2x decoder: the 2K and QHD sizes) | yes |
-| **Remove a person** | a clip | One person taken out and the background drawn again. The person is found from a few words and followed through the clip; "1. Find the person" shows the mask alone first. | Person Remover LoRA and H3 Relay by Akatz Labs; SAM 3.1 by Meta | no: it needs SAM 3.1, a source clip fed in as a frame-aligned guide and windows that carry 18 frames of history, none of which the MLX engine has | yes |
+| **Upscale** | a clip | The clip made larger and sharper: a latent upscale, then one light re-draw in tiles that the clip itself guides. Motion, mouths and the clip's own sound stay. | Video Upscaler LoRA and H3 Video Upsampler by dntpi; latent upscaler by LBH-123-AI | yes: the same nodes on the Mac's ComfyUI (`oneshot-setup.sh --upscale`) | yes |
+| **Remove a person** | a clip | One person taken out and the background drawn again. The person is found from a few words and followed through the clip; "1. Find the person" shows the mask alone first. | Person Remover LoRA and H3 Relay by Akatz Labs; SAM 3.1 by Meta | yes: SAM 3.1 and the H3 Relay nodes on the Mac's ComfyUI (`oneshot-setup.sh --remove`) | yes |
 
 **Turnaround.** The LoRA's own instruction, "the camera orbits the subject of `<Picture 1>` ninety degrees
 clockwise", was read as a roll of the picture on some seeds, on both engines (the model without the LoRA always reads
@@ -1698,6 +1830,35 @@ already loaded unless said; the test pictures and the clip are generated ones):
 
 Not tested: 2048 views, clips longer than 5 seconds, a clip with two people where one is removed, windows of 39 and
 56 frames, and any of it on a machine other than these two.
+
+#### On a Mac: the same graphs on PyTorch's Metal device
+
+`bash oneshot-setup.sh --upscale` and `--remove` (after `--ref2va`) install a ComfyUI of the Mac's own
+(`scripts/setup-comfy.sh`): ComfyUI at the Spark's commit in `$PREFIX/comfy-venv`, the authors' node packs at the
+Spark's pins, SAM 3.1, the latent upscaler and H3's audio decoder in `$PREFIX/comfy-models` (2.4 GB, and 1.6 GB for the
+environment). The Library actions then run `spark/spark_workflows.py` there, the same graphs and settings as on a
+Spark. MiniMax H3 is not downloaded again: `mac/studio_files` reads the Mac's own Ref2VA transformer, text encoder and
+video decoder, put into the form ComfyUI's model expects (the q/k/v rows regrouped, the text encoder cut after layer 50,
+the adaLN projections on the same 8-curve basis as Comfy-Org's pruned file; without the first two the pictures were
+noise). The server starts for each job and stops after it (`mac/comfy.sh`), so its memory is back for the MLX jobs;
+the model load is part of every action's time. Turnaround stays on the MLX engine.
+
+Measured on the Mac Studio M5 Ultra (2026-10-20) on the DGX Spark's own test clip (the 5 s wooden-dummy rooftop clip,
+864x480) with the same settings and seeds, compared with the Spark's results of 2026-10-13:
+
+| Action | Mac | DGX Spark | Mac against Spark |
+|---|---|---|---|
+| Upscale to 2 megapixels | 480 s with the model load (two tiles: 73 s and 44 s) | 303 s | 40.5 dB PSNR over the clip, sharpness (Laplacian variance) 73.6 against 73.5 (the source enlarged: 27.8); same size, frames and sound |
+| Upscale to 1 megapixel, through the app's queue | 286 s | 190 s | 39.4 dB, sharpness 164.8 against 165.2 |
+| Find the person ("man in a blue shirt") | 38 s; 50 s through the app's queue | 40 s | mask overlap (IoU) 0.998 on average, 0.990 at worst; the same share of every frame (16.5 %) |
+| Remove a person, clean frame built, second look | 1179 s with the model loads (mask 36 s, clean frame 277 s, second look 276 s) | 1051 s through the app | the man gone from all 121 frames on both, no frame left with the mask's green on either; greenish tint 7.2 % of the pixels against 7.8 %, the same change outside the mask (12.2 of 255 on average on both); the two results differ by 4.5 of 255 |
+| Turnaround through ComfyUI (a check of the H3 files, not the Mac's route) | 105 s with the load (28 passes, 33 s) | 77 to 81 s with the load | the same robot, upright, turning the same way in all five views |
+
+Memory: ComfyUI held 68 GB during the removal windows and up to 155 GB at an Upscale's decode. Each Mac-only change in
+`mac/studio_files` was measured as the reason a run failed: see AGENTS.md. Two runs were killed by macOS when other
+programs on the same Mac loaded 70 to 140 GB beside them; on a Mac that runs nothing else beside the Studio there is
+room. The ComfyUI of a Mac has the kill-guard of `mac/comfy.sh` (16 GB available, `MAC_COMFY_GUARD_GB`), not the
+Spark's memory guard.
 
 ### Clearing prompts and deleting clips
 
@@ -1974,7 +2135,7 @@ else; `--make-package DIR` writes those archives from a bundle. No LoRA file is 
 **For AI agents** (no prompts anywhere; run in this order on a new machine):
 
 ```bash
-git clone https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3.git && cd keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3
+git clone https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman.git && cd Imagination-Studio-by-keys-Wasserman
 bash oneshot-setup.sh --no-render --no-loras        # the Studio (oneshot-setup-spark.sh on a DGX Spark); model weights as listed under One-shot
 bash oneshot-essential-bundle.sh --json > lora-bundle.json; echo "exit $?"   # 0 all present, 1 some unavailable (listed), 2 usage or disk
 bash oneshot-essential-bundle.sh --verify --json    # fetches nothing: "present", "unavailable", "gated", and "menu" (group -> LoRAs -> state)
@@ -2007,8 +2168,19 @@ starts from the brain chosen in Brains & tools; an install with nothing chosen t
 (`local`, `claude`, `codex`, ...), `STUDIO_LOCAL_ENDPOINT` and `STUDIO_LOCAL_MODEL` from its environment. When nobody
 chose a brain (in Brains & tools or `STUDIO_DEFAULT_BRAIN`) and the local server set there (or in `STUDIO_LOCAL_ENDPOINT`)
 answers, that server is the default for prompt and scene help, the Agent room's first choice included; otherwise Claude
-Code. Only the address that was set is asked, once a minute. A server answering with NVIDIA Nemotron 3.5 Bolt is shown
-by that name. When a film's
+Code. Only the address that was set is asked, once a minute. A local server that takes OpenAI tool calls (llama.cpp
+with `--jinja` says so in `/props`; any other is offered one tool in a small call) drives the Studio's tools in the
+Agent room like Claude Code and Codex: the Studio runs the loop itself (`drive` in `app/agents.py`) with the same MCP
+servers, at most 40 answers and two hours a turn, no shell and no file tools, and a path a call names held to the
+conversation's folder and the Library. Around the model the loop keeps it to the brief: rules (one call per thing asked,
+the count asked, the fastest models unless named, nothing unasked, which tool makes what), hints in the tools' settings,
+compact tool answers, greedy sampling, a failing call never sent twice unchanged, and the Studio's own records of what
+was made under its answer; on the agent benchmark (`scripts/agent-bench`, 38 briefs) this took NVIDIA Nemotron 3.5 Bolt
+from 37-39% to 97-100% of briefs done exactly as asked (on the Mac and on the head), and cut its time on the Mac
+from 56 to 14 s a brief. `STUDIO_LOCAL_AGENT` turns the parts off or on for measuring. One without tool calls stays a conversation. `STUDIO_LOCAL_TOOLS=0|1` overrides
+the check. The local brain is always shown by the model the server
+runs (NVIDIA Nemotron 3.5 Bolt by that name, any other by the name the server lists), and that is the model asked for:
+a model set in Settings that the server no longer runs is replaced by the one it does, and Settings says so. When a film's
 brain is the local model, its frames are only ever shown to that model: the QA look is skipped rather than sent to a
 cloud CLI when the local server is not set. Films are
 Slate's own `project.json` under `~/ImaginationStudio/slate/`: a project made in Slate opens here, and one made here
@@ -2195,27 +2367,52 @@ run time), with `libtensorfold_drama3.so` beside it.
 The cloned take came out at about 130 Hz against the clip's 125 Hz. Engine time is the requests' own (prefill,
 frames, codec); the app's time adds Whisper on the CPU (and, for a clip without its words, Whisper on the clip first).
 
-**Spark requirements.** A DGX Spark (GB10, 128 GB), the CUDA toolkit 12.9 or newer and zig 0.17 to build, 39 GB
-of disk for Fish's checkpoint and 1.6 GB for the converted codec, and about 50 GB of free memory when a take starts
-(nothing else of the studio runs beside it). The port is on the `drama3-cuda` branch of
-[drowzeys/TensorFold](https://github.com/drowzeys/TensorFold) (81173e6c). The setup is by hand: the branch's build
-script carries its author's paths and its zig build embeds the kernel fatbins of TensorFold's whole CUDA engine
-(prebuilt, or every one built by nvcc), so there is no installer step yet; `bash oneshot-setup-spark.sh --voice` (or
-`scripts/setup-voice.sh`) checks what the app looks for and prints these steps for what is missing.
+**Spark requirements.** A DGX Spark (GB10, 128 GB), 39 GB of disk for Fish's checkpoint and 1.6 GB for the converted
+codec, and about 50 GB of free memory when a take starts (nothing else of the studio runs beside it). The port is on
+the `drama3-cuda` branch of [drowzeys/TensorFold](https://github.com/drowzeys/TensorFold) (81173e6c).
+
+**Install it with one command** (after the Spark's main install, or together with it):
 
 ```bash
-git clone -b drama3-cuda https://github.com/drowzeys/TensorFold.git ~/tf-drama3 && git -C ~/tf-drama3 checkout 81173e6c
-hf download fishaudio/drama-3 --local-dir ~/models/drama-3          # Fish Audio Community License: read it first
-# build as the branch's tools/drama3/build_local.sh does (it has its author's paths): nvcc makes drama3.fatbin,
-# drama3_fp8.fatbin and drama3_codec.fatbin for sm_121 beside the CUDA engine's other fatbins, then
-#   zig build -Dfatbins=FATBIN_DIR -Dsm=121 -Doptimize=ReleaseFast --prefix OUT drama3-generate drama3-lib
-mkdir -p ~/.local/opt/tensorfold-studio/drama3/{bin,lib}
-cp OUT/bin/drama3-generate ~/.local/opt/tensorfold-studio/drama3/bin/
-cp OUT/lib/libtensorfold_drama3.so ~/.local/opt/tensorfold-studio/drama3/lib/
-# once, offline: Fish's codec.pth into the native codec's layout (PyTorch and Fish's reference code, ORACLE_DIR)
-python3 ~/tf-drama3/tools/drama3/codec_convert.py ~/models/drama-3 ~/.local/opt/tensorfold-studio/drama3/codec-v1.safetensors
-~/.local/opt/tensorfold-studio/drama3/bin/drama3-generate --model ~/models/drama-3 \
-  --codec ~/.local/opt/tensorfold-studio/drama3/codec-v1.safetensors --text "Hello there." --wav hello.wav   # check
+bash oneshot-setup-spark.sh --voice      # Fish Audio Community License: read it first (https://huggingface.co/fishaudio/drama-3)
+```
+
+It runs `scripts/setup-voice.sh`, which on a Spark does, each step skipped when it is done already:
+
+1. **The engine** (`spark/build-drama3.sh`) into `$PREFIX/drama3`: `bin/drama3-generate`, `lib/libtensorfold_drama3.so`,
+   `commit` and `BUILD`. It first takes the prebuilt engine from the carrier image (`/payload/spark-drama3/`, used only
+   when its `commit` is the pinned one and its `SHA256SUMS` check), else builds it from source: TensorFold at
+   81173e6c, Zig 0.17.0 fetched under `$PREFIX`, every CUDA kernel fatbin compiled for sm_121 by the Spark's own nvcc
+   (12.9 or newer), then `zig build drama3-generate drama3-lib`. Measured on a GB10 from nothing: 1 min 43 s.
+2. **Fish's checkpoint** at `~/models/drama-3` (`DRAMA3_CUDA_MODEL` names another). A copy already on this machine (a
+   Hugging Face cache, another folder) is linked there instead (`app/discover.py`); otherwise it is downloaded from
+   `fishaudio/drama-3` at a pinned revision (39 GB). Should Fish ever gate the repo, the setup says whether to sign in,
+   accept the licence or wait for approval (`app/hf_gate.py`), as `--sound` does for Stable Audio Open.
+3. **The codec**, converted once on this machine: Fish's `codec.pth` into `codec-v1.safetensors` (1.6 GB), the layout
+   the native codec reads. `spark/drama3_codec.py` runs TensorFold's `tools/drama3/codec_convert.py` with Fish's
+   reference codec code (the Fish S2 DAC as packaged in sglang-omni 416a70c0, over descript-audio-codec 1.0.0), every
+   file fetched at a pinned commit and checked against its SHA-256, in the Studio's own PyTorch (`$PREFIX/venv`):
+   about 5 s. No converted Fish weights are published; each machine converts its own copy (measured: the result is
+   byte-identical to the one the engine was validated with).
+4. **A test line** (a noir narrator), checked to be a few seconds long and not silent, when 50 GB of memory and the
+   GPU lock are free (`--no-render` skips it).
+
+`--verify` only checks the four (nothing is built or downloaded); `--upgrade` moves an installed engine to this
+version's commit and fetches no weights. `scripts/setup-voice.sh` takes the same `--verify`, `--upgrade` and
+`--no-test` on its own. The Models & weights page's Install runs the same script for a missing engine or codec.
+
+**Building it yourself** (another commit, or no network for the script): `DRAMA3_SOURCE=~/tf-drama3 bash
+spark/build-drama3.sh` builds a checkout of the `drama3-cuda` branch you already have, `NVCC` names the compiler, and
+`ENGINE_FROM_SOURCE=1` skips the carrier image. By hand it is the same `zig build -Dnvcc=$(which nvcc) -Dsm=121
+-Doptimize=ReleaseFast drama3-generate drama3-lib` in the checkout, with `zig-out/bin/drama3-generate` and
+`zig-out/lib/libtensorfold_drama3.so` copied into `$PREFIX/drama3/{bin,lib}`, and the codec made with
+`$PREFIX/venv/bin/python -I spark/drama3_codec.py ~/models/drama-3 $PREFIX/drama3/codec-v1.safetensors`. To check an
+engine by hand:
+
+```bash
+LD_LIBRARY_PATH=~/.local/opt/tensorfold-studio/drama3/lib ~/.local/opt/tensorfold-studio/drama3/bin/drama3-generate \
+  --model ~/models/drama-3 --codec ~/.local/opt/tensorfold-studio/drama3/codec-v1.safetensors \
+  --text "The rain had not stopped in three days, and neither had the phone." --wav line.wav
 ```
 
 The app looks in `$PREFIX/drama3` (`~/.local/opt/tensorfold-studio/drama3`) and `~/models/drama-3`;
@@ -2371,6 +2568,44 @@ top_k?, title?, asr?, live?}` (a job of kind `music`; `live: false` does not str
 product or service must display "MiniMax-Music3" in its user interface; a licensee above US$20 million of yearly
 revenue needs MiniMax's prior written authorisation; a hosted service must keep safeguards against misuse. Do not
 redistribute the weights.
+
+## The brain engine (NVIDIA Nemotron 3.5 Bolt)
+
+The brains (Slate's prompt help, the QA look, the Agent room) can run on **NVIDIA Nemotron 3.5 Bolt**, loaded by the
+Studio itself on this machine, the way Voice runs Drama 3 and Music runs MiniMax Music 3: no separate server to start.
+
+```bash
+bash oneshot-setup-spark.sh --bolt   # DGX Spark: NVIDIA's 24 GB checkpoint and LiLiCorr drafter (~25 GB) and the engine
+bash oneshot-setup.sh --bolt         # Mac: the same weights; the engine is TensorFold's Metal port when it lands
+```
+
+The weights are NVIDIA's (OpenMDW License Agreement 1.1: commercial use allowed; a copy passed on keeps the licence and
+NVIDIA's notices). On a DGX Spark the engine is TensorFold's native server with **Mia's Bolt backend**
+(MiaAI-Lab/Nemotron-3.5-Bolt-TensorFold-DGX-Spark, MIT): `spark/build-bolt.sh` copies the build out of the carrier or
+Mia's image into `$PREFIX/bolt` (Docker only copies files; nothing runs in a container).
+
+- **Which engine** (`BOLT_BACKEND`): `cuda` on a DGX Spark where it is built; `metal` on a Mac once TensorFold's Metal
+  Bolt engine is built into `$PREFIX/bolt-metal`; `llamacpp` on a Mac only when set (llama.cpp's `llama-server` with
+  NVIDIA's GGUF: `BOLT_LLAMACPP_BIN`, `BOLT_GGUF`); `external` for a server the Studio does not manage. Unset, the
+  Studio takes the built TensorFold engine, else nothing changes.
+- **Which address**: the brains use the engine when Settings → Connections leaves the local server's address empty or
+  picks **Studio engine · Bolt** (`studio:bolt`). An address you type is your own server, asked as before.
+- **When it loads**: on the first brain question or agent answer, on a loopback port of its own (about 40 s on a
+  Spark from the page cache). The Brains page shows *NVIDIA Nemotron 3.5 Bolt (Studio engine)*, its state (loaded,
+  unloaded, loading, unloaded for a render) and backend, with **Load** and **Unload**; the Machine room and the status
+  bar show what it holds.
+- **When it unloads**: after `BOLT_IDLE_S` (600) idle seconds (`never` for a head that never renders), and before a job
+  of this machine's queue whose measured peak does not fit beside it: on a Spark the memory guard's estimate for the
+  job with Bolt resident (clips, songs, sound, Drama 3), on a Mac the peaks measured on an M5 Ultra against what
+  vm_stat counts as free. A job without a measured peak unloads it. Clips sent to worker Sparks never unload it.
+  Unloaded for a job, it stays unloaded until the queue is empty.
+- **Agent turns**: an answer in flight is never cut: a job that needs the memory waits for it, then unloads Bolt.
+  An agent's turn that queued a clip waits for it with Bolt unloaded, and Bolt loads again for the turn's next
+  answer. A question from a page while Bolt is unloaded for a render is answered with the reason, at once.
+- **Memory**: it needs about 43 GB free to load on a Spark and holds about 28 GB (4 streams, 65,536 tokens each,
+  2 GiB of prompt cache, pictures on, thinking off: `BOLT_PARALLEL`, `BOLT_CONTEXT`, `BOLT_PROMPT_CACHE_GIB`,
+  `BOLT_VISION`, `BOLT_THINKING`). That memory counts as a render's when a clip is checked, since the render unloads
+  it. A kill-guard ends it under `BOLT_GUARD_GB` (8) available, and it ends with the app.
 
 ## Sound effects and foley (Stable Audio Open, MMAudio)
 
@@ -2846,8 +3081,8 @@ gives the same scene with a different rendering.
 ## One-shot
 
 ```bash
-git clone https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3.git
-cd keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3
+git clone https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman.git
+cd Imagination-Studio-by-keys-Wasserman
 brew install python@3.11 uv ffmpeg
 bash oneshot-setup.sh               # both models and the 2x decoder: 182 GB of weights
 bash oneshot-setup.sh --image-only  # or just Qwen-Image-2.1: 33 GB
@@ -2855,10 +3090,10 @@ bash oneshot-setup.sh --image-only  # or just Qwen-Image-2.1: 33 GB
 
 `oneshot-setup.sh` does the following:
 
-1. Gets TensorFold 0.6.5 with the H3 and Qwen-Image families (`drowzeys/TensorFold` at `a2068c03`), from the **GHCR
+1. Gets TensorFold 0.6.5 with the H3 and Qwen-Image families (`drowzeys/TensorFold` at `a2b592fe`), from the **GHCR
    prebuilt carrier** when Docker is available (checksums verified), otherwise from git at the same commit.
    The native FastH3 engine (`tf-h3-dit`) comes from the same carrier, or without Docker as a checksummed download
-   from the [v2.0 release](https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3/releases/tag/v2.0); no Zig toolchain is needed.
+   from the [v2.0 release](https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman/releases/tag/v2.0); no Zig toolchain is needed.
 2. Installs it with mflux at `add5164e` and the dependency lock ([`requirements.lock`](requirements.lock): mlx 0.32.3,
    mlx-lm 0.32.0, mlx-vlm 0.7.4, …) into its own venv at `~/.local/opt/tensorfold-studio`.
 3. Downloads `Qwen/Qwen-Image-2.1-Turbo` (33 GB) to `~/qwen-models/Qwen-Image-2.1-Turbo`. Where an earlier install's
@@ -3284,10 +3519,12 @@ prebuilt native FastH3 engine (`zig-engine/tf-h3-dit`, built for Apple Silicon a
 For a DGX Spark it holds the prebuilt CUDA engine (`spark-engine/libtf_h3.so`, GB10, aarch64; since 2.8.0 the
 `h3-cuda-lora` build at `1f7ecc75`, with LoRA support, so a Spark install no longer builds it from source), which
 `spark/build-engine.sh` takes when Docker is there and otherwise builds from source; since 2.9.1 also MiniMax Music 3's
-`spark-music3/music3-generate` (`music3-cuda` at 6b714531), which `spark/build-music3.sh` takes the same way. The Mac's
+`spark-music3/music3-generate` (`music3-cuda` at 6b714531), which `spark/build-music3.sh` takes the same way, and
+from 3.1.0 Fish Audio Drama 3's `spark-drama3/` (`drama3-generate` and `libtensorfold_drama3.so`, `drama3-cuda` at
+81173e6c, the engine only: no codec, no weights), which `spark/build-drama3.sh` takes the same way. The Mac's
 Drama 3 and Music engines are not in it: their installers clone TensorFold at the pinned commits. **It is not a runtime**: neither
 Metal nor the Spark's models run in a container, so the setup installs natively. Rebuild it with
-`PUSH=1 bash scripts/build-carrier.sh` (on a Spark, after `spark/build-engine.sh` and `spark/build-music3.sh`, to include its engines). Up to 2.2
+`PUSH=1 bash scripts/build-carrier.sh` (on a Spark, after `spark/build-engine.sh`, `spark/build-music3.sh` and `spark/build-drama3.sh`, to include its engines). Up to 2.2
 the image was `ghcr.io/drowzeys/keys-mac-tensorfold-studio`; the Mac setup still falls back to it.
 
 ## Stack
@@ -3344,6 +3581,8 @@ library: branch `h3-cuda-lora` @ `1f7ecc75`, which adds `tf_h3_set_weight` for L
   ashhart/TensorFold as draft pull requests (#384, #393, #405) and closed on 2026-10-07: the engine is built around
   token lanes with exact output, it does not trade precision as the int8 kernels do, its Python engine is frozen and
   its new Zig engine drives Metal without MLX. This code lives in the `drowzeys/TensorFold` fork, on 0.6.5.
+- **Tests.** `python -m pytest -q tests`, no GPU or weights; the page tests run the app's JavaScript and need Node 20 or
+  newer (skipped without it). GitHub Actions runs the suite on every pull request (`.github/workflows/tests.yml`).
 
 ## Credits
 

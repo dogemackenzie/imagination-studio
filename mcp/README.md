@@ -88,14 +88,28 @@ from an agent on your Mac, run the server there over ssh, so nothing is opened t
 |---|---|---|
 | `studio_state` | — | **Call first.** Presets (sizes), qualities, clip lengths, picture models and the machine. |
 | `list_library` | `kind?` (`video` / `image`), `limit?` | Clips and stills, newest first, with their paths. |
-| `queue_still` | `prompt`, `count?`, `preset?`, `width?`, `height?`, `seed?`, `image_model?` | Queues stills: `count` candidates (1 to 12, default 4) and a contact sheet. |
-| `queue_clip` | `prompt`, `first_frame?`, `image_prompt?`, `preset?`, `quality?`, `seconds?`, `seed?`, `title?` | Queues a clip with sound: from a Library picture (`first_frame`), from a picture it makes first (`image_prompt`), or from text alone. |
-| `job_status` | `id` | Status (`queued`, `running`, `done`, `failed`, `cancelled`), progress, outputs, error. |
+| `queue_still` | `prompt`, `count?`, `preset?`, `width?`, `height?`, `seed?`, `image_model?` | Queues stills: `count` pictures (1 to 12, default 1: an agent's "a picture" is one) and a contact sheet. |
+| `queue_clip` | `prompt`, `first_frame?`, `image_prompt?`, `references?`, `preset?`, `quality?`, `seconds?`, `seed?`, `title?` | Queues a clip with sound: from a Library picture (`first_frame`), from a picture it makes first (`image_prompt`), from up to nine reference pictures (`references`, Ref2VA: named `<Picture 1>`... in the prompt), or from text alone. |
+| `queue_edit` | `image`, `prompt`, `image_model?`, `seed?`, `title?` | Queues an edit of a Library picture by the image model; the prompt says what it should become. |
+| `queue_long` | `prompt`, `total_seconds`, `segment_seconds?`, `beats?`, `first_frame?`, `preset?`, `quality?`, `seed?`, `title?` | Queues a long take (over 15 s, up to 30 min): a chain of clips, each opening on the last frame of the one before, joined; `beats` is one line per part. |
+| `queue_sound` | `kind` (`sfx` / `foley`), `prompt?`, `seconds?`, `video?`, `keep_sound?`, `seed?`, `title?` | Queues a sound effect from words (`sfx`, 1 to 47 s) or a clip's foley (`foley`, its `video`). |
+| `queue_soundtrack` | `song`, `video`, `music_db?` | Lays a finished song (its job id) under a clip, ducked under the dialogue: a new .mp4. |
+| `check_clip` | `path`, `prompt?` | Runs the QA gate on a clip (sound, identity, sharpness); its job's `qa` is the report. |
+| `motion_previs` | `clip`, `start?`, `end?`, `mode?`, `title?` | Motion Previs: analyses a 2 to 15 s range of a clip into a production pack; its job's `pack` is the pack. |
+| `cancel_job` | `id` | Cancels a queued or running job (a render or a Motion Previs analysis). |
+| `job_status` | `id` | Status (`queued`, `running`, `done`, `failed`, `cancelled`), progress, outputs, error (a Motion Previs job too). |
+| `wait_for_jobs` | `ids`, `seconds?` | Waits until the jobs are done, failed or cancelled, at most `seconds` (default 50, up to 600), and returns them as `job_status` does. |
 | `list_jobs` | `limit?` | The queue and finished jobs, newest first. |
+| `slate_films` | — | Slate's films (the Production tab), newest first. |
+| `slate_film` | `film` | One film by id or name: its scenes and shots with their ids, and each shot's takes with their paths and job ids. |
+| `slate_new_film` | `name`, `logline?` | Makes a film and returns its id. |
+| `slate_add_scene` | `film`, `name`, `synopsis?` | Adds a scene and returns its id. |
+| `slate_add_shot` | `film`, `scene`, `prompt`, `name?`, `intent?`, `seconds?`, `size?`, `angle?`, `movement?`, `soundscape?` | Adds a shot (a sectioned prompt: `# Subject`, `# Composition`, ...; no spoken words) and returns its id. |
+| `slate_render_shot` | `film`, `shot`, `first_frame?` | Compiles the shot as the page does, queues its clip into the film's takes folder and logs the take in the shot; `first_frame` opens it on a finished Library picture. |
 | `upload_file` | `path` | Copies a file from the agent's machine into the Library (pictures, video, sound) and returns its path. |
 
-Jobs run one at a time, in the order queued. A queued job returns at once with its `id`; poll `job_status` until it is
-`done`, then use its `outputs`. Clip lengths are brought to the nearest the model takes (up to 15 seconds); sizes the
+Jobs run one at a time, in the order queued. A queued job returns at once with its `id`; follow it with `wait_for_jobs`
+(or poll `job_status`) until it is `done`, then use its `outputs`. Clip lengths are brought to the nearest the model takes (up to 15 seconds); sizes the
 model cannot take are refused with the reason, as on the page.
 
 ---

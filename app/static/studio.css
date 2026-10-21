@@ -893,7 +893,15 @@ nav#rooms .lbl.long { white-space:normal; line-height:1.12; font-size:14.5px; }
 .cn-nudge-h { display:flex; gap:12px; align-items:flex-start; justify-content:space-between; }
 .cn-nudge h2 { margin:4px 0 6px; }
 .cn-nudge-h > .ghost { flex:none; white-space:nowrap; }
-.cn-nudge .primary .logo { width:20px; height:20px; margin-right:8px; }
+/* the suggested agent: one pill with an icon-sized mark, then "or" and the others */
+.cn-nudge .chips { align-items:center; }
+.cn-nudge .primary { display:inline-flex; align-items:center; gap:8px; }
+.cn-nudge .primary .logo, .cn-nudge .primary .logo .ico, .cn-nudge .primary .logo .mk { width:18px; height:18px; display:inline-flex; align-items:center; justify-content:center; flex:none; }
+.cn-nudge .primary .logo svg, .cn-nudge .primary .logo img { width:18px; height:18px; display:block; }
+.cn-nudge .cn-or { color:var(--dim); font-size:13px; margin:0 2px; }
+.cn-nudge .cn-alt { display:inline-flex; align-items:center; gap:7px; }
+.cn-nudge .cn-alt .mk, .cn-nudge .cn-alt .mk img { width:16px; height:16px; display:block; flex:none; }
+.mk img[src$="hermes-agent.png"] { border-radius:4px; }
 .st-embed .pagehead { margin-top:0; }
 @media (max-width: 640px) { .cn-qr { width:132px; height:132px; } .cn-code span { font-size:24px; } .connect { padding:10px; } .cn-step { grid-template-columns:22px minmax(0,1fr); gap:8px; } .cn-tick { width:22px; height:22px; } }
 
@@ -937,3 +945,14 @@ nav#rooms .grp.g-engines::after, nav#rooms .grp.g-vaults::after { content:""; fl
 /* About: whose links, then the links */
 .st-links b { font:600 13.5px/1.3 var(--sans); color:var(--text); margin-right:4px; }
 .st-powered { color:var(--dim); }
+.st-md summary { cursor:pointer; font-weight:600; padding:6px 0; } .st-md { border-top:1px solid var(--line); padding-top:4px; }
+.st-md .st-md-head { margin:14px 0 4px; font:600 15px/1.3 var(--sans); } .st-md h3.st-md-head { font-size:17px; }
+.st-md p, .st-md li { overflow-wrap:anywhere; } .st-md code { font:500 12px var(--mono); }
+/* the access key's prompt (index.html askKey) */
+.key-ask { position:fixed; inset:0; z-index:1000; display:flex; align-items:center; justify-content:center; padding:16px; background:rgba(0,0,0,.72); }
+.key-card { display:flex; flex-direction:column; gap:12px; width:min(440px,100%); padding:22px; border-radius:var(--r2, 14px); background:var(--bg2); border:1px solid var(--line); }
+.key-card h2 { margin:0; font:600 19px/1.3 var(--sans); } .key-card input { width:100%; } .key-card code { font:500 12px var(--mono); }
+/* Settings → Access key */
+.key-steps { display:grid; gap:16px; } .key-step { display:flex; flex-direction:column; gap:8px; padding:14px; border:1px solid var(--line); border-radius:var(--r1); }
+.key-qr { background:#fff; padding:10px; border-radius:8px; width:max-content; } .key-qr svg { display:block; width:200px; height:200px; }
+.key-shown { font:500 13px var(--mono); overflow-wrap:anywhere; }

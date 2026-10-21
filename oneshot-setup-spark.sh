@@ -1,6 +1,7 @@
 #!/bin/bash
 # TensorFold Studio on an NVIDIA DGX Spark (GB10, 128 GB, CUDA 13): one-shot install.
-#   bash oneshot-setup-spark.sh               # everything, then a 5 second test clip
+#   bash oneshot-setup-spark.sh --all         # every feature below in one go (about 400 GB of disk), then a test clip
+#   bash oneshot-setup-spark.sh               # the core (pictures and FastH3 video with sound), then a 5 second test clip
 #   bash oneshot-setup-spark.sh --image-only  # Qwen-Image-2.1 only (26 GB)
 #   bash oneshot-setup-spark.sh --no-render   # skip the test clip
 #   bash oneshot-setup-spark.sh --ref2va      # add MiniMax H3 Ref2VA (reference pictures hold a face), 39 GB more
@@ -22,6 +23,11 @@
 #                                             # which it builds too (spark/build-music3.sh). MiniMax-Music3 Community License:
 #                                             # commercial use allowed; a commercial UI shows "MiniMax-Music3"; above US$20M
 #                                             # yearly revenue needs MiniMax's written authorisation
+#   bash oneshot-setup-spark.sh --bolt        # add NVIDIA Nemotron 3.5 Bolt as the Studio's own brain engine, about 25 GB more:
+#                                             # NVIDIA's 24 GB checkpoint (a326822a) and its LiLiCorr drafter (4c6a5613), and
+#                                             # the engine (spark/build-bolt.sh: TensorFold with MiaAI-Lab's Bolt backend).
+#                                             # OpenMDW License Agreement 1.1: commercial use allowed, keep the licence and
+#                                             # NVIDIA's notices with any copy (scripts/setup-bolt.sh)
 #   bash oneshot-setup-spark.sh --sound       # add sound effects and foley (Sound -> Sound effects), 11 GB more: Stability AI's
 #                                             # Stable Audio Open 1.0 on ComfyUI's own nodes (Stability AI Community License; the
 #                                             # Hugging Face repo is gated: accept its licence there and sign in first) and
@@ -30,8 +36,12 @@
 #   bash oneshot-setup-spark.sh --motion      # add the Motion Previs tab's analysis: pose, camera solve and AI depth (0.5 GB, own environment)
 #   bash oneshot-setup-spark.sh --no-loras    # skip the essential LoRA bundle (about 4 GB from the LoRAs' authors; --loras=camera,style
 #                                       # takes some groups, --lora-bundle=PATH installs from a bundle on disk with no other network)
-#   bash oneshot-setup-spark.sh --voice       # check Fish Audio Drama 3 for the Voice tab (scripts/setup-voice.sh): its CUDA
-#                                             # engine is built by hand (README, Voice on a DGX Spark); this says what is missing
+#   bash oneshot-setup-spark.sh --voice       # add Fish Audio Drama 3 for the Voice tab, about 41 GB more (scripts/setup-voice.sh):
+#                                             # TensorFold's CUDA engine (spark/build-drama3.sh: prebuilt from the carrier, else
+#                                             # built), Fish's 39 GB checkpoint (fishaudio/drama-3, linked if a copy is already on
+#                                             # this machine) and its codec converted once here (1.6 GB), then a test line.
+#                                             # Fish Audio Community License v1.0: research, non-commercial and small-company
+#                                             # commercial use; a hosted TTS or voice-cloning service needs Fish Audio's licence
 #   bash oneshot-setup-spark.sh --verify      # check an existing install, download nothing
 #   bash oneshot-setup-spark.sh --upgrade     # after `git pull`: move an existing install to this version (environment, ComfyUI pin,
 #                                             # engine, Motion Previs environment), fetch no weights, then --verify. Safe to run twice.
@@ -51,10 +61,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"
 MODELS="${SPARK_MODELS:-$HOME/spark-studio-models}"
 COMFY_COMMIT=b9b290e43f1eb379946dfeb013faf9bbefa1a618  # v0.42.0 and later: ComfyUI's FLUX 3 and MOSS-Image nodes
-IMAGE_ONLY=0; RENDER=1; VERIFY=0; REF2VA=0; MOTION=0; VOICE=0; UPGRADE=0; LORAS=""; H3_BASE=0; WORKFLOWS=1; IMAGE_EDIT=0; FLUX3=0; MOSS=0; MUSIC=0; SOUND=0
+IMAGE_ONLY=0; RENDER=1; VERIFY=0; REF2VA=0; MOTION=0; VOICE=0; UPGRADE=0; LORAS=""; H3_BASE=0; WORKFLOWS=1; IMAGE_EDIT=0; FLUX3=0; MOSS=0; MUSIC=0; SOUND=0; BOLT=0
 for arg in "$@"; do
   case "$arg" in
-    --ref2va) REF2VA=1;; --h3-base) H3_BASE=1;; --image-edit) IMAGE_EDIT=1;; --flux3) FLUX3=1;; --moss) MOSS=1;; --music) MUSIC=1;; --sound) SOUND=1;; --motion) MOTION=1;; --voice) VOICE=1;; --image-only) IMAGE_ONLY=1;; --no-render) RENDER=0;; --verify) VERIFY=1; RENDER=0;; --upgrade) UPGRADE=1; RENDER=0; MOTION=1;;
+    --ref2va) REF2VA=1;; --h3-base) H3_BASE=1;; --image-edit) IMAGE_EDIT=1;; --flux3) FLUX3=1;; --moss) MOSS=1;; --music) MUSIC=1;; --bolt) BOLT=1;; --sound) SOUND=1;; --motion) MOTION=1;; --voice) VOICE=1;; --image-only) IMAGE_ONLY=1;; --no-render) RENDER=0;; --verify) VERIFY=1; RENDER=0;; --upgrade) UPGRADE=1; RENDER=0; MOTION=1;;
+    --all) REF2VA=1; H3_BASE=1; IMAGE_EDIT=1; FLUX3=1; MOSS=1; MUSIC=1; SOUND=1; BOLT=1; VOICE=1; MOTION=1;;  # every feature
     --no-workflows) WORKFLOWS=0;;
     --loras) LORAS=all;; --loras=*) LORAS="${arg#--loras=}";; --no-loras) LORAS=none;; --lora-bundle=*) LORA_BUNDLE="${arg#--lora-bundle=}";;
     *) echo "unknown option $arg" >&2; exit 2;;
@@ -81,24 +92,53 @@ if [ "$UPGRADE" = 1 ]; then
   [ ! -s "$MODELS/MOSS-Image-Comfy/diffusion_models/moss_image_sft_bf16.safetensors" ] || MOSS=1
   [ ! -s "$MODELS/MiniMax-Music3-Comfy/diffusion_models/minimax_music3_dit_fp16.safetensors" ] || MUSIC=1
   [ ! -d "$PREFIX/ComfyUI/custom_nodes/ComfyUI-MMAudio" ] || SOUND=1
+  [ ! -s "${BOLT_MODELS:-$MODELS}/Nemotron-3.5-Bolt-24GB/model.safetensors.index.json" ] || BOLT=1
+  [ ! -x "$PREFIX/drama3/bin/drama3-generate" ] || VOICE=1
   ok "upgrade: installed $INSTALLED -> $(cat "$HERE/VERSION")$([ "$IMAGE_ONLY" = 0 ] || echo " (image-only install)")"
 else ok "version $(cat "$HERE/VERSION")$([ ! -f "$PREFIX/VERSION" ] || echo " (installed: $INSTALLED)")"; fi
 GPU="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
 MEM_GB=$(awk '/MemTotal/{print int($2/1048576)}' /proc/meminfo)
 ok "$GPU, $(uname -m), ${MEM_GB} GB"
-case "$GPU" in *GB10*) ;; *) echo "  ! measured only on a DGX Spark (GB10, 128 GB unified memory); other GPUs are untested";; esac
-[ "$MEM_GB" -ge 100 ] || [ "$IMAGE_ONLY" = 1 ] || die "video needs about 90 GB of memory at 1344x768 (128 GB machine); this one has ${MEM_GB} GB. --image-only fits."
+# a card with memory of its own (an RTX Pro 6000 Blackwell, 96 GB): the video models live in its memory, and the
+# machine's RAM holds the rest (docs/rtx-pro-6000.md); on a DGX Spark both are one 128 GB pool
+VRAM_GB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+case "$VRAM_GB" in ''|*[!0-9]*) VRAM_GB="";; *) VRAM_GB=$((VRAM_GB / 1024));; esac
+case "$GPU" in *GB10*) ;; *) if [ -n "$VRAM_GB" ]; then echo "  ! a ${VRAM_GB} GB card: measured on a DGX Spark and simulated as a 96 GB RTX Pro 6000, not run on one (docs/rtx-pro-6000.md)"
+  else echo "  ! measured only on a DGX Spark (GB10, 128 GB unified memory); other GPUs are untested"; fi;; esac
+if [ -n "$VRAM_GB" ]; then
+  [ "$VRAM_GB" -ge 90 ] || [ "$IMAGE_ONLY" = 1 ] || die "video needs a card of about 96 GB (an RTX Pro 6000 Blackwell); this one has ${VRAM_GB} GB. --image-only fits on 48 GB."
+  [ "$MEM_GB" -ge 64 ] || die "the machine needs 64 GB of RAM or more beside the card (the models are read through it); this one has ${MEM_GB} GB"
+else
+  [ "$MEM_GB" -ge 100 ] || [ "$IMAGE_ONLY" = 1 ] || die "video needs about 90 GB of memory at 1344x768 (128 GB machine); this one has ${MEM_GB} GB. --image-only fits."
+fi
 for tool in git ffmpeg ffprobe; do command -v "$tool" >/dev/null || die "install $tool first (sudo apt install $([ "$tool" = ffprobe ] && echo ffmpeg || echo "$tool"))"; done
 if ! command -v uv >/dev/null; then
   [ "$VERIFY" = 0 ] || die "no uv"
   curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
 fi
-NEED=$([ "$IMAGE_ONLY" = 1 ] && echo 40 || echo 125)
+# disk for what is still to fetch (GB, with room): each part asked for whose weights are not here yet, by the file that
+# says it is (the sizes in the header above); a machine that holds some of them already needs only the rest
+missing() { [ ! -s "$1" ]; }
+NEED=5
+missing "$MODELS/Qwen-Image-2.1-Comfy/diffusion_models/qwen_image_2.1_turbo_bf16.safetensors" && NEED=$((NEED + 26))
+if [ "$IMAGE_ONLY" = 0 ]; then
+  missing "$MODELS/FastH3-Comfy/diffusion_models/fastvideo_fasth3_8step_v2_pruned_bf16.safetensors" && NEED=$((NEED + 75))
+  [ "$REF2VA" = 0 ] || ! missing "$MODELS/MiniMax-H3-Comfy/diffusion_models/minimax_h3_ref2va_pruned_bf16.safetensors" || NEED=$((NEED + 40))
+  [ "$H3_BASE" = 0 ] || ! missing "$MODELS/MiniMax-H3-Comfy/diffusion_models/minimax_h3_fl2va_pruned_bf16.safetensors" || NEED=$((NEED + 42))
+  [ "$IMAGE_EDIT" = 0 ] || ! missing "$MODELS/Qwen-Image-2.1-Comfy/diffusion_models/qwen_image_2.1_bf16.safetensors" || NEED=$((NEED + 15))
+  [ "$FLUX3" = 0 ] || [ -s "$MODELS/FLUX3-K-Comfy/diffusion_models/flux3_image_klein_sd_bf16.safetensors" ] \
+    || [ -s "$MODELS/FLUX3-K-Comfy/diffusion_models/flux3-image-klein-bf16.safetensors" ] || NEED=$((NEED + 42))
+  [ "$MOSS" = 0 ] || ! missing "$MODELS/MOSS-Image-Comfy/diffusion_models/moss_image_sft_bf16.safetensors" || NEED=$((NEED + 31))
+  [ "$MUSIC" = 0 ] || ! missing "$MODELS/MiniMax-Music3-Comfy/diffusion_models/minimax_music3_dit_fp16.safetensors" || NEED=$((NEED + 23))
+  [ "$SOUND" = 0 ] || ! missing "$MODELS/Sound-Comfy/stable-audio-open-1.0/model.safetensors" || NEED=$((NEED + 12))
+  [ "$BOLT" = 0 ] || ! missing "${BOLT_MODELS:-$MODELS}/Nemotron-3.5-Bolt-24GB/model.safetensors.index.json" || NEED=$((NEED + 26))
+  [ "$VOICE" = 0 ] || ! missing "${DRAMA3_CUDA_MODEL:-${DRAMA3_CHECKPOINT:-$HOME/models/drama-3}}/config.json" || NEED=$((NEED + 45))
+fi
 if [ "$VERIFY" = 0 ]; then
   mkdir -p "$PREFIX" "$MODELS"
   FREE=$(df -BG --output=avail "$MODELS" | tail -1 | tr -dc 0-9)
-  HAVE=$(du -sBG "$MODELS" 2>/dev/null | cut -f1 | tr -dc 0-9)
-  [ $((FREE + HAVE)) -ge "$NEED" ] || die "$MODELS has ${FREE} GB free; the install needs about ${NEED} GB"
+  [ "$FREE" -ge "$NEED" ] || die "$MODELS has ${FREE} GB free; what is not here yet needs about ${NEED} GB"
+  ok "disk: ${FREE} GB free, about ${NEED} GB to fetch"
 fi
 
 say "Environment: Python 3.12 and PyTorch for CUDA 13 -> $PREFIX/venv"
@@ -275,6 +315,12 @@ if [ "$MUSIC" = 1 ]; then
   fi
 fi
 
+if [ "$BOLT" = 1 ]; then  # NVIDIA Nemotron 3.5 Bolt, the brains' Studio-managed engine: weights and engine (scripts/setup-bolt.sh)
+  if [ "$UPGRADE" = 1 ]; then PREFIX="$PREFIX" SPARK_MODELS="$MODELS" bash "$HERE/spark/build-bolt.sh" || echo "  ! the Bolt engine was not updated: bash spark/build-bolt.sh"
+  else PREFIX="$PREFIX" SPARK_MODELS="$MODELS" bash "$HERE/scripts/setup-bolt.sh" $([ "$VERIFY" = 1 ] && echo --verify) \
+         || echo "  ! the Bolt engine was not installed (on x86_64 there is no TensorFold Bolt engine: BOLT_BACKEND=llamacpp, docs/rtx-pro-6000.md); the rest goes on"; fi
+fi
+
 if [ "$SOUND" = 1 ]; then
   # Sound effects and foley (app/sound.py, spark_generate.py sfx / foley): every render goes through the studio's
   # ComfyUI server and its memory guard, never as standalone model code; a kind renders only once memory_guard.py
@@ -374,10 +420,25 @@ if [ "$MOTION" = 1 ] || [ -x "$PREFIX/motion-venv/bin/python" ]; then
     || echo "  ! Motion Previs is not fully set up: its tab says which layers are not available on this machine"
 fi
 
+if [ "$VOICE" = 1 ]; then
+  # Fish Audio Drama 3 for the Voice tab (scripts/setup-voice.sh): TensorFold's CUDA engine (spark/build-drama3.sh),
+  # Fish's checkpoint (linked when a copy is on this machine, else downloaded) and its codec converted here once, then a
+  # test line. --verify checks only; --upgrade moves the engine to this version's commit and fetches no weights.
+  say "Fish Audio Drama 3 for the Voice tab: TensorFold's CUDA engine -> $PREFIX/drama3, Fish's checkpoint (39 GB), the codec"
+  if [ "$VERIFY" = 1 ]; then
+    PREFIX="$PREFIX" bash "$HERE/scripts/setup-voice.sh" --verify | sed 's/^/  /' || echo "  ! the Voice tab is not ready: bash oneshot-setup-spark.sh --voice"
+  elif [ "$UPGRADE" = 1 ]; then
+    PREFIX="$PREFIX" bash "$HERE/scripts/setup-voice.sh" --upgrade | sed 's/^/  /' || echo "  ! the voice engine was not updated: bash spark/build-drama3.sh"
+  else
+    PREFIX="$PREFIX" bash "$HERE/scripts/setup-voice.sh" $([ "$RENDER" = 1 ] || echo --no-test) | sed 's/^/  /' \
+      || echo "  ! the Voice tab is not fully set up (above): bash oneshot-setup-spark.sh --voice tries again"
+  fi
+fi
+
 [ "$VERIFY" = 1 ] || cp "$HERE/VERSION" "$PREFIX/VERSION"
 if [ "$UPGRADE" = 1 ]; then
   say "Upgraded: $INSTALLED -> $(cat "$PREFIX/VERSION"). Checking the install (restart the app to serve the new pages: scripts/app.sh)"
-  exec bash "$HERE/oneshot-setup-spark.sh" --verify $([ "$IMAGE_ONLY" = 0 ] || echo --image-only) $([ "$REF2VA" = 0 ] || echo --ref2va) $([ "$FLUX3" = 0 ] || echo --flux3) $([ "$MOSS" = 0 ] || echo --moss) $([ "$MUSIC" = 0 ] || echo --music) $([ "$SOUND" = 0 ] || echo --sound)
+  exec bash "$HERE/oneshot-setup-spark.sh" --verify $([ "$IMAGE_ONLY" = 0 ] || echo --image-only) $([ "$REF2VA" = 0 ] || echo --ref2va) $([ "$FLUX3" = 0 ] || echo --flux3) $([ "$MOSS" = 0 ] || echo --moss) $([ "$MUSIC" = 0 ] || echo --music) $([ "$SOUND" = 0 ] || echo --sound) $([ "$BOLT" = 0 ] || echo --bolt) $([ "$VOICE" = 0 ] || echo --voice)
 fi
 # The essential LoRA bundle: every preset of the LoRA hub, fetched once from its author's page into one folder laid out
 # by the hub's groups, then installed (oneshot-essential-bundle.sh). --loras=GROUPS takes some groups, --lora-bundle=PATH
@@ -387,9 +448,6 @@ if [ "$LORAS" != none ] && [ "$IMAGE_ONLY" = 0 ] && [ "$VERIFY" != 1 ]; then
   PREFIX="$PREFIX" H3_MODEL_DIR="${H3_MODEL_DIR:-$HOME/h3-models/MiniMax-H3}" bash "$HERE/oneshot-essential-bundle.sh" \
     $([ -z "$LORAS" ] || [ "$LORAS" = all ] || echo "--categories=$LORAS") $([ -z "${LORA_BUNDLE:-}" ] || echo "--source=$LORA_BUNDLE") 2>&1 | sed 's/^/  /' \
     || echo "  ! some LoRAs could not be fetched (listed above): the rest are installed, and bash oneshot-essential-bundle.sh tries again"
-fi
-if [ "$VOICE" = 1 ]; then  # Fish Audio Drama 3: checked, and the hand steps printed when something is missing
-  PREFIX="$PREFIX" bash "$HERE/scripts/setup-voice.sh" $([ "$VERIFY" = 1 ] && echo --verify) || [ "$VERIFY" = 0 ]
 fi
 if [ "$RENDER" = 1 ]; then
   say "Test render"

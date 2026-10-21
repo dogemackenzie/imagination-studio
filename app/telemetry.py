@@ -68,7 +68,11 @@ def parse_gpu(line: str) -> dict | None:
 
 
 def parse_vm_stat(text: str, total_mb: int) -> int | None:
-    """A Mac's available memory from vm_stat: free, inactive, speculative and purgeable pages."""
+    """A Mac's available memory from vm_stat, in MB: free, file-backed and purgeable pages, what the kernel gets back
+    without compressing anything. Inactive pages are not counted: most are a process's own memory, which macOS must
+    compress before it can reuse them (at the Studio's panic of 2026-10-20, 57 GB of them stood "inactive" while 138 GB
+    was compressed and 15 MB was free). A vm_stat without the file-backed line (an older macOS) counts free, inactive,
+    speculative and purgeable as before."""
 
     size, pages = 16384, {}
     for line in text.splitlines():
@@ -80,8 +84,21 @@ def parse_vm_stat(text: str, total_mb: int) -> int | None:
         name, _, value = line.partition(":")
         if value.strip().rstrip(".").isdigit():
             pages[name.strip()] = int(value.strip().rstrip("."))
-    free = sum(pages.get(name, 0) for name in ("Pages free", "Pages inactive", "Pages speculative", "Pages purgeable"))
+    names = (("Pages free", "File-backed pages", "Pages purgeable") if "File-backed pages" in pages
+             else ("Pages free", "Pages inactive", "Pages speculative", "Pages purgeable"))
+    free = sum(pages.get(name, 0) for name in names)
     return min(total_mb, free * size // 2 ** 20) if pages else None
+
+
+def mac_pressure_critical() -> bool:
+    """Whether macOS says its memory pressure is critical (kern.memorystatus_vm_pressure_level 4): it is compressing
+    and swapping to keep going, and the Studio's renders must stop before the window server stalls."""
+
+    try:
+        done = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True, timeout=2)
+        return int(done.stdout.strip() or 0) >= 4
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
 
 
 def walk(path: Path, seen: set) -> tuple[int, int]:
@@ -159,9 +176,11 @@ def disk_of(path: Path) -> dict:
             "used_pct": round(100 * used / (used + avail), 1) if used + avail else None}
 
 
-def attach(home: Path, jobs: dict, order: list, lock: threading.Lock, guard=None, comfy_port: int | None = None) -> APIRouter:
+def attach(home: Path, jobs: dict, order: list, lock: threading.Lock, guard=None, comfy_port: int | None = None,
+           engines=None) -> APIRouter:
     """``guard`` is spark/memory_guard.py (its floor and the ComfyUI server's pid); ``comfy_port`` the port of the
-    studio's ComfyUI (spark/comfy.sh, SPARK_COMFY_PORT, 8190)."""
+    studio's ComfyUI (spark/comfy.sh, SPARK_COMFY_PORT, 8190); ``engines`` what the Studio's resident engines hold
+    (NVIDIA Nemotron 3.5 Bolt: state, backend, memory), asked on every reading, so cheap."""
 
     router = APIRouter()
     port = int(comfy_port or os.environ.get("SPARK_COMFY_PORT", "8190"))
@@ -203,7 +222,11 @@ def attach(home: Path, jobs: dict, order: list, lock: threading.Lock, guard=None
                 pass
         floor = guard.floor_mb(total) if guard and SPARK and total else None  # the guard covers a DGX Spark only
         used = round(100 * (1 - available / total), 1) if total and available is not None else None
-        return {"total_mb": total, "available_mb": available, "floor_mb": floor, "used_pct": used}
+        out = {"total_mb": total, "available_mb": available, "floor_mb": floor, "used_pct": used}
+        card = guard.device() if guard and SPARK else None  # a card with its own memory (an RTX Pro 6000): shown beside the RAM
+        if card:
+            out["card"] = {key: card[key] for key in ("total_mb", "used_mb", "free_mb", "simulated")}
+        return out
 
     def gpu_lock() -> dict:
         folder = Path(os.environ.get("STUDIO_GPU_LOCK", Path.home() / "studio-gpu.lock.d"))
@@ -269,6 +292,12 @@ def attach(home: Path, jobs: dict, order: list, lock: threading.Lock, guard=None
         return [{"id": job["id"], "status": job.get("status"), "title": job.get("title"), "kind": job.get("kind"),
                  "progress": job.get("progress"), "spark": job.get("spark")} for job in reversed(listed)]
 
+    def held_by_engines() -> dict | None:
+        try:
+            return engines() if engines else None
+        except Exception:  # noqa: BLE001 - a reading never fails over an engine's status
+            return None
+
     def snapshot() -> dict:
         # nvidia-smi is asked at most every GPU_FRESH s, and every GPU_BUSY s while something renders: one GPU query is
         # cheap, but on every node every two seconds it added up beside a render
@@ -300,7 +329,7 @@ def attach(home: Path, jobs: dict, order: list, lock: threading.Lock, guard=None
         return {"time": time.time(), "host": socket.gethostname(), "platform": "spark" if SPARK else "mac" if sys.platform == "darwin" else sys.platform,
                 "gpu": card, "memory": mem, "cpu": {"load1": load, "cores": os.cpu_count()}, "disk": drive,
                 "gpu_lock": lock_held, "renderer": {"comfy": cached("comfy", comfy)}, "jobs": queue(), "governor": ruled,
-                "warnings": warnings}
+                "engines": held_by_engines(), "warnings": warnings}
 
     def sample() -> None:
         while True:

@@ -111,10 +111,55 @@ def test_not_installed_and_mac():
     (home / "loras/turnaround.mlx.safetensors").write_bytes(b"x")
     command, env, _ = build("turnaround", {"image": "uploads/a.png", "prompt": "turn <Picture 1> round"}, "j")
     assert env["TURNAROUND_LORA"].endswith("turnaround.mlx.safetensors") and env["PROMPT"] == "turn <Picture 1> round" and "PREFIX" not in env
-    assert all("DGX Spark only" in one["why"] for kind, one in state().items() if kind != "turnaround") and state()["turnaround"]["ready"]
-    assert refused(build, "upscale", {"video": "renders/c.mp4"}, "j").startswith("DGX Spark only")
+    assert all("oneshot-setup.sh --" in one["why"] for kind, one in state().items() if kind != "turnaround") and state()["turnaround"]["ready"]
+    assert "oneshot-setup.sh --upscale" in refused(build, "upscale", {"video": "renders/c.mp4"}, "j")
+    assert "oneshot-setup.sh --remove" in refused(build, "mask", {"video": "renders/c.mp4", "person": "x"}, "j")
     _, _, _, _, state = studio()
     assert all(one["ready"] for one in state().values())
+
+
+def mac_comfy(home: Path, kinds=("upscale", "remove")) -> Path:
+    """A Mac with the ComfyUI of scripts/setup-comfy.sh: its environment, the node packs, the models and MiniMax H3."""
+
+    prefix, models = Path(os.environ["PREFIX"]), home.parent / "comfy-models"
+    os.environ.update(MAC_COMFY_MODELS=str(models), H3_MODEL_DIR=str(home / "h3"))
+    for part in actions.MAC_H3:
+        (home / "h3" / part).mkdir(parents=True, exist_ok=True)
+    (prefix / "comfy-venv/bin").mkdir(parents=True, exist_ok=True)
+    (prefix / "comfy-venv/bin/python").write_text("")
+    (prefix / "ComfyUI").mkdir(parents=True, exist_ok=True)
+    (prefix / "ComfyUI/main.py").write_text("")
+    for kind in kinds:
+        (prefix / "ComfyUI/custom_nodes" / actions.MAC_NODES[kind]).mkdir(parents=True, exist_ok=True)
+        for file in actions.MAC_FILES[kind]:
+            (models / file).parent.mkdir(parents=True, exist_ok=True)
+            (models / file).write_bytes(b"x")
+    return prefix
+
+
+def test_mac_comfy_actions():
+    home, build, _, _, state = studio(spark=False, installed=False)
+    prefix = mac_comfy(home, kinds=("upscale",))
+    assert state()["upscale"]["ready"] is False and "LoRA hub" in state()["upscale"]["why"]   # the .mlx copy is not read
+    (home / "loras/video-upscaler.mlx.safetensors").write_bytes(b"x")
+    assert "LoRA hub" in state()["upscale"]["why"]
+    (home / "loras/video-upscaler.safetensors").write_bytes(b"x")            # the author's file, as on a Spark
+    assert state()["upscale"]["ready"] and "--remove" in state()["remove"]["why"] and "--remove" in state()["mask"]["why"]
+    command, env, outputs = build("upscale", {"video": "renders/c.mp4"}, "j5")
+    assert command[0] == str(prefix / "comfy-venv/bin/python") and command[1].endswith("spark/spark_workflows.py")
+    assert command[command.index("--lora") + 1].endswith("loras/video-upscaler.safetensors") and env["PREFIX"] == str(prefix)
+    mac_comfy(home, kinds=("remove",))
+    assert state()["mask"]["ready"] and "LoRA hub" in state()["remove"]["why"]
+    kept = home / "lora-bundle/03-character-editing/person-remover/H3-Person-Remover-V1.safetensors"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"x")                                                    # from a LoRA bundle, as on a Spark
+    command, _, _ = build("remove", {"video": "renders/c.mp4", "person": "a man"}, "j6")
+    assert command[command.index("--lora") + 1] == str(kept) and command[0].endswith("comfy-venv/bin/python")
+    (home / "h3/FL2VA/video_vae").rmdir()
+    assert "video decoder" in state()["remove"]["why"]
+    (home / "loras/turnaround.mlx.safetensors").write_bytes(b"x")
+    command, env, _ = build("turnaround", {"image": "uploads/a.png"}, "j7")
+    assert command[0] == "bash" and "PREFIX" not in env                     # the turnaround sheet stays the MLX engine's
 
 
 def test_lora_from_a_bundle():
@@ -184,3 +229,30 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             test()
             print("ok", name)
+
+
+def test_an_action_starts_from_an_empty_server_after_another_kind_of_job(monkeypatch, tmp_path):
+    """ComfyUI kept FLUX3-K's weights beside a turnaround's Ref2VA transformer and text encoder, and the DGX Spark's
+    memory floor stopped it (2026-10-20): a Library action after a picture, a clip or a song restarts the server."""
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "spark"))
+    import spark_workflows as W
+    stops = []
+    monkeypatch.setattr(W.sg, "STATE", tmp_path / "comfy.kind")
+    monkeypatch.setattr(W, "PATCHED", tmp_path / "comfy.patched")
+    monkeypatch.setattr(W.sg, "up", lambda: not stops)
+    monkeypatch.setattr(W.sg, "ensure_server", lambda kind: None)
+    monkeypatch.setattr(W.sg, "call", lambda path, *a: {n: {} for n in W.NODES["turnaround"]})
+    monkeypatch.setattr(W, "listed", lambda loader, field: [W.sg.REF2VA["bf16"]])
+    monkeypatch.setattr(W, "comfy_pid", lambda: "1")
+    monkeypatch.setattr(W.time, "sleep", lambda s: None)
+    monkeypatch.setattr(W.subprocess, "run", lambda cmd, **k: stops.append(cmd))
+    released = []
+    monkeypatch.setattr(W.sg.memory_guard, "release_cache", lambda paths: released.append(1) or 0)
+    monkeypatch.setattr(W.sg, "MAC", False)
+    for last, restarted in (("flux3", True), ("image", True), ("video-int8", True), ("workflow-upscale", False), ("", False)):
+        stops.clear()
+        (tmp_path / "comfy.kind").write_text(last)
+        W.server("turnaround")
+        assert bool(stops) == restarted, last
+    assert len(released) == 5  # on a Spark the model files' page cache is given back before every action loads

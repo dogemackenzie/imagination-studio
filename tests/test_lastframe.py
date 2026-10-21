@@ -9,14 +9,17 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 HOME = Path(tempfile.mkdtemp()) / "TensorFoldStudio"
 os.environ["STUDIO_HOME"] = str(HOME)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 import server  # noqa: E402
+
 from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-HOME = server.HOME  # one app per process: a run that already imported the server keeps that folder
+HOME = server.HOME.resolve()  # one app per process: keep the folder the server already opened (/private/var on a Mac)
 os.environ["STUDIO_HOME"] = str(HOME)
 for name in ("renders", "uploads"):
     (HOME / name).mkdir(parents=True, exist_ok=True)
@@ -38,6 +41,7 @@ def test_lead():
     assert server.compose({"scene": "a table"}, False).startswith("integrated_multimodal_description")
 
 
+@pytest.mark.usefixtures("spark_memory")
 def test_build_carries_the_last_frame():
     first, last = picture("a.png"), picture("b.png")
     base = {"prompt": "x", "preset": next(iter(server.PRESETS)), "quality": next(iter(server.QUALITIES)), "seconds": 5}

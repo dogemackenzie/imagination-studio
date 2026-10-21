@@ -3,10 +3,10 @@ python3 tests/test_sparks.py. No GPU, no ssh, no other machine: a worker is a sm
 that answers the calls this app makes to one (its page's own API), and ssh, rsync and the tunnel are stood in for."""
 import ast
 import contextlib
+import itertools
+import shutil
 import json
 import os
-import pytest
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +14,10 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import pytest
+
+from test_shell_page import need_node
 
 ROOT = Path(__file__).resolve().parent.parent
 os.environ.setdefault("STUDIO_HOME", str(Path(tempfile.mkdtemp()) / "TensorFoldStudio"))
@@ -28,6 +32,9 @@ hub = server.hub
 PRESET = "small" if "small" in server.PRESETS else next(iter(server.PRESETS))
 QUALITY = "fh8"
 TAKES = 0.35  # how long a stand-in render takes, here and on a worker
+
+
+ADDRESSES = itertools.count()
 
 
 class Worker:
@@ -77,19 +84,15 @@ class Worker:
                     outer.most = max(outer.most, sum(1 for j in outer.jobs.values() if j["status"] == "running"))
 
                     def finish():
-                        try:
-                            time.sleep(outer.takes)
-                            if job["status"] != "running":
-                                return
-                            if outer.fails:
-                                job.update(status="failed", error="ComfyUI stopped: the memory floor")
-                                return
-                            outer.files[f"renders/{job['id']}.mp4"] = f"made on {outer.name}".encode()
-                            job.update(status="done", outputs=[f"renders/{job['id']}.mp4"])
-                        finally:
-                            flight.leave()
+                        time.sleep(outer.takes)
+                        if job["status"] != "running":
+                            return
+                        if outer.fails:
+                            job.update(status="failed", error="ComfyUI stopped: the memory floor")
+                            return
+                        outer.files[f"renders/{job['id']}.mp4"] = f"made on {outer.name}".encode()
+                        job.update(status="done", outputs=[f"renders/{job['id']}.mp4"])
 
-                    flight.enter()
                     threading.Thread(target=finish, daemon=True).start()
                     return self.answer(job)
                 if path.startswith("/api/jobs/") and path.endswith("/cancel"):
@@ -113,8 +116,9 @@ class Worker:
 
         self.http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.base = f"http://127.0.0.1:{self.http.server_address[1]}"
-        self.address = f"10.9.9.{self.http.server_address[1] % 250 + 1}"
-        OPEN.append(self)
+        # one address each: from the port it collided whenever two ports were 250 apart ("already in the list", CI)
+        number = next(ADDRESSES)
+        self.address = f"10.9.{number // 250 % 250}.{number % 250 + 1}"
         threading.Thread(target=self.http.serve_forever, daemon=True).start()
 
 
@@ -136,7 +140,6 @@ class Line:
 
 
 WORKERS: dict[str, Worker] = {}
-OPEN: list[Worker] = []  # every stand-in server, so teardown can close one a later fresh() dropped
 SENT = []  # rsync, stood in for: (address, folder)
 SHELLS = []  # every command ssh was asked to run
 
@@ -149,38 +152,11 @@ def stand_in_shell(address, command, timeout=30):
     return 0, "\n".join([f"host {worker.name}", "version 2.6.6", "pack yes", "install yes", "MemTotal: 127599612 kB", "MemAvailable: 118784000 kB", "app yes", "ours yes"])
 
 
-class InFlight:
-    """How many stand-in renders are inside their take at once, on this machine and on workers together."""
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.now = 0
-        self.most = 0
-
-    def enter(self) -> None:
-        with self.lock:
-            self.now += 1
-            self.most = max(self.most, self.now)
-
-    def leave(self) -> None:
-        with self.lock:
-            self.now -= 1
-
-    def reset(self) -> None:
-        with self.lock:
-            self.now = 0
-            self.most = 0
-
-
-flight = InFlight()
-
-
 def local_render(job, command, env, label=""):
     """This machine's render, stood in for: the clip appears at its path after a moment."""
 
     local_render.now += 1
     local_render.most = max(local_render.most, local_render.now)
-    flight.enter()
     try:
         time.sleep(TAKES)
         if job["status"] == "cancelled":
@@ -189,14 +165,9 @@ def local_render(job, command, env, label=""):
         return True
     finally:
         local_render.now -= 1
-        flight.leave()
 
 
 local_render.now = local_render.most = 0
-
-
-def memory_fits(*_args, **_kwargs):
-    return {"fits": True, "reason": ""}
 
 
 def tools_present():
@@ -205,56 +176,33 @@ def tools_present():
     return {"ffmpeg": True, "ffprobe": True}
 
 
-def install_stands():
-    """Stand in for ssh, rsync, the tunnel and this machine's render, and start the dispatch loop.
+def stand_in() -> dict:
+    """Puts the stand-ins in place and returns what they replaced. Only while this file's tests run: pytest imports
+    every test file before it runs any, and a stand-in left behind (memory_of above all) would answer other files' tests."""
 
-    Done from the module fixture (and from ``python3 tests/test_sparks.py``), never while the module is imported:
-    an import-time replacement of ``memory_of`` used to disable the guard for every later test.
-    """
-
-    import capabilities
-
-    capabilities.use("spark")
-    saved = (server.run, server.memory_of, server.media_tools, hub.shell, hub.copy, hub.dial, hub.spark, server.SPARK)
-    server.SPARK = True  # chosen Spark count and the live preset table; Linux alone is not this flag anymore
-    local_render.now = local_render.most = 0
-    flight.reset()
-    server.run = local_render
-    server.memory_of = memory_fits
-    server.media_tools = tools_present
-    hub.shell = stand_in_shell
-    hub.copy = lambda pack, address, folder, timeout=900: (SENT.append((address, folder)), (0, ""))[1]
-    hub.dial = lambda address: Line(WORKERS[address])
+    had = {"run": server.run, "memory_of": server.memory_of, "media_tools": server.media_tools, "shell": hub.shell, "copy": hub.copy, "dial": hub.dial, "poll": sparks.POLL, "spark": hub.spark, "server_spark": server.SPARK}
     hub.spark = True  # the scheduler is the same on any machine once ssh and the renders are stood in for
-    hub.stopped.clear()
-    hub.thread = threading.Thread(target=hub.loop, daemon=True, name="sparks-test-loop")
-    hub.thread.start()
-    return saved
-
-
-def remove_stands(saved) -> None:
-    import capabilities
-
-    capabilities.use(None)
-    hub.stop_loop()
-    for worker in list(OPEN):
-        try:
-            worker.http.shutdown()
-            worker.http.server_close()
-        except OSError:
-            pass
-    OPEN.clear()
-    if hub.thread is not None and hub.thread.is_alive():
-        hub.thread.join(timeout=5.0)  # a glance in flight has its own short timeout; don't restore real ssh under it
-    server.run, server.memory_of, server.media_tools, hub.shell, hub.copy, hub.dial, hub.spark, server.SPARK = saved
-    assert server.memory_of.__module__ == "server"
+    server.SPARK = True  # admission and the live preset table follow this flag; Linux alone is not a Spark
+    sparks.POLL = float(os.environ["STUDIO_SPARK_POLL"])  # read when sparks.py is imported, maybe by another test file first
+    server.run = local_render
+    server.memory_of = lambda *args, **kwargs: {"fits": True, "reason": ""}  # this machine's guard has its own tests
+    server.media_tools = tools_present
+    hub.shell, hub.copy = stand_in_shell, lambda pack, address, folder, timeout=900: (SENT.append((address, folder)), (0, ""))[1]
+    hub.dial = lambda address: Line(WORKERS[address])
+    if not getattr(stand_in, "looping", False):
+        stand_in.looping = True
+        threading.Thread(target=hub.loop, daemon=True).start()
+    return had
 
 
 @pytest.fixture(autouse=True, scope="module")
 def stand_ins():
-    saved = install_stands()
+    had = stand_in()
     yield
-    remove_stands(saved)
+    server.run, server.memory_of, server.media_tools = had["run"], had["memory_of"], had["media_tools"]
+    hub.shell, hub.copy, hub.dial, sparks.POLL = had["shell"], had["copy"], had["dial"], had["poll"]
+    hub.spark = had["spark"]
+    server.SPARK = had["server_spark"]
 
 
 def fresh(*workers: Worker) -> None:
@@ -269,7 +217,6 @@ def fresh(*workers: Worker) -> None:
         server.jobs.clear()
         server.order.clear()
     local_render.most = 0
-    flight.reset()
     for worker in workers:
         WORKERS[worker.address] = worker
         added = client.post("/api/sparks/workers", json={"address": worker.address})
@@ -303,7 +250,7 @@ def finished(ids, limit: float = 30) -> list[dict]:
 
 
 def test_an_address_is_a_host_and_nothing_ssh_reads_as_an_option():
-    assert sparks.address_of(" 10.100.10.5 ") == "10.100.10.5" and sparks.address_of("keys@spark-5") == "keys@spark-5"
+    assert sparks.address_of(" 10.0.10.5 ") == "10.0.10.5" and sparks.address_of("keys@spark-5") == "keys@spark-5"
     for bad in ("", "-oProxyCommand=x", "a b", "host;rm", "user@", "http://10.0.0.5:7870", "a/b"):
         try:
             sparks.address_of(bad)
@@ -378,7 +325,7 @@ def test_the_number_is_held_to_the_sparks_there_are():
     job = queue(5)
     assert job["sparks"]["chosen"] == 5 and job["sparks"]["available"] == 3 and job["sparks"]["used"] == 3
     finished([job["id"]])
-    assert client.get("/api/state").json()["sparks"] == {"supported": server.SPARK, "limit": 5}
+    assert client.get("/api/state").json()["sparks"] == {"supported": True, "limit": 5}  # a Spark or a Mac at the head
 
 
 def test_queued_clips_render_one_per_spark_and_come_back_here():
@@ -386,12 +333,14 @@ def test_queued_clips_render_one_per_spark_and_come_back_here():
     fresh(one, two)
     picture = server.HOME / "uploads" / "first.png"
     picture.write_bytes(b"a first frame")
+    started = time.time()
     ids = [queue(3, seed=10 + n, image="uploads/first.png", output=f"projects/p1/seg{n}.mp4" if n == 0 else None)["id"] for n in range(6)]
     done = finished(ids)
+    wall = time.time() - started
     assert all(job["status"] == "done" for job in done), [(job["status"], job["error"]) for job in done]
     assert {job["spark"] for job in done} == {hub.name, "spark-a", "spark-b"}
     assert one.most == 1 and two.most == 1 and local_render.most == 1  # one job on a Spark at a time
-    assert flight.most >= 2  # the machines overlapped; a wall-clock budget is not the evidence
+    assert wall < 6 * TAKES * 0.75, (wall, [(job["spark"], round(job["started"] - started, 2), round(job["finished"] - started, 2)) for job in done])  # three machines, not one after another
     made = hub.takes()
     for job in done:
         clip = server.HOME / job["outputs"][0]
@@ -483,6 +432,35 @@ def test_a_clip_a_workers_memory_guard_refuses_is_not_sent_and_a_failed_one_move
     assert any("memory floor" in m["why"] for job in done for m in job["moved"] or [])
 
 
+def test_a_clip_too_big_for_this_spark_is_taken_and_left_to_a_worker():
+    """A head whose memory is held (its brain, a picture model) still takes a clip a worker can render: the clip is held
+    to the worker's guard at submit time, and this Spark does not claim it while it does not fit here."""
+
+    one = Worker("spark-a")
+    fresh(one)
+    had = server.memory_of
+    server.memory_of = lambda *args, **kwargs: {"fits": False, "reason": "this machine has 43 GB for it"}
+    try:
+        refused = client.post("/api/jobs", json={"kind": "video", "title": "clip", "sparks": 1, "params": {
+            "prompt": "a walk", "preset": PRESET, "quality": QUALITY, "frames": 22, "shot_check": False}})
+        assert refused.status_code == 400 and "43 GB" in refused.text  # on this Spark alone it is refused as before
+        done = finished([queue(2)["id"] for _ in range(3)])
+        assert all(job["status"] == "done" and job["spark"] == "spark-a" for job in done) and len(one.jobs) == 3
+    finally:
+        server.memory_of = had
+
+
+def test_this_spark_leaves_a_clip_to_an_idle_worker():
+    """One clip at a time with a worker idle: the worker renders each one, this Spark (a head with its brain loaded,
+    pictures and Library actions to do) none."""
+
+    one = Worker("spark-a")
+    fresh(one)
+    for _ in range(3):
+        done = finished([queue(2)["id"]])
+        assert done[0]["status"] == "done" and done[0]["spark"] == "spark-a"
+
+
 def test_cancel_reaches_the_worker():
     one = Worker("spark-a")
     one.takes = 30
@@ -523,7 +501,7 @@ def test_a_clip_that_opens_on_another_waits_for_it():
     assert done[1]["started"] >= done[0]["finished"] - 0.01  # it waited
     assert done[2]["started"] < done[0]["finished"]  # and the one behind it did not
     if done[1]["spark"] == "spark-a":  # the frame was cut here and sent
-        assert any(data.startswith(b"jpg of ") for data in one.uploads.values())
+        assert any(b"jpg of " in data for data in one.uploads.values())  # the stand-in keeps the multipart body
 
 
 def test_a_worker_with_other_code_is_updated_before_it_is_used():
@@ -554,6 +532,44 @@ def test_a_worker_with_other_code_is_updated_before_it_is_used():
     assert client.delete(f"/api/sparks/workers/{one.address}").json()["listed"] == 1
 
 
+def test_automatic_updates_bring_a_worker_level_once():
+    one = Worker("spark-a")
+    one.code = {**hub.code(), "app/server.py": "an older one"}
+    had, copy = hub.follow, hub.copy
+    hub.follow = lambda: True
+    hub.copy = lambda pack, address, folder: (setattr(WORKERS[address], "code", None), copy(pack, address, folder))[1]  # the copy brings the code
+    try:
+        SENT.clear()
+        fresh(one)
+        # behind in its code only: sent this Spark's code and started, as “Update and start” does, without a person
+        settle(40)
+        assert SENT == [(one.address, hub.default_folder())]
+        until = time.time() + 40
+        while time.time() < until and client.get("/api/sparks").json()["workers"][0]["state"] != "ready":
+            time.sleep(0.05)
+        assert client.get("/api/sparks").json()["workers"][0]["state"] == "ready"
+        # the same version is never sent again, even when the worker falls behind again: a person decides then
+        one.code = {**hub.code(), "app/server.py": "an older one"}
+        SENT.clear()
+        client.post(f"/api/sparks/workers/{one.address}/check", json={})
+        settle()
+        assert client.get("/api/sparks").json()["workers"][0]["state"] == "update" and SENT == []
+    finally:
+        hub.follow, hub.copy = had, copy
+    # automatic updates turned off (they are on by default): a worker behind is left for a person's “Update and start”
+    had = hub.follow
+    hub.follow = lambda: False
+    try:
+        two = Worker("spark-b")
+        two.code = {**hub.code(), "app/server.py": "an older one"}
+        SENT.clear()
+        fresh(two)
+        assert client.get("/api/sparks").json()["workers"][0]["state"] == "update" and SENT == []
+        client.delete(f"/api/sparks/workers/{two.address}")
+    finally:
+        hub.follow = had
+
+
 def test_the_tunnel_ends_on_the_workers_own_loopback_and_is_closed():
     """The command a tunnel is: local 127.0.0.1 to the worker's 127.0.0.1:7870, key login only, nothing else."""
 
@@ -578,10 +594,10 @@ def test_the_tunnel_ends_on_the_workers_own_loopback_and_is_closed():
     sparks.subprocess.Popen = Process
     sparks.socket.create_connection = lambda *args, **kwargs: type("S", (), {"close": lambda self: None})()
     try:
-        tunnel = sparks.Tunnel("10.100.10.5")
+        tunnel = sparks.Tunnel("10.0.10.5")
         base = tunnel.open()
         command = seen["command"]
-        assert command[0] == "ssh" and "BatchMode=yes" in command and "-N" in command and command[-1] == "10.100.10.5"
+        assert command[0] == "ssh" and "BatchMode=yes" in command and "-N" in command and command[-1] == "10.0.10.5"
         forward = command[command.index("-L") + 1]
         assert forward == f"127.0.0.1:{tunnel.port}:127.0.0.1:7870" and base == f"http://127.0.0.1:{tunnel.port}"
         assert tunnel.alive()
@@ -596,18 +612,6 @@ def test_the_tunnel_ends_on_the_workers_own_loopback_and_is_closed():
     assert line.up
     hub.close()
     assert not line.up and hub.state(one.address)["tunnel"] is None
-
-
-def test_a_mac_shows_one_and_says_why():
-    mac = sparks.Hub(server.HOME, ROOT, False, {}, [], threading.Lock(), threading.Event(), lambda: {}, server.inside, lambda job, worker: None)
-    seen = mac.overview()
-    assert seen["supported"] is False and seen["available"] == 1 and seen["workers"] == [] and "DGX Sparks" in seen["note"]
-    said = mac.plan({"sparks": 5, "clips": 8})
-    assert said["used"] == 1 and said["chosen"] == 1 and "Mac" in said["says"]
-    job = {"kind": "video", "params": {}, "sparks": {"chosen": 5}}
-    assert mac.team(job) == []
-    mac.start()
-    assert not mac.started  # no loop, no ssh, on a Mac
 
 
 def test_nothing_here_runs_a_tool_without_a_time_limit():
@@ -632,19 +636,25 @@ globalThis.all = (node, tag, out = []) => { if (node && typeof node === "object"
 vm.runInThisContext(fs.readFileSync(process.argv[2], "utf8"));
 vm.runInThisContext(`(async () => { const out = {};
   const five = { supported: true, limit: 5, available: 3, listed: 3, default: 1, this: { name: "head", state: "ready", version: "2.6.6", memory_gb: 110, disk_gb: 70, can: { fasth3: true, image: true, ref2va: true, ref2va_turbo: true, ffmpeg: true, loras: 22 } },
-    workers: [{ address: "10.100.10.5", name: "gx10-5482", state: "ready", says: "idle", enabled: true, usable: true, guard: true, version: "2.6.6", memory_gb: 116.1, disk_gb: 40, can: { fasth3: true, loras: 0 }, why: "", working: "" },
-              { address: "10.100.10.3", name: "spark-0060", state: "down", says: "stopped answering", enabled: true, usable: false, unusable: "it stopped answering", why: "It stopped answering for 60 s while rendering", working: "", version: "2.6.6" }] };
+    workers: [{ address: "10.0.10.5", name: "spark-node5", state: "ready", says: "idle", enabled: true, usable: true, guard: true, version: "2.6.6", memory_gb: 116.1, disk_gb: 40, can: { fasth3: true, loras: 0 }, why: "", working: "" },
+              { address: "10.0.10.3", name: "spark-node3", state: "down", says: "stopped answering", enabled: true, usable: false, unusable: "it stopped answering", why: "It stopped answering for 60 s while rendering", working: "", version: "2.6.6" }] };
   out.counts = [spkCount(five, 1), spkCount(five, 3), spkCount(five, 5), spkCount({ supported: false }, 1)];
-  answers["/api/sparks"] = five; answers["/api/sparks/plan"] = { supported: true, count: "3 of 5 available", says: "One clip per Spark, 3 at a time: 8 clips on 3 Sparks.", mode: "parallel", without: [{ name: "spark-0060", why: "it stopped answering" }], estimate: { seconds: 80, one_spark: 320, faster: 4, note: "an estimate" } };
+  answers["/api/sparks"] = five; answers["/api/sparks/plan"] = { supported: true, count: "3 of 5 available", says: "One clip per Spark, 3 at a time: 8 clips on 3 Sparks.", mode: "parallel", without: [{ name: "spark-node3", why: "it stopped answering" }], estimate: { seconds: 80, one_spark: 320, faster: 4, note: "an estimate" } };
   await spkLoad(); spkSet(8);  /* above the limit: held to 5 */
   const pick = sparksPick({ kind: "video", clips: 8 }); await new Promise(r => setTimeout(r, 20));
   const buttons = all(pick, "button").filter(b => /^[1-9]$/.test(text(b)));
   out.buttons = buttons.map(b => text(b)); out.on = buttons.filter(b => b.attrs.class.includes(" on")).map(b => text(b)); out.far = buttons.filter(b => b.attrs.class.includes(" far")).map(b => text(b));
   out.says = text(pick); out.sent = calls.filter(c => c[0] === "/api/sparks/plan").map(c => c[1])[0]; out.kept = calls.some(c => c[0] === "/api/sparks" && c[1] && c[1].sparks === 5);
   tab = "Sparks"; out.page = text(viewSparks());
+  /* a Mac at the head: the same list, "this Mac", and where a Spark it cannot reach is reached through */
+  const macHead = { ...five, listed: 2, available: 2, head: "mac", via: "spark@192.168.1.10", this: { ...five.this, name: "Mac-Studio", kind: "Mac", guard: false, memory_gb: null },
+    workers: [{ ...five.workers[0], via: "spark@192.168.1.10" }] };
+  SPK.data = macHead; out.macCount = spkCount(macHead, 1); out.macPage = text(viewSparks()); out.macFields = all(viewSparks(), "input").length;
+  /* a controller: this machine is not a GPU slot; the count is workers */
   const ctrl = { supported: true, slot: false, role: "controller", limit: 5, available: 1, eligible: 1, listed: 1, default: 1, note: "This machine does not render H3.", this: { name: "linux", state: "ready", version: "3.0.1" }, workers: [five.workers[0]] };
   out.workerCount = spkCount(ctrl, 1); out.none = spkCount({ supported: true, slot: false, available: 0, eligible: 0 }, 1);
   SPK.data = ctrl; out.controller = text(viewSparks());
+  /* an older app on a Mac: one machine */
   SPK.data = { supported: false, limit: 5, available: 1, note: "Multi-Spark rendering is for DGX Sparks: on a Mac every job renders on this machine.", workers: [], this: {} }; spkSet(5);
   const mac = sparksPick(); out.mac = [SPK.n, all(mac, "button").map(b => text(b)), text(mac)];
   console.log(JSON.stringify(out)); })().catch(e => { console.error(e); process.exit(1); });`);
@@ -652,8 +662,7 @@ vm.runInThisContext(`(async () => { const out = {};
 
 
 def test_the_page_draws_the_chooser_and_the_list():
-    if not shutil.which("node"):
-        pytest.skip("node is not installed")
+    need_node()
     with tempfile.TemporaryDirectory() as scratch:
         (Path(scratch) / "harness.js").write_text(PAGE)
         done = subprocess.run(["node", str(Path(scratch) / "harness.js"), str(ROOT / "app/static/sparks.js")], capture_output=True, text=True, timeout=60)
@@ -661,17 +670,70 @@ def test_the_page_draws_the_chooser_and_the_list():
     out = json.loads(done.stdout.strip().splitlines()[-1])
     assert out["counts"] == ["this Spark alone", "3 of 3 available Sparks", "3 of 5 available", "this machine"]
     assert out["buttons"] == list("12345") and out["on"] == ["5"] and out["far"] == ["4", "5"]
-    assert "3 of 5 available" in out["says"] and "One clip per Spark" in out["says"] and "spark-0060 (it stopped answering)" in out["says"] and "Estimate" in out["says"]
+    assert "3 of 5 available" in out["says"] and "One clip per Spark" in out["says"] and "spark-node3 (it stopped answering)" in out["says"] and "Estimate" in out["says"]
     assert out["sent"] == {"sparks": 5, "kind": "video", "params": {}, "clips": 8, "seconds": 0} and out["kept"]
-    for words in ("gx10-5482", "10.100.10.5", "116.1 GB of memory available", "FastH3 clips", "no LoRAs", "It stopped answering for 60 s", "Update and start", "Add a Spark", "3 available"):
+    for words in ("spark-node5", "10.0.10.5", "116.1 GB of memory available", "FastH3 clips", "no LoRAs", "It stopped answering for 60 s", "Update and start", "Add a Spark", "3 available"):
         assert words in out["page"], words
     assert out["mac"][0] == 1 and out["mac"][1] == ["1"] and "DGX Sparks" in out["mac"][2]
+    # a Mac at the head: its own name, no memory guard of its own claimed, and the Through field
+    assert out["macCount"] == "this Mac alone" and "This Mac and 1 other" in out["macPage"] and "this Mac" in out["macPage"]
+    assert "10.0.10.5 through spark@192.168.1.10" in out["macPage"] and "Through" in out["macPage"] and "memory guard ·" not in out["macPage"].split("spark-node5")[0]
+    assert out["macFields"] == 3 + 1  # address, folder, through, and each worker's "use" box
     assert out["workerCount"] == "1 worker" and out["none"] == "no worker"
-    assert "not a GPU slot" in out["controller"] and "Does not render H3" in out["controller"] and "gx10-5482" in out["controller"]
+    assert "not a GPU slot" in out["controller"] and "Does not render H3" in out["controller"] and "spark-node5" in out["controller"]
     assert "this Spark counts as one" not in out["controller"]
     # every job the page queues carries the number
     page = (ROOT / "app/static/index.html").read_text()
     assert 'body = { sparks: SPK.n, ...body }' in page and '"Sparks"' in page and "Sparks: viewSparks" in page
+
+
+def test_two_saves_of_the_list_at_once_do_not_move_each_others_file():
+    """Sam Wasserman's fix (#74): every save writes through a file of its own, so saves from two threads at once all
+    land and the list is whole JSON after them."""
+
+    errors = []
+
+    def save(n):
+        try:
+            for _ in range(30):
+                hub.keep({"workers": [], "sparks": n})
+        except OSError as error:
+            errors.append(error)
+    threads = [threading.Thread(target=save, args=(n,)) for n in (1, 2, 3, 4)]
+    for one in threads:
+        one.start()
+    for one in threads:
+        one.join()
+    assert not errors and json.loads(hub.book.read_text())["sparks"] in (1, 2, 3, 4)
+    assert not list(hub.book.parent.glob("*.part"))
+    hub.keep({"workers": [], "sparks": 1})
+
+
+def test_ssh_uses_an_identity_only_when_both_files_exist():
+    assert sparks.ssh_base() == sparks.SSH
+    scratch = Path(tempfile.mkdtemp())
+    saved = {name: os.environ.get(name) for name in ("STUDIO_SSH_IDENTITY", "STUDIO_SSH_KNOWN_HOSTS")}
+    try:
+        os.environ["STUDIO_SSH_IDENTITY"] = str(scratch / "missing")
+        os.environ["STUDIO_SSH_KNOWN_HOSTS"] = str(scratch / "missing-hosts")
+        assert sparks.ssh_base() == sparks.SSH
+        key, hosts = scratch / "id", scratch / "known_hosts"
+        key.write_text("not-a-real-key\n")
+        hosts.write_text("example ssh-ed25519 AAAA\n")
+        os.environ["STUDIO_SSH_IDENTITY"] = str(key)
+        os.environ["STUDIO_SSH_KNOWN_HOSTS"] = str(hosts)
+        command = sparks.ssh_base()
+        assert command[0] == "ssh" and command[1:5] == ["-i", str(key), "-o", "IdentitiesOnly=yes"]
+        assert f"UserKnownHostsFile={hosts}" in command and "BatchMode=yes" in command
+        os.environ["STUDIO_SSH_IDENTITY"] = "-oProxyCommand"
+        assert sparks.ssh_base() == sparks.SSH
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 @contextlib.contextmanager
@@ -680,7 +742,7 @@ def as_controller():
 
     import capabilities
 
-    saved = (hub.spark, hub.controller, server.SPARK, server.memory_of)
+    saved = (hub.spark, hub.controller, server.SPARK, server.memory_of, capabilities._forced)
     calls = {"memory": 0}
 
     def refuse_local(*_args, **_kwargs):
@@ -695,25 +757,8 @@ def as_controller():
     try:
         yield calls
     finally:
-        hub.spark, hub.controller, server.SPARK, server.memory_of = saved
-        capabilities.use("spark")
-
-
-def test_ssh_uses_an_identity_only_when_both_files_exist(tmp_path, monkeypatch):
-    assert sparks.ssh_base() == sparks.SSH
-    monkeypatch.setenv("STUDIO_SSH_IDENTITY", str(tmp_path / "missing"))
-    monkeypatch.setenv("STUDIO_SSH_KNOWN_HOSTS", str(tmp_path / "missing-hosts"))
-    assert sparks.ssh_base() == sparks.SSH
-    key, hosts = tmp_path / "id", tmp_path / "known_hosts"
-    key.write_text("not-a-real-key\n")
-    hosts.write_text("example ssh-ed25519 AAAA\n")
-    monkeypatch.setenv("STUDIO_SSH_IDENTITY", str(key))
-    monkeypatch.setenv("STUDIO_SSH_KNOWN_HOSTS", str(hosts))
-    command = sparks.ssh_base()
-    assert command[0] == "ssh" and command[1:5] == ["-i", str(key), "-o", "IdentitiesOnly=yes"]
-    assert f"UserKnownHostsFile={hosts}" in command and "BatchMode=yes" in command
-    monkeypatch.setenv("STUDIO_SSH_IDENTITY", "-oProxyCommand")
-    assert sparks.ssh_base() == sparks.SSH
+        hub.spark, hub.controller, server.SPARK, server.memory_of = saved[:4]
+        capabilities.use(saved[4])
 
 
 def test_a_controller_queues_a_clip_the_worker_renders_and_this_machine_does_not():
@@ -809,15 +854,12 @@ def test_a_direct_local_video_on_a_controller_fails_before_the_script():
 
 
 if __name__ == "__main__":
-    saved = install_stands()
-    try:
-        for name, test in list(globals().items()):
-            if name.startswith("test_"):
-                try:
-                    test()
-                except pytest.skip.Exception as skipped:
-                    print("skipped", name, skipped)
-                    continue
-                print("ok", name)
-    finally:
-        remove_stands(saved)
+    stand_in()
+    for name, test in list(globals().items()):
+        if name.startswith("test_"):
+            try:
+                test()
+            except pytest.skip.Exception as skipped:
+                print("skipped", name, skipped)
+                continue
+            print("ok", name)

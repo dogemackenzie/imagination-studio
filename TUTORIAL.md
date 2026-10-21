@@ -25,8 +25,8 @@ Everything here was measured on one machine: a Mac Studio M5 Ultra with 256 GB.
 
 ```bash
 brew install python@3.11 uv ffmpeg
-git clone https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3.git
-cd keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3
+git clone https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman.git
+cd Imagination-Studio-by-keys-Wasserman
 bash oneshot-setup.sh --app
 ```
 
@@ -61,7 +61,7 @@ say otherwise.
 
 **Prefer to let an agent do it?** Give Claude Code (or another coding agent) this:
 
-> Clone https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3 and follow its AGENTS.md section "Install for a
+> Clone https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman and follow its AGENTS.md section "Install for a
 > person and build the one-click app". Tell me before any large download starts and when the app is ready.
 
 ## 3. The clickable app
@@ -79,119 +79,9 @@ any time to come back. Drag it to the Dock to keep it there.
 - It is a small launcher around the folder you cloned. If you move that folder, run `make-app.sh` again.
 - Stop it: `"$HOME/Applications/Wasserman Slate AI Studio.app/Contents/MacOS/TensorFoldStudio" stop`
 - Log: `~/Library/Logs/TensorFoldStudio.log`. Everything you make: `~/ImaginationStudio`.
-- It listens on this Mac only, and has no login. `HOST=0.0.0.0 bash scripts/make-app.sh` opens it to your network;
-  do that only on a network you trust.
-
-## 4. Make a video from text
-
-![Text to video with FastH3](samples/ui_create_fasth3.png)
-
-1. **The prompt goes to:** Video with sound. **The clip starts from:** Text only.
-2. **Video engine:** FastH3 for speed. **Passes:** 8 (4 is faster and a little softer; 20 is slower and is the one to
-   pick when the prompt has several distinct actions). The bar under the cards says which engine will run: FastH3
-   uses the native Zig engine on an M5, from text or from an image.
-3. **Resolution:** 480p or 720p (Native 1344x768, Wasserman Sharp 1376x768 and Custom are there too). Turn on **2x
-   upscale** for 1728x960 or 2560x1440 (Mac).
-4. **Length** and **Seed**, then describe the picture and what happens. *Next*. Leave **Text encoder** on *Regular*.
-5. Step 3: add spoken lines and the soundscape if you want them. Step 4: read the prompt. Step 5: **Queue this clip**.
-   On a DGX Spark step 5 also shows how much memory the clip needs and the **Sparks** row (section 12).
-
-On the M5 Ultra with the native engine a 5 second clip takes 43 s (4 passes), 66 s (8) or 129 s (20) at 480p, and
-about 200 s at 720p with 8 passes; a 10 second 720p clip takes about 6½ minutes. 2x adds about 10 s.
-
-If a clip leaves out part of the action, render it again at 20 passes. If the model reads something into the
-prompt that you did not ask for, describe what you want instead: the video model has no negative prompt, and the
-page lists anything a prompt forbids by name ("no weapons") before the job is queued, because a named thing can
-appear all the same.
-
-### 4.5 Wasserman Sharp Spec
-
-**Wasserman Sharp Spec**, at the top of the video settings, is Sam Wasserman's locked recipe in one click: 1376x768,
-FastH3 at 8 passes, seed 42, 8 or 10 seconds, one pass, no upscale. After the render his **QA gate** checks the
-clip: the spoken line by its transcript, then three frames by a vision model (Claude Code, Codex or a local model,
-under your own sign-in). A clip that fails is made once more at the next seed; the job card shows each take's result
-and a contact sheet. The same button is on the Production board and in a Slate film's Bible, where it sets every
-segment or shot.
-
-## 5. Make an image only
-
-![Image only](samples/ui_create_image.png)
-
-**The prompt goes to:** Image only. Describe it, pick the **Picture model**, a size and how many, **Make image**.
-*Download* saves one; *animate this* makes it the first frame of a video.
-
-The picture models offered are the ones installed. Times are per picture at 1344x768 with the model loaded, from a
-128-picture test (the README's *Which picture model to use*):
-
-| Model | Mac Studio M5 Ultra | DGX Spark | Use it for |
-|---|---|---|---|
-| Qwen 2.1 Turbo, 8 steps (every install) | 4.7 s | 8.6 s | drafts and scouts |
-| FLUX3-K Fast, 16 steps (`--flux3`) | 9.8 s | 10.5 s | the everyday choice: layout, hands, busy scenes |
-| Qwen 2.1 Full, 40 steps (`--image-edit`) | 43.3 s | 80.1 s | faces, portraits, posters, character sheets |
-| FLUX3-K Full, 50 steps (`--flux3`) | 59.9 s | 58.7 s | final frames of complex scenes, illustration, hands |
-
-FLUX3-K first writes a full scene description from your prompt (5 s on the Mac, about 12 s on a Spark, once per
-prompt), so a short prompt is enough. The same choice is offered for scouts and for a last frame.
-
-## 5.5 Edit a picture
-
-![Edit a picture: the camera ring](samples/ui_edit_camera.png)
-
-**The prompt goes to:** Edit a picture. A picture model re-draws a picture you give it: Qwen-Image-2.1, or FLUX3-K
-Fast or Full where installed (**Picture model** at the top). Image LoRAs, the camera ring and the 40-step choice are
-Qwen's; FLUX3-K edits from words and pictures.
-
-1. **The picture.** Upload one, press *Pick from the Library*, or take a frame of a Library clip (first, last, or the
-   frame at a time). In the Library, **edit** on a picture opens this step on it.
-2. **What changes.** *Change it in words*: describe the picture you want ("The same statue at night under a full moon,
-   wet paving stones, a lantern on the wall behind it"). What you leave out is meant to stay.
-   *Further pictures the prompt can draw on*: up to nine more. Your picture is image 1 and is the one edited; the
-   others are image 2, image 3 and so on, in the order added ("the man of image 2 stands in the room of image 1").
-   *Move the camera* (Qwen, with the Multiple Angles LoRA from the hub's Fun group): click directions on the ring, front at
-   the top, 30° a step. Choose a height first, tick *Close-up* for a tighter frame, or take a ready set such as *Five
-   views around*. Each angle is one picture.
-3. **Make it.** One edit, model load and all: Qwen 10 s, FLUX3-K Fast 37 s, FLUX3-K Full 240 s on an M5 Ultra (24,
-   37 and 139 s on a DGX Spark), so on a Mac use Fast for FLUX3-K edits. Under each result: *first frame*
-   opens a clip on it, *last frame* ends a clip on it, *edit again* feeds it back in.
-
-A side or back view often comes back on a plain studio background: the LoRA was trained on single objects and
-characters. If a result copies your picture instead of moving the camera, lower the LoRA's strength towards 0.8.
-
-## 6. Image first, then video
-
-![Qwen scout to video](samples/ui_create_qwen_h3.png)
-
-**The clip starts from:** A scout image. In step 2, pick the picture model, make several candidates and click the
-one you like; the video opens on exactly that picture. *Your own image* uploads one instead, and *Or continue from a
-clip in the Library* takes a clip's last frame. Either engine works. With MiniMax H3 the standard quality (Turbo 5
-passes, sound made again by the base model) is the one judged best by ear.
-
-**A last frame.** Under the first frame, step 2 has *Last frame*: the clip ends on that picture. Upload one, pick one
-from the Library, take a frame of a clip, press *Same as the first frame* for a loop or an orbit, or make one from a
-prompt. A last frame alone works too, on a clip from text. Give both pictures the clip's shape, and say in *What
-happens* how the first becomes the last.
-
-**References** (`--ref2va`) are the other way to start: up to nine pictures of who or what must look the same, plus
-up to three reference videos and three audio clips, in a scene your words describe. A Voice take can be one of the
-audio clips (section 10). The app's *Tutorial → Create → References* lesson goes through it.
-
-## 7. Make a long video
-
-![A 30 minute chain](samples/ui_create_long.png)
-
-Pick a **Length** from 30 s to 30 min. The model makes 15 s at a time, so the studio renders clip after clip, each
-opening on the last frame of the one before, and joins them. Write **story beats**, one line per 15 s, to say what
-happens in each part.
-
-Be realistic: 30 minutes is roughly 7 to 11 hours of rendering at 480p (an estimate; the longest chain checked by
-eye is 18 s), the look drifts over many clips, and sound does not carry across joins. Each clip waits for the one
-before, so a long video renders on one machine whatever the Sparks setting says. For a real story, plan it in
-**Production** instead.
-
-When it is done, **Lay a song under it** opens the Music tab with the video chosen (section 11).
-
-## 8. Production, Editor, Library, Tutorial
-
+- It listens on this Mac only and asks nothing there. `HOST=0.0.0.0 bash scripts/make-app.sh` opens it to your
+  network, and another device then signs in once with the access key (Settings → Access key shows a QR code); do
+  that only on a network you trust.
 - **Production:** two ways to plan a film.
   - The **Production board**: a project of segments, each with its own scene, action, line and length. A segment can
     continue from the last frame of the one before. One button renders all that are not done, and the board has the
@@ -440,7 +330,7 @@ valid for a clip where the check picked a different fighter than in the source.
 ## 10. Voice: speech with Fish Audio Drama 3
 
 The **Voice** tab turns text into speech with Fish Audio Drama 3, on this machine, through TensorFold's port: MLX on a
-Mac (`bash oneshot-setup.sh --voice`), native CUDA on a DGX Spark (built by hand; the setup prints the steps). Nothing
+Mac (`bash oneshot-setup.sh --voice`), native CUDA on a DGX Spark (`bash oneshot-setup-spark.sh --voice`). Nothing
 is sent to Fish Audio. **Built with Fish Audio.**
 
 1. **What is said.** Type the words. Speaker tags switch voices, `<|speaker:0|>` to `<|speaker:15|>`, one turn on each
@@ -547,6 +437,35 @@ bash scripts/image.sh "a prompt" out.png                         # image only
 bash scripts/studio.sh "the picture" "what happens" out.mp4      # Qwen image, then video (ENGINE=fasth3 for FastH3)
 FIRST_FRAME=photo.jpg bash scripts/video.sh "what happens" out.mp4
 ```
+
+## 15. Your phone and other devices: the access key
+
+On the computer running the studio there is nothing to do: a browser there (opened as `localhost`, or by the
+computer's own network address or `.local` name) never asks for a key, and updates work as always. The access key is for reaching the studio from anywhere else: a phone, a tablet,
+another computer. Each device signs in once and stays signed in.
+
+**Sign in your phone, step by step**
+
+1. Install [Tailscale](https://tailscale.com) on the computer and on the phone, signed in to the same account (free for
+   personal use).
+2. On the computer, once, in a terminal: `tailscale serve --bg 7870`. Only your own devices can open that address,
+   over HTTPS.
+3. On the computer, open **Settings → Access key**. It shows a QR code.
+4. Point the phone's camera at the QR code and open the link. The studio opens on the phone, already signed in.
+5. *Share → Add to Home Screen* (iPhone) or *⋮ → Add to Home screen* (Android). The studio then opens full screen from
+   its own icon, still signed in.
+
+**Without a camera.** In **Settings → Access key** press **Show** or **Copy**, and type the key on the device when the
+studio asks ("Sign this device in"). In a terminal on the computer, `bash scripts/studio-key.sh` prints it too. The key
+is a password to your studio: send it only to your own devices.
+
+**A lost phone, or a key that got out.** **Settings → Access key → Make a new key.** Every other device is signed out at
+once; the browser you pressed it in stays signed in. Sign your devices in again with the new QR code.
+
+**Another machine's studio.** Slate's *Import a take rendered on another machine* asks for that studio's key beside its
+address: copy it from that machine's Settings → Access key.
+
+The same steps are in the app: **Learn → Your phone and other devices**.
 
 ## If something goes wrong
 

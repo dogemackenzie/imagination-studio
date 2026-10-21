@@ -13,7 +13,8 @@ The Agent room keeps conversations: a thread ($STUDIO_HOME/.studio-agents/thread
 {role: user|agent|tool, text, attachments, at}, and each user turn is one agent task run in the thread's own working
 folder, $STUDIO_HOME/agent/<thread id>. The next turn continues the harness's own session: Claude Code with
 `--session-id` then `--resume`, Codex with `codex exec resume <thread id>`, Hermes with `chat --continue <name>` then
-`--resume <session id>`. Gemini, Grok and a local model have no session the Studio can name: they get the thread's
+`--resume <session id>`. A local model whose server takes tool calls is run by the Studio's own loop with the same MCP
+tools (drive, below). Gemini, Grok and a local model have no session the Studio can name: they get the thread's
 recent turns ahead of the message. Only the session's id is kept, never a secret. An agent that ends its answer on a
 question (or the `[question]` marker its instructions ask for) is waiting on the user: the page shows a question card.
 
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import atexit
 import concurrent.futures
+import difflib
 import json
 import os
 import queue
@@ -47,6 +49,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
@@ -55,6 +58,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Request
 
 import slate  # the brain's local server lookup and CLI folders, beside this file
+import bolt  # NVIDIA Nemotron 3.5 Bolt as the Studio's own engine: the local brain when no other server is set
 import updates  # may_manage: a published container's peer is the bridge, not 127.0.0.1
 
 HOME: Path | None = None
@@ -92,6 +96,8 @@ CLIS = {
 }
 BACKENDS = (*CLIS, "local")
 HARNESSES = ("claude", "codex")  # run with the Studio's MCP tools; every other brain is a conversation in the Agent room
+# ... and "local", when its server takes OpenAI tool calls (local_tools): the Studio runs that loop itself (drive)
+AGENTS = (*HARNESSES, "local")  # what the Agent room's first choice may be
 SESSIONS = ("claude", "codex", "hermes")  # keep a session of their own from one turn to the next
 # local models the Studio calls by their own name, known from the model names the server lists: (pattern, name)
 LOCAL_NAMES = ((re.compile(r"nemotron[-_. ]*3[-_. ]*5[-_. ]*bolt", re.I), "NVIDIA Nemotron 3.5 Bolt"),)
@@ -116,16 +122,18 @@ SYSTEM = ("You are working for a filmmaker inside Imagination Studio. Save every
           "summary that lists the files you made.")
 
 # what the Agent room adds: a conversation that may need the user, and the Studio's own tools by name
-STUDIO_TOOLS = ("studio_state (call first), list_library, queue_still, queue_clip, queue_voice, queue_song, job_status, "
-                "list_jobs, list_projects, add_to_timeline, export_timeline and upload_file")
+STUDIO_TOOLS = ("studio_state (call first), list_library, queue_still, queue_edit, queue_clip (references for Ref2VA), queue_long, "
+                "queue_voice, queue_song, queue_sound (sfx, foley), queue_soundtrack, check_clip (the QA gate), motion_previs, "
+                "job_status, wait_for_jobs, cancel_job, list_jobs, list_projects, add_to_timeline, export_timeline, upload_file, "
+                "and Slate's slate_films, slate_film, slate_new_film, slate_add_scene, slate_add_shot and slate_render_shot")
 ROOM = (" This is a conversation with the filmmaker in the Studio's Agent room, and it continues over several turns."
         "{tools} When anything is unclear or a choice matters (length, look, voice, which take), ask the filmmaker one "
         "clear question and stop: write [question] on its own line, then the question, then up to four short choices "
         "as lines starting with '- ' where there are obvious ones. Otherwise do the work, and finish with a short plain "
         "summary that lists the files you made by their Library paths.")
 ROOM_TOOLS = (" The Studio's tools ({names}) make stills, clips with sound, voice lines and songs on this machine's GPU, "
-              "one job at a time: queue what is asked for, follow each job with job_status until it is done, and name its "
-              "outputs.")
+              "one job at a time: queue what is asked for, follow the jobs with wait_for_jobs (or job_status) until they are "
+              "done, and name their outputs.")
 CHAT = ("You are the filmmaker's assistant inside Imagination Studio, a local AI film studio (stills, clips with sound, "
         "voice lines, songs, a timeline). In this conversation you cannot run the Studio's tools: help plan (prompts, shot "
         "lists, lines, lyrics), and when the filmmaker wants something made, give the exact prompt to paste into the "
@@ -137,6 +145,26 @@ LOST_SESSION = re.compile(r"no conversation found|no session found|session[^\n]{
                           r"thread[^\n]{0,40}not found|no rollout found", re.I)
 THREAD_ID = re.compile(r"th-[0-9]{4}-[0-9]{6}-[0-9a-f]{6}")
 PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+# the local harness (drive): the Studio runs the agent loop itself against the local OpenAI-compatible server, with the
+# same MCP servers Claude Code and Codex get, and nothing else: no shell, no file tools, paths held to the turn's folder
+LOCAL_DRIVE = (" You run the Studio's tools yourself, through function calls: call one or more, read what they return, and "
+               "carry on until everything the filmmaker asked for is made, or queued and finished. Never describe a call instead "
+               "of making it, and never stop at a plan. Use the ids the tools return (a film's, a scene's, a shot's, a job's), "
+               "never made-up ones, and the names the filmmaker gives. Do what was asked and nothing more: queue a still, a "
+               "clip, a voice line or a song only when the filmmaker asks for one. A still or a clip takes minutes: after "
+               "queueing, call wait_for_jobs with the job ids (again while they are still running), then name each output by "
+               "its Library path. A job that fails is reported with its reason, not queued again unchanged.")
+# the local harness's method (see "the local harness's method" below): the parts it runs, by name; STUDIO_LOCAL_AGENT
+# replaces the list (comma separated, "baseline" for none of them) so the agent benchmark can measure each one
+LOCAL_METHOD = ("rules", "hints", "compact", "report", "temp=0")
+LOCAL_STEPS = 40  # the local model's answers in one turn (each may call several tools)
+LOCAL_ANSWER_TIMEOUT = 600  # one answer from the local server
+LOCAL_TOOL_TIMEOUT = 15 * 60  # one tool call (wait_for_jobs waits up to 10 minutes)
+LOCAL_RESULT_CHARS = 6000  # what the model reads of one tool's answer
+TOOLS_TTL = 10 * 60  # whether a local server takes tool calls, asked again after this
+# an answer that says it will act, in a turn that has not called a tool yet ("Let me know" is not one)
+PROMISE = re.compile(r"\b(?:I(?:'|’| wi)ll|let me(?! know)|I am going to|I'm going to|next,? I|now I)\b", re.I)
+PATHISH = re.compile(r"path|file|folder|dir|output|frame|image|picture", re.I)
 HISTORY_CHARS = 8000  # the recent turns a brain without a session of its own reads ahead of the message
 STEP_LIMIT = 200
 TEXT_LIMIT = 20000
@@ -144,6 +172,7 @@ TEXT_LIMIT = 20000
 lock = threading.RLock()
 probes: dict = {}  # (host or "", cli) -> (monotonic time, found)
 answering: dict = {}  # local server address -> (monotonic time, whether it answered), for the automatic default
+tool_checks: dict = {}  # (local server, model) -> (monotonic time, whether it takes tool calls)
 codex_checks: dict = {}  # codex path -> (monotonic time, its mtime, why it cannot start or None)
 versions: dict = {}  # CLI path -> (its mtime, its version as numbers)
 CODEX_BROKEN = re.compile(r"Error loading config|unknown variant|unknown field", re.I)
@@ -196,19 +225,25 @@ def chosen_default(saved: dict) -> str:
     return brain if brain in BACKENDS else ""
 
 
-def local_answers(endpoint: str) -> bool:
-    """Whether the local model server at this address answers, asked at most once a minute (2 s at most)."""
+def local_server(endpoint: str) -> tuple[str | None, list[str]]:
+    """slate.find_local (the server at this address, or "" for one found on this computer), asked at most once a minute."""
 
-    if not endpoint:
-        return False
+    if bolt.serves(endpoint):  # the Studio's own engine: there whether loaded or not, started by the first request
+        return bolt.ENDPOINT, [bolt.SERVED]
     with lock:
         seen = answering.get(endpoint)
     if seen and time.monotonic() - seen[0] < PROBE_TTL:
-        return seen[1]
-    up = bool(slate.find_local(endpoint)[0])
+        return seen[2], seen[3]
+    base, models = slate.find_local(endpoint)
     with lock:
-        answering[endpoint] = (time.monotonic(), up)
-    return up
+        answering[endpoint] = (time.monotonic(), bool(base), base, models)
+    return base, models
+
+
+def local_answers(endpoint: str) -> bool:
+    """Whether the local model server at this address answers, asked at most once a minute (2 s at most)."""
+
+    return (bool(endpoint) or bolt.serves(endpoint)) and bool(local_server(endpoint)[0])
 
 
 def automatic_default(endpoint: str) -> str:
@@ -219,20 +254,112 @@ def automatic_default(endpoint: str) -> str:
     return "local" if local_answers(endpoint) else "claude"
 
 
+def server_root(base: str) -> str:
+    return base[:-3] if base.endswith("/v1") else base
+
+
+def post_json(url: str, body: dict, timeout: float) -> dict:
+    request = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as answer:
+        return json.loads(answer.read())
+
+
+def props_tools(base: str) -> bool | None:
+    """What llama.cpp's /props says of its chat template (whether it takes tool calls), or None from another server."""
+
+    try:
+        with urllib.request.urlopen(server_root(base) + "/props", timeout=3) as answer:
+            caps = json.loads(answer.read()).get("chat_template_caps")
+        if isinstance(caps, dict) and "supports_tool_calls" in caps:
+            return bool(caps["supports_tool_calls"])
+    except Exception:  # not llama.cpp, or an older one
+        pass
+    return None
+
+
+def probe_tools(base: str, model: str) -> bool:
+    """Whether a server that has no /props takes tool calls: it is offered one tool in a small call and must call it."""
+
+    try:
+        answer = post_json(base + "/chat/completions", {"model": model, "temperature": 0, "max_tokens": 64, "messages": [
+            {"role": "user", "content": "Call the ready tool."}], "tools": [{"type": "function", "function": {
+                "name": "ready", "description": "Say that you are ready.", "parameters": {"type": "object", "properties": {}}}}]}, 45)
+        return bool(answer["choices"][0]["message"].get("tool_calls"))
+    except Exception:
+        return False
+
+
+def tools_of(base: str, model: str, wait: bool = True) -> bool:
+    """Whether the local server takes tool calls, kept for TOOLS_TTL; STUDIO_LOCAL_TOOLS=1 or 0 says it instead. A server
+    without /props is asked with a small call (probe_tools), which may take a while on a busy server: without ``wait``
+    (a page's look, the automatic agent) that runs aside and the answer is False until it is known."""
+
+    forced = os.environ.get("STUDIO_LOCAL_TOOLS", "").strip()
+    if forced in ("0", "1"):
+        return forced == "1"
+    if base == bolt.ENDPOINT:  # the Studio's engine says so itself, without loading it to ask
+        return bool(getattr(bolt.engine(), "tools", False))
+    key = (base, model)
+    with lock:
+        seen = tool_checks.get(key)
+    if seen and seen[1] is not None and time.monotonic() - seen[0] < TOOLS_TTL:
+        return seen[1]
+    said = props_tools(base)
+    if said is None and not wait:
+        with lock:
+            if key not in tool_checks or tool_checks[key][1] is not None:  # one look aside at a time
+                tool_checks[key] = (time.monotonic(), None)
+                threading.Thread(target=lambda: tools_of(base, model), daemon=True).start()
+        return False
+    ok = said if said is not None else probe_tools(base, model)
+    with lock:
+        tool_checks[key] = (time.monotonic(), ok)
+    return ok
+
+
+def local_tools(endpoint: str, model: str = "", wait: bool = True) -> bool:
+    """Whether the local model server (the one set, else one found on this computer) answers and takes tool calls: then
+    "local" is a harness, run by the Studio's own loop (drive) with the Studio's MCP tools."""
+
+    base, models = local_server(endpoint)
+    return bool(base) and tools_of(base, answering_model(models, model), wait)
+
+
+def is_harness(backend: str, config: dict | None = None) -> bool:
+    """Whether this brain runs with the Studio's MCP tools in the Agent room."""
+
+    if backend in HARNESSES:
+        return True
+    if backend != "local":
+        return False
+    config = config or saved_settings()
+    return local_tools(config["local_endpoint"], config["local_model"])
+
+
+def automatic_agent(default: str, endpoint: str, model: str) -> str:
+    """The Agent room's first choice when nobody chose one: the local model, when it is the brain (chosen, or the
+    automatic default because its server answers) and its server takes tool calls; else none (the page picks)."""
+
+    return "local" if default == "local" and local_tools(endpoint, model, wait=False) else ""
+
+
 def saved_settings() -> dict:
     """The saved settings; a setting never saved takes the environment's value (``environment_defaults``), and a
-    default nobody chose is the automatic one (``automatic_default``)."""
+    default nobody chose is the automatic one (``automatic_default``, ``automatic_agent``)."""
 
     saved = read_json(folder() / "settings.json" if folder() else None, {})
     remote = saved.get("remote") if isinstance(saved.get("remote"), dict) else {}
     env = environment_defaults()
     endpoint = str(saved.get("local_endpoint") or "") if "local_endpoint" in saved else env["local_endpoint"]
-    return {"default": chosen_default(saved) or automatic_default(endpoint),
+    model = str(saved.get("local_model") or "") if "local_model" in saved else env["local_model"]
+    default = chosen_default(saved) or automatic_default(endpoint)
+    return {"default": default,
             "remote": {"host": remote.get("host") or "", "backends": [b for b in remote.get("backends") or [] if b in CLIS],
                        "studio_host": remote.get("studio_host") or ""},
             "local_endpoint": endpoint,
-            "local_model": str(saved.get("local_model") or "") if "local_model" in saved else env["local_model"],
-            "agent": saved["agent"] if saved.get("agent") in HARNESSES else ""}  # the Agent room's first choice
+            "local_model": model,
+            # the Agent room's first choice
+            "agent": saved["agent"] if saved.get("agent") in AGENTS else automatic_agent(default, endpoint, model)}
 
 
 def default_brain() -> dict:
@@ -253,6 +380,7 @@ def save_settings(body: dict) -> dict:
     now = saved_settings()
     saved = read_json(folder() / "settings.json" if folder() else None, {})
     chosen = saved["default"] if saved.get("default") in BACKENDS else ""  # only a brain a person picked is kept
+    agent = saved["agent"] if saved.get("agent") in AGENTS else ""  # nor is an automatic agent written down
     if "default" in body:
         if body["default"] not in (*BACKENDS, ""):
             raise HTTPException(400, "default is one of " + ", ".join(BACKENDS))
@@ -268,9 +396,9 @@ def save_settings(body: dict) -> dict:
                          "backends": list(dict.fromkeys(backends)),
                          "studio_host": valid_host(remote.get("studio_host", now["remote"]["studio_host"]), "remote.studio_host")}
     if "agent" in body:
-        if body["agent"] not in (*HARNESSES, ""):
-            raise HTTPException(400, "agent is one of " + ", ".join(HARNESSES))
-        now["agent"] = body["agent"]
+        if body["agent"] not in (*AGENTS, ""):
+            raise HTTPException(400, "agent is one of " + ", ".join(AGENTS))
+        agent = body["agent"]
     if "local_endpoint" in body:
         value = str(body["local_endpoint"] or "").strip()
         if value and (len(value) > 300 or not re.fullmatch(r"(?:https?://)?[A-Za-z0-9.\-\[\]:]+(?:/[A-Za-z0-9._~/-]*)?", value)):
@@ -284,9 +412,12 @@ def save_settings(body: dict) -> dict:
     with lock:
         probes.clear()
         answering.clear()
+        tool_checks.clear()
     now["default"] = chosen_default({"default": chosen}) or automatic_default(now["local_endpoint"])
+    now["agent"] = agent or automatic_agent(now["default"], now["local_endpoint"], now["local_model"])
     if folder():  # a default nobody picked is not written down, so it stays automatic
-        write_json(folder() / "settings.json", {**now, "default": chosen} if chosen else {k: v for k, v in now.items() if k != "default"})
+        written = {**now, "agent": agent}
+        write_json(folder() / "settings.json", {**written, "default": chosen} if chosen else {k: v for k, v in written.items() if k != "default"})
     return now
 
 
@@ -296,15 +427,23 @@ def default_automatic() -> bool:
     return not chosen_default(read_json(folder() / "settings.json" if folder() else None, {}))
 
 
-def local_label(models: list[str], model: str = "") -> str:
-    """The local brain's name on the pages: the model it answers with, when the Studio knows that model, e.g.
-    "NVIDIA Nemotron 3.5 Bolt (local)"; otherwise "Local model server"."""
+def answering_model(models: list[str], model: str = "") -> str:
+    """The model a local server answers with: the one set in Settings when the server lists it, else the first it lists
+    (a name set for a model the server no longer runs is not asked for); "" when it lists none."""
 
-    answers_with = model if model in (models or []) else (models or [""])[0]
+    return model if model in (models or []) else (models or [model or ""])[0]
+
+
+def local_label(models: list[str], model: str = "") -> str:
+    """The local brain's name on the pages: always the model the server actually answers with, by its own name when the
+    Studio knows it ("NVIDIA Nemotron 3.5 Bolt (local)"), else as the server lists it ("DeepSeek-V4.1-Flash (local)");
+    "Local model server" only when the server lists no model."""
+
+    answers_with = answering_model(models, model) if models else ""
     for pattern, name in LOCAL_NAMES:
-        if pattern.search(answers_with or ""):
+        if pattern.search(answers_with):
             return name + " (local)"
-    return "Local model server"
+    return answers_with + " (local)" if answers_with else "Local model server"
 
 
 def where_of(backend: str, config: dict | None = None) -> str:
@@ -344,6 +483,10 @@ def search_path() -> str:
 def child_env(extra: dict | None = None) -> dict:
     env = {**os.environ, "PATH": search_path(), **(extra or {})}
     env.pop("CLAUDECODE", None)  # a Studio started from inside a Claude Code session must not look like a nested one
+    # PREFIX is the Studio's runtime folder, and npm reads PREFIX as its global prefix: an Install from Connect went into
+    # $PREFIX/bin, where no one looks. The CLIs and their installers get npm's own prefix (or ~/.npm-global) instead.
+    if "PREFIX" not in (extra or {}):
+        env.pop("PREFIX", None)
     return env
 
 
@@ -506,7 +649,7 @@ def detect(config: dict | None = None, endpoint: str = "") -> list[dict]:
         for name in CLIS:
             if name not in remote and ("", name) not in cached:
                 jobs[("", name)] = pool.submit(look_here, name)
-        jobs[("local", "")] = pool.submit(slate.find_local, endpoint or config["local_endpoint"])
+        jobs[("local", "")] = pool.submit(look_local, endpoint or config["local_endpoint"], config["local_model"])
         done, _ = concurrent.futures.wait(jobs.values(), timeout=10)
         fresh = {key: job.result() for key, job in jobs.items() if job in done}
     finally:
@@ -516,7 +659,7 @@ def detect(config: dict | None = None, endpoint: str = "") -> list[dict]:
             if key[0] != "local":
                 probes[key] = (time.monotonic(), value)
             elif not endpoint and config["local_endpoint"]:  # what the set server said is news for the automatic default
-                answering[config["local_endpoint"]] = (time.monotonic(), bool(value[0]))
+                answering[config["local_endpoint"]] = (time.monotonic(), bool(value[0]), value[0], value[1])
     seen = {**cached, **fresh}
     out = []
     for name, (label, _, signin) in CLIS.items():
@@ -547,11 +690,27 @@ def detect(config: dict | None = None, endpoint: str = "") -> list[dict]:
         item.update(signin_flow=recipe_of(name, item["where"] != "here")["flow"], signin_command=terminal_line(name),
                     signin_note=SIGNIN_NOTES.get(name))
         out.append(item)
-    base, models = seen.get(("local", "")) or (None, [])
-    label = local_label(models, config["local_model"]) if base else "Local model server"
-    out.append({"id": "local", "label": label, "named": label != "Local model server", "kind": "http", "found": bool(base), "harness": False, "session": False,
-                "endpoint": base or slate.endpoint_of(endpoint or config["local_endpoint"]) or None, "models": models or []})
+    base, models, tools_ = seen.get(("local", "")) or (None, [], False)
+    engine = base == bolt.ENDPOINT
+    label = bolt.LABEL if engine else local_label(models, config["local_model"]) if base else "Local model server"
+    running = answering_model(models, config["local_model"]) if base and models else ""
+    # a harness when its server takes tool calls: the Studio runs its loop with the Studio's tools (drive)
+    out.append({"id": "local", "label": label, "named": label != "Local model server", "kind": "http", "found": bool(base),
+                "harness": bool(base and tools_), "session": False,
+                "endpoint": base or slate.endpoint_of(endpoint or config["local_endpoint"]) or None, "models": models or [],
+                # what it really runs, and the name set in Settings when the server no longer lists it
+                "model": running or None, "set_model": config["local_model"] or None,
+                "set_missing": bool(base and models and config["local_model"] and config["local_model"] not in models),
+                # NVIDIA Nemotron 3.5 Bolt as the Studio's engine (bolt.py): its state, backend and memory, Load / Unload
+                "engine": bolt.state() if engine else None})
     return out
+
+
+def look_local(endpoint: str, model: str) -> tuple[str | None, list[str], bool]:
+    """(the local server's address, the models it lists, whether it takes tool calls)."""
+
+    base, models = slate.find_local(endpoint)
+    return base, models, bool(base) and tools_of(base, answering_model(models, model), wait=False)
 
 
 def found(name: str) -> bool:
@@ -616,6 +775,38 @@ def codex_events(stdout: str) -> tuple[list[dict], str, str]:
     return events, reply, error
 
 
+HERMES_STREAMS: dict = {}  # (command, host) -> whether `hermes chat` takes --format stream-json
+HERMES_NOISE = re.compile(r"^\s*(?:\u26a0|warning:)|security scanner", re.I)  # what -Q prints that is not the answer
+
+
+def hermes_streams(tool: str, host: str) -> bool:
+    """Whether this Hermes streams JSON events (`chat --format stream-json`). Hermes v0.21 and others before it do not:
+    the Studio then runs `chat -Q`, whose standard output is the answer and whose standard error names the session."""
+
+    key = (tool, host)
+    if key not in HERMES_STREAMS:
+        try:
+            said = run_cli([tool, *profile_args(), "chat", "--help"], "", host, 30)
+            text = said.stdout + said.stderr
+            # only a help that lists chat's options without --format says no: anything else keeps the documented way
+            HERMES_STREAMS[key] = "--format" in text or not re.search(r"usage:\s*hermes chat", text)
+        except (OSError, subprocess.TimeoutExpired):
+            HERMES_STREAMS[key] = True  # unknown: the documented way, whose error says why if it is refused
+    return HERMES_STREAMS[key]
+
+
+def hermes_quiet_reply(stdout: str) -> str:
+    """The answer in what `hermes chat -Q` printed: its notices (a missing security scanner) left out."""
+
+    return "\n".join(line.rstrip("\r") for line in stdout.replace("\r\n", "\n").split("\n")
+                     if line.strip() and not HERMES_NOISE.search(line)).strip()
+
+
+def hermes_quiet_session(stderr: str) -> str:
+    found = re.findall(r"^session_id:\s*(\S+)", stderr, re.M)
+    return found[-1] if found else ""
+
+
 def hermes_events(stdout: str) -> tuple[list[dict], str, str, str]:
     """(events, final text, session id, error) from `hermes chat --format stream-json`; its warnings are plain lines."""
 
@@ -647,11 +838,16 @@ def ask(backend: str, system: str, prompt: str, tier: str = "top", endpoint: str
         base, models = slate.find_local(endpoint or config["local_endpoint"])
         if not base:
             raise RuntimeError("no local model server answers: start Ollama, LM Studio, vLLM or llama.cpp, or set its address in Settings → Connections")
-        body = json.dumps({"model": model or config["local_model"] or (models[0] if models else ""), "temperature": 0.7,
+        body = json.dumps({"model": answering_model(models, model or config["local_model"]), "temperature": 0.7,
                            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}).encode()
-        request = urllib.request.Request(base + "/chat/completions", body, {"Content-Type": "application/json"})
-        with urllib.request.urlopen(request, timeout=timeout) as answer:
-            return json.loads(answer.read())["choices"][0]["message"]["content"]
+
+        def asked(live: str) -> str:
+            request = urllib.request.Request(live + "/chat/completions", body, {"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=timeout) as answer:
+                return json.loads(answer.read())["choices"][0]["message"]["content"]
+        if base == bolt.ENDPOINT:  # the Studio's engine: loaded on this first question; refused (with why) while a job holds its memory
+            return bolt.answered(asked, wait=False)
+        return asked(base)
     if backend not in CLIS:
         raise RuntimeError("pick a brain: " + ", ".join(BACKENDS))
     host = where_of(backend, config)
@@ -684,12 +880,13 @@ def ask(backend: str, system: str, prompt: str, tier: str = "top", endpoint: str
             done = run_cli([tool, *profile_args(), "-z", joined, "-t", HERMES_ASK_TOOLSETS], "", host, timeout)
             reply = done.stdout.strip()
         else:
-            done = run_cli([tool, *profile_args(), "chat", "--query-file", "-", "--format", "stream-json", "--toolsets", HERMES_ASK_TOOLSETS,
-                            "--max-turns", str(HERMES_TURNS)], joined, host, timeout)
-            reply = hermes_events(done.stdout)[1].strip()
-        if reply and not done.returncode:
+            streams = hermes_streams(tool, host)
+            done = run_cli([tool, *profile_args(), "chat", "--query-file", "-", *(["--format", "stream-json"] if streams else ["-Q"]),
+                            "--toolsets", HERMES_ASK_TOOLSETS, "--max-turns", str(HERMES_TURNS)], joined, host, timeout)
+            reply = (hermes_events(done.stdout)[1] if streams else hermes_quiet_reply(done.stdout)).strip()
+        if reply and not done.returncode and not HERMES_FAILED.search(reply):
             return reply
-        raise RuntimeError(hinted("hermes", done.stderr or done.stdout or f"Hermes stopped with code {done.returncode}", host))
+        raise RuntimeError(hinted("hermes", (reply if HERMES_FAILED.search(reply or "") else "") or done.stderr or done.stdout or f"Hermes stopped with code {done.returncode}", host))
     if backend == "grok":
         done = run_cli([tool, "--prompt-file", "/dev/stdin", "--output-format", "plain"], joined, host, timeout)
         if re.search(r"unexpected argument|unknown (?:option|flag|argument)|unrecognized", done.stderr, re.I):
@@ -1232,9 +1429,11 @@ def submit(body: dict) -> dict:
                                      "start a new conversation for another agent")
         backend = thread["backend"]
     else:
-        backend = body.get("backend") or (saved_settings()["default"] if saved_settings()["default"] in HARNESSES else "claude")
+        config = saved_settings()
+        backend = body.get("backend") or config["agent"] or (config["default"] if config["default"] in HARNESSES else "claude")
     if backend not in BACKENDS:
         raise HTTPException(400, "an agent is one of " + ", ".join(BACKENDS))
+    harness = is_harness(backend)
     known = {t["id"]: t for t in tools()}
     if body.get("tools") is not None:
         chosen = body["tools"]
@@ -1244,9 +1443,9 @@ def submit(body: dict) -> dict:
         chosen = [t for t, v in known.items() if v["enabled"]]
     if not isinstance(chosen, list) or any(t not in known for t in chosen):
         raise HTTPException(400, "tools are ids from /api/agent/tools")
-    if backend in HARNESSES and any(not known[t]["enabled"] for t in chosen):
+    if harness and any(not known[t]["enabled"] for t in chosen):
         raise HTTPException(400, "a chosen tool is turned off")
-    chosen = list(dict.fromkeys(chosen)) if backend in HARNESSES else []  # a conversation has no tools to run
+    chosen = list(dict.fromkeys(chosen)) if harness else []  # a conversation has no tools to run
     attach_ = body.get("attach") or []
     if not isinstance(attach_, list) or len(attach_) > 20:
         raise HTTPException(400, "attach is a list of up to 20 Library paths")
@@ -1341,6 +1540,8 @@ def toml_value(value) -> str:
 
 
 HERMES_TOOLSETS, HERMES_TURNS = "clarify,todo", 25  # its question card and its plan; a turn's tool calls at most
+# what Hermes prints in place of an answer when its provider refuses (it exits 0): an HTTP error, a missing model
+HERMES_FAILED = re.compile(r"^\s*(?:HTTP [45]\d\d\b|Codex Responses request '?model'? must|Error:|API error)", re.I)
 HERMES_ASK_TOOLSETS = "todo"  # a brain's one answer (the Slate's First AD, a prompt's rewrite): no tool it could act with
 CLAUDE_FILES = json.dumps({"permissions": {"blockReadsOutsideWorkingDirectories": True}})
 
@@ -1362,7 +1563,8 @@ def harness_args(task: dict, tool: str, config_path: str, servers: dict, system:
     if task["backend"] == "hermes":
         # in the room Hermes converses and plans (it drives no Studio tool): its toolsets are held to HERMES_TOOLSETS, so
         # its terminal, browser, code execution, computer use and cron are off here whatever its own config enables
-        args = [tool, *profile_args(), "chat", "--query-file", "-", "--format", "stream-json",
+        task["_quiet"] = not hermes_streams(tool, task.get("_host") or "")
+        args = [tool, *profile_args(), "chat", "--query-file", "-", *(["-Q"] if task["_quiet"] else ["--format", "stream-json"]),
                 "--toolsets", HERMES_TOOLSETS, "--max-turns", str(HERMES_TURNS)]
         return args + (["--resume", session] if session else ["--continue", "imagination-" + task["thread"], "--create-if-missing"])
     # `codex exec resume` takes no --sandbox: the same sandbox goes as its config value
@@ -1402,11 +1604,13 @@ def results_in(value) -> list:
     return found
 
 
-def note_results(task: dict, value) -> list[str]:
-    """Jobs the agent queued in the Studio, from its tools' answers, and a working line for each change of state."""
+def note_results(task: dict, value, lists: bool = False) -> list[str]:
+    """Jobs the agent queued in the Studio, from its tools' answers, and a working line for each change of state;
+    with ``lists``, the jobs of an answer that is a list of them too (wait_for_jobs)."""
 
     out = []
-    for result in results_in(value):
+    found_ = results_in(value)
+    for result in [one for item in found_ for one in (item if lists and isinstance(item, list) else [item])]:
         if not (isinstance(result, dict) and isinstance(result.get("id"), str) and result.get("kind") and result.get("status")):
             continue
         jobs_ = task.setdefault("jobs", [])
@@ -1423,6 +1627,12 @@ def note_results(task: dict, value) -> list[str]:
 def render(backend: str, line: str, task: dict) -> str:
     """One line of the harness's stream as a person reads it; working lines also go to the task's steps."""
 
+    if backend == "hermes" and task.get("_quiet"):  # `chat -Q`: plain lines, the answer itself
+        text = line.rstrip("\n").rstrip("\r")
+        if not text.strip() or HERMES_NOISE.search(text):
+            return ""
+        task["reply"] = (task.get("reply") + "\n" if task.get("reply") else "") + text
+        return text + "\n"
     try:
         event = json.loads(line)
     except ValueError:
@@ -1620,7 +1830,7 @@ def perform(task: dict) -> None:
     work_.mkdir(parents=True, exist_ok=True)
     log = open(here / "log.txt", "a")
     try:
-        if task["backend"] not in SESSIONS:
+        if task["backend"] not in SESSIONS and not (task["backend"] == "local" and task["tools"]):
             return converse(task, thread, log)
         names = []
         for path in task["attach"]:  # the attachments, in a folder of their own beside what the agent makes
@@ -1633,6 +1843,8 @@ def perform(task: dict) -> None:
             names.append(name)
         task["inputs"] = names
         task["_before"] = snapshot(work_)
+        if task["backend"] == "local":
+            return drive(task, thread, log, config, work_, names)
         servers = mcp_servers(task, host, config) if task["backend"] in HARNESSES else {}
         if task["backend"] in HARNESSES:
             write_json(work_ / "mcp.json", {"mcpServers": servers})
@@ -1701,6 +1913,12 @@ def perform(task: dict) -> None:
                 log.write(f"could not copy the outputs back from {host}: {back.stderr.strip()[-300:]}\n")
         if task["status"] == "cancelled" or code is None:
             return
+        if task.get("_quiet"):  # `chat -Q` names its session on standard error, and prints a refusal as its answer
+            said = (here / "stderr.txt").read_text(errors="replace")
+            if hermes_quiet_session(said) and task.get("_session") is not None:
+                task["_session"]["id"] = hermes_quiet_session(said)
+            if HERMES_FAILED.search(task.get("reply") or ""):
+                task["_error"] = hinted("hermes", task["reply"], host)
         error = task.pop("_error", None)
         if code or error:
             said = (here / "stderr.txt").read_text(errors="replace").strip()
@@ -1713,6 +1931,487 @@ def perform(task: dict) -> None:
         log.close()
         task.pop("_host", None)
         task.pop("_error", None)
+        task.pop("_quiet", None)
+
+
+# ---------- the local harness: the Studio's own agent loop on a local OpenAI-compatible server ----------
+#
+# A local model whose server takes tool calls (llama.cpp with --jinja, vLLM, Ollama...) drives the Studio like Claude
+# Code and Codex do: the Studio starts the turn's MCP servers itself (the same commands, in the thread's work folder),
+# offers their tools as OpenAI functions, and runs the loop: the model answers, each tool call goes to its server, its
+# answer goes back, until the model answers without a call. LOCAL_STEPS answers and TASK_TIMEOUT at most (then one last
+# answer without tools, to say what is done); Stop ends it between calls. There is no shell and no file tool, and a
+# path a tool call names stays in the thread's folder or the studio folder (confine). What it says and calls goes to the
+# task's log, steps and stream.jsonl as the CLIs' do, so the Agent room shows it the same way.
+
+class Mcp:
+    """One stdio MCP server for one turn: newline-delimited JSON-RPC on its stdin and stdout."""
+
+    def __init__(self, tool: dict, argv: list[str], env: dict, cwd: str, errors: Path):
+        self.id, self.tools, self.number = tool["id"], [], 0
+        self.errors = open(errors, "ab")
+        try:
+            self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errors, cwd=cwd,
+                                            env=child_env(env), start_new_session=True)
+        except OSError:
+            self.errors.close()
+            raise
+        self.lines: "queue.Queue[bytes | None]" = queue.Queue()
+        threading.Thread(target=self.read, daemon=True).start()
+
+    def read(self) -> None:
+        for line in self.process.stdout:
+            self.lines.put(line)
+        self.lines.put(None)
+
+    def request(self, method: str, params: dict, timeout: float, stopped=lambda: False) -> dict:
+        self.number += 1
+        wanted, ends = self.number, time.time() + timeout
+        rpc_send(self.process, {"jsonrpc": "2.0", "id": wanted, "method": method, "params": params})
+        while True:
+            if stopped():
+                raise InterruptedError
+            left = ends - time.time()
+            if left <= 0:
+                raise TimeoutError(f"{self.id} gave no answer to {method} in {int(timeout)} seconds")
+            try:
+                line = self.lines.get(timeout=min(0.25, left))
+            except queue.Empty:
+                continue
+            if line is None:
+                raise EOFError(f"{self.id} stopped")
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue  # a server's stray print
+            # an answer to this request (a request of the server's own has a method, and is not one)
+            if isinstance(message, dict) and message.get("id") == wanted and "method" not in message:
+                if message.get("error"):
+                    raise RuntimeError(str(message["error"].get("message") or method + " failed"))
+                return message.get("result") or {}
+
+    def start(self, stopped) -> list[dict]:
+        self.request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                    "clientInfo": {"name": "slate-studio", "version": "1"}}, CHECK_TIMEOUT, stopped)
+        rpc_send(self.process, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+        self.tools = [t for t in self.request("tools/list", {}, CHECK_TIMEOUT, stopped).get("tools") or [] if t.get("name")]
+        return self.tools
+
+    def close(self) -> None:
+        stop(self.process)
+        self.errors.close()
+
+
+def confine(args: dict, work_: Path) -> str | None:
+    """Why a tool call is refused, or None: an absolute path it names (a file to read or write) is inside the thread's
+    folder or the studio folder, never in a hidden folder of it, and a Library path never climbs out of it."""
+
+    roots = [work_.resolve(), HOME.resolve()]
+    def paths(value, key=""):
+        if isinstance(value, dict):
+            for k, v in value.items():
+                yield from paths(v, str(k))
+        elif isinstance(value, list):
+            for v in value:
+                yield from paths(v, key)
+        elif isinstance(value, str) and value.strip() and "prompt" not in key.lower() and (
+                PATHISH.search(key) or value.strip().startswith(("/", "~"))):  # any absolute path, whatever its key
+            yield key, value.strip()
+    for key, value in paths(args):
+        text = os.path.expanduser(value)
+        if os.path.isabs(text):
+            resolved = Path(text).resolve()
+            inside_ = next((root for root in roots if resolved == root or root in resolved.parents), None)
+            if inside_ is None or any(part.startswith(".") for part in resolved.relative_to(inside_).parts if part != ".inputs"):
+                return f"{key}: {value} is outside this conversation's folder ({work_}) and the Studio's Library"
+        elif ".." in Path(text).parts:
+            return f"{key}: {value} climbs out of the Studio's Library"
+    return None
+
+
+def function_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "_", name)[:64]
+
+
+def answer_of(base: str, body: dict, stopped) -> dict | None:
+    """One answer from the local server, or None when the turn was stopped first (the call is left to end)."""
+
+    out: dict = {}
+    def run():
+        try:
+            out["answer"] = post_json(base + "/chat/completions", body, LOCAL_ANSWER_TIMEOUT)
+        except urllib.error.HTTPError as error:
+            out["error"] = f"the local model server said {error.code}: " + error.read().decode(errors="replace")[:400]
+        except Exception as error:  # the reason goes to the page as it is
+            out["error"] = f"the local model server did not answer: {error}"
+    caller = threading.Thread(target=run, daemon=True)
+    caller.start()
+    while caller.is_alive():
+        if stopped():
+            return None
+        caller.join(0.25)
+    if "error" in out:
+        raise RuntimeError(out["error"])
+    return out["answer"]
+
+
+# ---------- the local harness's method ----------
+#
+# A small local model (NVIDIA Nemotron 3.5 Bolt) drives the Studio well when the loop around it keeps it to the brief.
+# Each part below was kept because it measurably helped on the agent benchmark (scripts/agent-bench, 38 briefs; on
+# Bolt it took exactness from 37-39% to 97%), against the same loop without it:
+#   rules    the system prompt's "do only what was asked" rules: one call per thing asked, the count asked, the names
+#            given, nothing rendered, checked or added unasked, the fast settings unless others are named, which tool
+#            makes what, and Library paths as the tools give them
+#   hints    the Studio tools' settings described for it: count is the number asked, no image_model / quality unless
+#            named (Qwen 2.1 Turbo and FastH3 4 passes, the fastest), 22 frames is 0.92 s
+#   compact  tool answers as compact JSON without empty fields, and studio_state cut to the ids (and labels) it needs
+#   report   the final answer ends with what the Studio's records say was made (each job's outputs, the Slate ids), so
+#            what it says about files can be checked against the records beside it; a path it names with a slip in it
+#            (Bolt doubles a pair of characters in a long id now and then) is put right from the records
+#   temp=0   greedy sampling (0.3 before; 0 was the more exact of the two)
+# A call that failed is never sent again unchanged (the model is told so instead): that stopped loops of the same error.
+# Measured and left out: a checklist the model writes first in a JSON schema with a check of the calls against it
+# before it may finish (it enforced the checklist's own mistakes: 87% against 95% without it), two worked examples in
+# the system prompt (no gain), and Bolt's reasoning, `think` (as exact, three times slower; kept as a part to turn on).
+
+MAKERS = ("queue_still", "queue_clip", "queue_voice", "queue_song", "queue_edit", "queue_long", "queue_sound", "queue_soundtrack",
+          "check_clip", "motion_previs", "slate_new_film", "slate_add_scene", "slate_add_shot", "slate_render_shot",
+          "add_to_timeline", "export_timeline", "upload_file")
+LOCAL_RULES = (" Do only what the filmmaker asked, exactly: one call for each thing asked for, the number of pictures, takes or "
+               "shots they asked for (one picture is count 1), the names and lengths they gave, word for word. Never add a picture, "
+               "clip, song, voice line, sound or render they did not ask for, never render a Slate shot unless asked, and when they "
+               "say not to make something, make nothing of it. Leave image_model and quality out (the fastest: Qwen 2.1 Turbo, "
+               "FastH3 4 passes) unless they name one. Each thing has its tool: a picture or still is queue_still, a change to a picture "
+               "queue_edit, a clip queue_clip (from a picture: its first_frame; from reference pictures: references), a long take or "
+               "anything over 15 s queue_long, a voice line queue_voice, a song or instrumental queue_song, a sound effect or foley "
+               "queue_sound, a song under a clip queue_soundtrack, Motion Previs motion_previs, a timeline add_to_timeline and "
+               "export_timeline; the QA gate (check_clip) only when they ask for a check; Slate films, scenes and shots only when they say Slate, film, scene or shot. The Studio's tools take Library paths as the filmmaker or the tools give them "
+               "(renders/a.mp4, scouts/<job>/scout_s1.png), never with a folder put in front. Name only files and ids the tools returned.")
+LOCAL_HINTS = {
+    "queue_still": {"count": "how many pictures: exactly the number asked for (1 for 'a picture', 'one picture', 'a still'); 4 only "
+                             "when they ask for options or candidates without a number",
+                    "image_model": "leave out (Qwen 2.1 Turbo, the fastest) unless the filmmaker names a model",
+                    "preset": "leave out unless a size is asked for; 'small' is 864x480"},
+    "queue_clip": {"quality": "leave out (FastH3 4 passes, the fastest) unless the filmmaker names a quality",
+                   "preset": "leave out unless a size is asked for; 'small' is 864x480",
+                   "seconds": "the length asked for; 22 frames is 0.92 s, the shortest"},
+    "queue_long": {"quality": "leave out (FastH3 4 passes, the fastest) unless the filmmaker names a quality"},
+    "queue_edit": {"image_model": "leave out (Qwen 2.1 Turbo) unless the filmmaker names a model"},
+}
+
+
+def local_method() -> dict:
+    """The parts of the method this Studio runs (LOCAL_METHOD, or STUDIO_LOCAL_AGENT), and the temperature."""
+
+    named = os.environ.get("STUDIO_LOCAL_AGENT")
+    parts = [p.strip() for p in (named.split(",") if named is not None else LOCAL_METHOD) if p.strip() and p.strip() != "baseline"]
+    temperature = next((float(p[5:]) for p in parts if p.startswith("temp=")), 0.3)
+    return {"parts": {p for p in parts if not p.startswith("temp=")}, "temperature": temperature}
+
+
+def hinted_schema(name: str, schema: dict) -> dict:
+    hints = LOCAL_HINTS.get(name)
+    if not hints or not isinstance(schema.get("properties"), dict):
+        return schema
+    properties = {k: dict(v) if isinstance(v, dict) else v for k, v in schema["properties"].items()}
+    for key, hint in hints.items():
+        if isinstance(properties.get(key), dict):
+            properties[key]["description"] = hint
+    return {**schema, "properties": properties}
+
+
+def pruned(value):
+    if isinstance(value, dict):
+        return {k: pruned(v) for k, v in value.items() if v not in (None, "", [], {})}
+    if isinstance(value, list):
+        return [pruned(v) for v in value]
+    return value
+
+
+def compact_result(tool: str, text: str) -> str:
+    """A tool's answer as the model reads it: compact JSON without empty fields; studio_state as the ids it needs."""
+
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return text
+    if tool == "studio_state" and isinstance(value, dict):
+        value = {"presets": {k: "x".join(str(n) for n in (v.get("size") or [])) for k, v in (value.get("presets") or {}).items()},
+                 "qualities": value.get("qualities") or {},
+                 "image_models": {m.get("id"): m.get("label") for m in value.get("image_models") or [] if isinstance(m, dict)},
+                 "defaults": {"image_model": "qwen (Qwen 2.1 Turbo, the fastest)", "quality": "fh4 (the fastest)"},
+                 "clip_seconds": "0.92 (22 frames) to 15", "platform": value.get("platform")}
+    if isinstance(value, dict) and isinstance(value.get("log"), str):
+        value.pop("log")
+    return json.dumps(pruned(value), separators=(",", ":"), ensure_ascii=False)
+
+
+LIBRARY_PATH = re.compile(r"(?<![\w./-])(?:scouts|renders|slate|exports|sound|voice|music|motion|uploads|projects|qa)/[\w./-]+\.[A-Za-z0-9]{2,4}\b")
+
+
+class Ledger:
+    """What the turn's tool calls made, from their answers: the jobs by id (as last seen) and the Slate and Editor ids."""
+
+    def __init__(self):
+        self.jobs: dict[str, dict] = {}
+        self.cancelled: set = set()
+        self.made: list[str] = []  # Slate films, scenes and shots, Editor timelines, by their ids
+
+    def note(self, tool: str, args: dict, text: str, failed: bool) -> None:
+        if failed:
+            return
+        values = results_in(text)
+        if tool == "cancel_job":
+            self.cancelled.add(str(args.get("id")))
+        for value in values:
+            for one in (value if isinstance(value, list) else [value]):
+                if not isinstance(one, dict):
+                    continue
+                if isinstance(one.get("id"), str) and one.get("status") and (one.get("kind") or one.get("stages") is not None):
+                    self.jobs[one["id"]] = {**self.jobs.get(one["id"], {}), **one}
+                if tool == "slate_new_film":
+                    self.made.append(f"Slate film {one.get('name')} ({one.get('film')})")
+                elif tool == "slate_add_scene":
+                    self.made.append(f"Slate scene {one.get('name')} ({one.get('scene')}) in film {one.get('film')}")
+                elif tool == "slate_add_shot":
+                    self.made.append(f"Slate shot {one.get('name')} ({one.get('shot')}), {one.get('seconds')} s, not rendered")
+                elif tool == "add_to_timeline":
+                    self.made.append(f"Editor timeline {one.get('name') or one.get('project')}: {one.get('clips')} clip(s)")
+
+    def paths(self) -> list[str]:
+        return [str(o) for job in self.jobs.values() for o in job.get("outputs") or []]
+
+    def mended(self, said: str) -> str:
+        """The answer with each Library path it names that the records do not have, but one of theirs differs from it by
+        a slip (a doubled or dropped character of an id: p-1a1a15... for p-1a15...), put right."""
+
+        known = self.paths()
+        def mend(match):
+            path = match.group(0)
+            if path in known or not known:
+                return path
+            near = difflib.get_close_matches(path, known, n=1, cutoff=0.9)
+            return near[0] if near and len(path) > 12 else path
+        return LIBRARY_PATH.sub(mend, said)
+
+    def running(self) -> list[str]:
+        return [i for i, job in self.jobs.items() if job.get("status") in ("queued", "running") and i not in self.cancelled]
+
+    def lines(self) -> list[str]:
+        out = []
+        for job_id, job in self.jobs.items():
+            outputs = job.get("outputs") or []
+            line = f"{job.get('kind') or 'motion'} {job_id} ({job.get('title') or ''}): {job.get('status')}"
+            if outputs:
+                line += " → " + ", ".join(str(o) for o in outputs[:6]) + (f" and {len(outputs) - 6} more" if len(outputs) > 6 else "")
+            if job.get("pack"):
+                line += f" → pack {job['pack']}"
+            if isinstance(job.get("qa"), dict) and job["qa"].get("passed") is not None:
+                line += " · QA gate: " + ("passed" if job["qa"]["passed"] else "failed")
+            if job.get("error"):
+                line += f" ({str(job['error'])[:200]})"
+            out.append(line)
+        return out + self.made
+
+
+def drive(task: dict, thread: dict | None, log, config: dict, work_: Path, names: list[str]) -> None:
+    """The local harness's turn (see above): the MCP servers of the task's tools, then the loop."""
+
+    started, here = time.time(), task_folder(task["id"])
+    stopped = lambda: task["status"] == "cancelled"
+    base, models = slate.find_local(config["local_endpoint"])
+    if not base:
+        raise RuntimeError("no local model server answers: start it, or set its address in Settings → Connections")
+    model = answering_model(models, config["local_model"])
+    if base == bolt.ENDPOINT:  # the Studio's engine: the turn keeps it from the idle unload while it is open
+        with bolt.turn():
+            return drive_on(task, thread, log, config, work_, names, base, model, started, here, stopped)
+    return drive_on(task, thread, log, config, work_, names, base, model, started, here, stopped)
+
+
+def drive_on(task: dict, thread: dict | None, log, config: dict, work_: Path, names: list[str], base: str, model: str,
+             started: float, here: Path, stopped) -> None:
+    """The turn's loop on the server at ``base``. On the Studio's engine every answer is one request of its own
+    (bolt.request): loaded first if it is not, waiting while a job of the queue holds its memory (this turn's own clip,
+    say), and never cut by a release while it is answered."""
+
+    raw = open(here / "stream.jsonl", "a")
+    clients: list[Mcp] = []
+    table: dict = {}  # function name -> (server, tool name, its required arguments)
+    calls = task["calls"] = {"answers": 0, "made": 0, "bad": 0, "failed": 0}
+    method, ledger = local_method(), Ledger()
+    refused: dict = {}  # (function, its arguments) -> what the tool said when that call failed
+
+    def say(text: str, step: str | None = None) -> None:
+        if text:
+            log.write(text.rstrip() + "\n")
+            log.flush()
+        if step:
+            task.setdefault("steps", []).append({"text": step[:300], "at": time.time()})
+            del task["steps"][:-STEP_LIMIT]
+
+    def record(event: dict) -> None:
+        raw.write(json.dumps({**event, "at": round(time.time(), 3)}) + "\n")
+        raw.flush()
+
+    try:
+        say(f"[local · {model} · {base}] {task['prompt'][:200]}")
+        ready, listed = [], []
+        for tool_id in task["tools"]:
+            tool = tool_of(tool_id)
+            try:
+                argv, env = launch_of(tool, config)
+                client = Mcp(tool, argv, env, str(work_), here / "stderr.txt")
+                clients.append(client)
+                listed.append((client, client.start(stopped)))
+                ready.append(tool_id)
+            except InterruptedError:
+                return
+            except (RuntimeError, OSError, TimeoutError, EOFError) as error:
+                ready.append(f"{tool_id} (failed)")
+                say(f"{tool_id} could not start: {error}")
+        say("tools: " + (", ".join(ready) or "none"), "tools: " + (", ".join(ready) or "none"))
+        counts: dict = {}
+        for _, items in listed:
+            for item in items:
+                counts[item["name"]] = counts.get(item["name"], 0) + 1
+        functions = []
+        for client, items in listed:  # a tool by its own name, or server__name where two servers have one of that name
+            for item in items:
+                name = function_name(item["name"] if counts[item["name"]] == 1 else f"{client.id}__{item['name']}")
+                schema = item.get("inputSchema") if isinstance(item.get("inputSchema"), dict) else {"type": "object", "properties": {}}
+                table[name] = (client, item["name"], [r for r in schema.get("required") or [] if isinstance(r, str)])
+                if "hints" in method["parts"] and client.id == "studio":
+                    schema = hinted_schema(item["name"], schema)
+                functions.append({"type": "function", "function": {"name": name, "description": str(item.get("description") or "")[:1000],
+                                                                    "parameters": schema}})
+        if not functions:
+            raise RuntimeError("none of this conversation's tools started: check them in Settings → Connections (Brains & tools)")
+        system = SYSTEM.format(folder=f" ({work_})", studio="")
+        if task.get("thread"):
+            system += ROOM.format(tools=ROOM_TOOLS.format(names=STUDIO_TOOLS) if "studio" in task["tools"] else "")
+        if not any(tool in MAKERS for _, tool, _ in table.values()):  # the method is for the Studio's tools: another server's run plain
+            method["parts"] -= {"rules", "report"}
+        system += LOCAL_DRIVE + (LOCAL_RULES if "rules" in method["parts"] else "")
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": with_history(thread, task["prompt"]) + attached_note(task, names)}]
+        record({"type": "start", "model": model, "server": base, "tools": [f["function"]["name"] for f in functions],
+                "method": sorted(method["parts"]), "temperature": method["temperature"]})
+        extra = {"chat_template_kwargs": {"enable_thinking": "think" in method["parts"]}}
+        nudged = 0
+        for number in range(LOCAL_STEPS + 1):
+            last = number == LOCAL_STEPS or time.time() - started > TASK_TIMEOUT
+            if last:  # the limit: one more answer, without tools, that says what is done and what is not
+                task["limit"] = "steps" if number == LOCAL_STEPS else "time"
+                note = (f"stopped at the step limit ({LOCAL_STEPS} answers)" if task["limit"] == "steps"
+                        else f"stopped after {TASK_TIMEOUT // 3600} hours")
+                say(f"[{note}]", note)
+                messages.append({"role": "user", "content": f"The turn is {note}. Do not call any more tools: say what is done "
+                                                            "(with the Library paths of what was made) and what is not."})
+            body = {"model": model, "messages": messages, "temperature": method["temperature"], "max_tokens": 4096, **extra,
+                    **({} if last else {"tools": functions})}
+            if base == bolt.ENDPOINT:
+                try:
+                    answer = bolt.answered(lambda live: answer_of(live, body, stopped), stopped, True,
+                                           lambda text: say(text, text.strip("[]")))
+                except InterruptedError:
+                    return
+            else:
+                answer = answer_of(base, body, stopped)
+            if answer is None:
+                return
+            calls["answers"] += 1
+            message = ((answer.get("choices") or [{}])[0].get("message")) or {}
+            said, wanted = (message.get("content") or "").strip(), [] if last else message.get("tool_calls") or []
+            record({"type": "answer", "number": number, "content": said, "tool_calls": wanted, "usage": answer.get("usage"),
+                    "finish": (answer.get("choices") or [{}])[0].get("finish_reason")})
+            say(said)
+            if not wanted:
+                garbled = "<tool_call>" in said or '"arguments"' in said
+                if not last and nudged < 2 and (garbled or (not calls["made"] and PROMISE.search(said) and not question_of(said)[0])):
+                    nudged += 1  # said it would act and stopped, or wrote a call as text: once or twice, it is told to call
+                    calls["bad"] += 1 if garbled else 0
+                    messages += [{"role": "assistant", "content": said},
+                                 {"role": "user", "content": "Make the calls now through the tools (function calls), not as text. "
+                                                             "If everything asked for is done, give your summary."}]
+                    say("", "nudged to call its tools")
+                    continue
+                task["reply"] = said
+                studio_ = next((c for c in clients if c.id == "studio"), None)
+                for job_id in ledger.running() if "report" in method["parts"] and studio_ else []:  # as they are now
+                    try:
+                        now = studio_.request("tools/call", {"name": "job_status", "arguments": {"id": job_id}}, 30, stopped)
+                        ledger.note("job_status", {"id": job_id}, "\n".join(str(c.get("text") or "") for c in now.get("content") or []
+                                                                             if isinstance(c, dict)), bool(now.get("isError")))
+                    except (TimeoutError, EOFError, RuntimeError, OSError, InterruptedError):
+                        pass
+                if "report" in method["parts"] and ledger.lines():
+                    task["reply"] = ledger.mended(said).rstrip() + "\n\nWhat the Studio's records say was made:\n" + "\n".join("- " + l for l in ledger.lines())
+                break
+            messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": wanted})
+            for one in wanted:
+                function = one.get("function") or {}
+                name, given = str(function.get("name") or ""), function.get("arguments")
+                calls["made"] += 1
+                hit = table.get(name) or table.get(name.removeprefix("mcp__").split("__")[-1])
+                text, failed = "", False
+                try:
+                    args = json.loads(given) if isinstance(given, str) and given.strip() else (given or {})
+                except ValueError:
+                    args = None
+                if not hit:
+                    text = f"There is no tool called {name}. The tools are: " + ", ".join(table)
+                elif not isinstance(args, dict):
+                    text = f"The arguments of {name} were not a JSON object: {str(given)[:300]}. Call it again with a JSON object."
+                elif [r for r in hit[2] if args.get(r) in (None, "")]:
+                    text = f"{name} needs {', '.join(r for r in hit[2] if args.get(r) in (None, ''))}: call it again with them."
+                elif confine(args, work_):
+                    text = "Refused: " + confine(args, work_)
+                elif (name, json.dumps(args, sort_keys=True)) in refused:  # the same call that failed, again: not sent
+                    text = (f"This exact {name} call failed already ({refused[(name, json.dumps(args, sort_keys=True))][:200]}). "
+                            "Do not repeat it: change what made it fail, or stop and say what could not be made.")
+                if text:
+                    calls["bad"] += 1
+                    say(f"✗ {name}: {text}", f"✗ {name}: {text}")
+                else:
+                    client, tool, _ = hit
+                    say(f"→ {client.id}.{tool} " + json.dumps(args)[:300], f"→ {client.id} · {tool}")
+                    try:
+                        result = client.request("tools/call", {"name": tool, "arguments": args}, LOCAL_TOOL_TIMEOUT, stopped)
+                        text = "\n".join(str(c.get("text") or "") for c in result.get("content") or [] if isinstance(c, dict) and c.get("type") == "text") \
+                            or json.dumps(result.get("structuredContent") or result)
+                        failed = bool(result.get("isError"))
+                        for line in note_results(task, result, lists=tool != "list_jobs"):
+                            say(line, line)
+                    except InterruptedError:
+                        return
+                    except (TimeoutError, EOFError, RuntimeError, OSError) as error:
+                        text, failed = f"The tool failed: {error}", True
+                    if failed:
+                        calls["failed"] += 1
+                        refused[(name, json.dumps(args, sort_keys=True))] = text
+                        say(f"  {tool} said: {text[:300]}")
+                    record({"type": "tool", "name": name, "arguments": args, "error": failed, "result": text[:LOG_LIMIT]})
+                    if client.id == "studio":
+                        ledger.note(tool, args, text, failed)
+                        if "compact" in method["parts"] and not failed:
+                            text = compact_result(tool, text)
+                messages.append({"role": "tool", "tool_call_id": str(one.get("id") or ""), "content": text[:LOCAL_RESULT_CHARS]})
+                if stopped():
+                    return
+        task["status"] = "done"
+    finally:
+        record({"type": "end", "status": task["status"], "calls": calls, "seconds": round(time.time() - started, 1)})
+        try:  # the whole conversation as the model saw it, for the agent benchmark and for training on good turns
+            write_json(here / "messages.json", {"model": model if "model" in locals() else None, "method": sorted(method["parts"]),
+                                                "tools": locals().get("functions") or [], "messages": locals().get("messages") or [],
+                                                "said": locals().get("said"), "reply": task.get("reply")})
+        except (OSError, TypeError, ValueError):
+            pass
+        raw.close()
+        for client in clients:
+            client.close()
 
 
 # ---------- signing a brain in: the CLI's own login, in a pseudo-terminal ----------
@@ -1771,6 +2470,47 @@ def terminal_line(backend: str) -> str:
 
     return {"claude": "claude auth login", "codex": "codex login", "grok": "grok login", "gemini": "gemini",
             "hermes": " ".join(["hermes", *profile_args(), "setup"])}.get(backend, "")
+
+
+# A provider signed in to Hermes (`hermes auth add`) is only a credential: Hermes answers with the provider and model
+# its config names, and with none it sends an empty model ("Codex Responses request 'model' must be a non-empty
+# string"). After a sign-in the config is pointed at that provider and, when it named another provider or no model,
+# at the first model Hermes' own catalog lists for this account (hermes_cli.models.curated_models_for_provider: the
+# provider's live list, its static one when unreachable), read with the Python Hermes runs on.
+HERMES_PICK = (
+    'h=$(command -v "$1"); t=$(sed -n "s/^exec \\([^ ]*\\).*/\\1/p" "$h" 2>/dev/null | head -1); [ -n "$t" ] || t="$h"; '
+    '"$(dirname "$t")/python" -c "import json,sys; from hermes_cli.models import curated_models_for_provider as c, '
+    'get_default_model_for_provider as d; p=sys.argv[1]; ids=[m[0] for m in (c(p) or [])] or [d(p)]; '
+    'print(json.dumps([i for i in ids if i][:1]))" "$2"')
+
+
+def hermes_model_for(provider: str, host: str) -> str:
+    tool = cli("hermes") if not host else CLIS["hermes"][1]
+    done = run_cli(["bash", "-c", HERMES_PICK, "_", tool or "hermes", provider], "", host, 60)
+    try:
+        return (json.loads(done.stdout.strip().splitlines()[-1]) or [""])[0]
+    except (ValueError, IndexError, TypeError):
+        return ""
+
+
+def hermes_use(provider: str, host: str) -> str:
+    """Point Hermes' config at ``provider`` after its sign-in; "" when done, else why not (the page shows it)."""
+
+    tool = cli("hermes") if not host else CLIS["hermes"][1]
+    get = lambda key: run_cli([tool, *profile_args(), "config", "get", key], "", host, 30).stdout.strip()
+    try:
+        if get("model.provider") == provider and get("model.default"):
+            return ""
+        model = hermes_model_for(provider, host)
+        if not model:
+            return f"Signed in, but Hermes lists no model for {provider}: run `hermes model` in a terminal to pick one."
+        for key, value in (("model.provider", provider), ("model.default", model)):
+            done = run_cli([tool, *profile_args(), "config", "set", key, value], "", host, 30)
+            if done.returncode:
+                return f"Signed in, but Hermes did not take {key} {value}: {(done.stderr or done.stdout).strip()[-200:]}"
+    except subprocess.TimeoutExpired:
+        return "Signed in, but Hermes took too long to set its model: run `hermes model` in a terminal."
+    return ""
 
 
 def recipe_of(backend: str, remote: bool, body: dict | None = None) -> dict:
@@ -1908,6 +2648,9 @@ def pump(state: dict, fd: int, process) -> None:
                 catch_token(state, ended=True)
             if code == 0 and state.get("token_host") and not state.get("token_saved"):
                 finish(state, "failed", state.get("token_error") or "Claude Code did not print a sign-in token: try again.")
+            elif code == 0 and state.get("backend") == "hermes" and state.get("provider"):
+                said = hermes_use(state["provider"], state["where"][4:] if state.get("where", "here") != "here" else "")
+                finish(state, "done" if not said else "failed", said or None)
             elif code == 0:
                 finish(state, "done", None)
             else:
@@ -1954,7 +2697,8 @@ def start_signin(backend: str, body: dict) -> dict:
         raise
     state = {"backend": backend, "where": f"ssh:{host}" if host else "here", "process": process, "fd": master, "raw": "",
              "started": time.time(), "deadline": time.monotonic() + SIGNIN_TIMEOUT, "command": " ".join([CLIS[backend][1], *recipe["args"]]),
-             "token_host": host if recipe.get("token") else ""}
+             "token_host": host if recipe.get("token") else "",
+             "provider": (body.get("provider") or HERMES_PROVIDERS[0]) if backend == "hermes" else ""}
     with lock:
         cancelled = signin.get("cancelled")
         signin.clear()
@@ -2380,7 +3124,7 @@ def make_default(backend: str, body: dict) -> dict:
     if backend not in BACKENDS:
         raise HTTPException(404, "no such brain")
     patch = {"default": backend}
-    if backend in HARNESSES and body.get("agent", True):
+    if is_harness(backend) and body.get("agent", True):
         patch["agent"] = backend
     return {"settings": save_settings(patch)}
 

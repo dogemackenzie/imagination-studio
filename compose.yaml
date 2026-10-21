@@ -45,7 +45,7 @@ services:
     volumes:
       - studio-data:/data
       # One checkpoint, read-only. The rest of the shared ComfyUI tree stays unmounted.
-      - /home/mcpadmin/ComfyUI/models/checkpoints/sd_xl_turbo_1.0_fp16.safetensors:/models/sd_xl_turbo_1.0_fp16.safetensors:ro
+      - ${SDXL_CHECKPOINT_SRC:?set SDXL_CHECKPOINT_SRC in .env}:/models/sd_xl_turbo_1.0_fp16.safetensors:ro
     tmpfs:
       - /tmp:size=256m
     security_opt:

@@ -5,7 +5,7 @@
 #   PROMPT_FILE=prompts/baker-image.txt bash scripts/image.sh "" out.png
 #   IMAGE_MODEL=flux3k-fast bash scripts/image.sh "a prompt" out.png   # FLUX3-K Fast (16 steps); flux3k-full: 50 steps
 #   IMAGE_MODEL=qwen-full bash scripts/image.sh "a prompt" out.png     # Qwen 2.1 Full: the base model, 40 steps at CFG 4
-#   IMAGE_MODEL=moss-image bash scripts/image.sh "a prompt" out.png    # MOSS-Image, 25 steps (DGX Spark only)
+#   IMAGE_MODEL=moss-image bash scripts/image.sh "a prompt" out.png    # MOSS-Image, 25 steps (oneshot-setup.sh --moss)
 #   IMAGE_MODEL=sdxl-turbo bash scripts/image.sh "a prompt" out.png   # SDXL Turbo, 512x512, only with a measured profile
 # Environment: PREFIX, QWEN_MODEL_DIR (Qwen-Image-2.1-Turbo: 8 steps on the schedule saved with the checkpoint),
 # QWEN_BASE_DIR (Qwen-Image-2.1, for TURBO=0), TURBO, STEPS (base model only, default 40), WIDTH, HEIGHT (multiples
@@ -45,17 +45,28 @@ case "${IMAGE_MODEL:-qwen}" in
     if [ -n "${PROMPT_FILE:-}" ]; then ARGS+=(--prompt-file "$PROMPT_FILE"); else ARGS+=(--prompt "$PROMPT"); fi
     # shellcheck disable=SC2086
     exec "$PREFIX/flux3-venv/bin/python" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/flux3_generate.py" "${ARGS[@]}" ${EXTRA:-};;
-  moss-image) echo "MOSS-Image runs on a DGX Spark (ComfyUI): there is no Mac build of it yet" >&2; exit 1;;
+  moss-image)
+    # MOSS-Image: the DGX Spark's ComfyUI graph (spark/spark_generate.py, ComfyUI's template: 25 steps of er_sde at CFG
+    # 2.5 against its negative prompt) on the Mac's own ComfyUI (mac/comfy.sh, oneshot-setup.sh --moss); NEGATIVE replaces
+    # the template's negative prompt. The server is stopped after the pictures so its memory is back for the next job.
+    [ -x "$PREFIX/comfy-venv/bin/python" ] || { echo "MOSS-Image is not installed here: bash oneshot-setup.sh --moss" >&2; exit 1; }
+    HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    ARGS=(image --model moss-image -o "$OUT" --width "${WIDTH:-1344}" --height "${HEIGHT:-768}" --seed "${SEED:-0}")
+    [ -z "${NEGATIVE:-}" ] || ARGS+=(--negative "$NEGATIVE")
+    if [ -n "${PROMPT_FILE:-}" ]; then ARGS+=(--prompt-file "$PROMPT_FILE"); else ARGS+=(--prompt "$PROMPT"); fi
+    # shellcheck disable=SC2086
+    PREFIX="$PREFIX" exec "$PREFIX/comfy-venv/bin/python" "$HERE/spark/spark_generate.py" "${ARGS[@]}" ${EXTRA:-};;
   sdxl-turbo) echo "SDXL Turbo submits a still to the shared ComfyUI on the measured RTX machine." >&2; exit 1;;
   qwen) ;;
   qwen-full) TURBO=0;;
   *) echo "IMAGE_MODEL is qwen, qwen-full, flux3k-fast, flux3k-full or moss-image, not ${IMAGE_MODEL}" >&2; exit 2;;
 esac
-# the Turbo checkpoint carries its schedule in model_index.json; the base model does not
+# the Turbo checkpoint carries its schedule in model_index.json (run as saved, no size shift, as on the Sparks);
+# the base model does not
 if grep -q sample_sigmas "$QWEN_MODEL_DIR/model_index.json" 2>/dev/null; then DISTILLED=1; else DISTILLED=0; fi
 SIZE=(-o "$OUT" --width "${WIDTH:-1344}" --height "${HEIGHT:-768}" --seed "${SEED:-0}")
 if [ "${TURBO:-1}" = 1 ] && [ "$DISTILLED" = 1 ]; then
-  ARGS=("$QWEN_MODEL_DIR" "${SIZE[@]}" --nodes 1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568)
+  ARGS=("$QWEN_MODEL_DIR" "${SIZE[@]}" --raw-nodes --nodes 1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568)
 elif [ "${TURBO:-1}" = 1 ]; then
   ARGS=("$QWEN_MODEL_DIR" "${SIZE[@]}" --lora "$TURBO_ADAPTER" --nodes 1.0,0.9375,0.875,0.75,0.5,0.25)
 else

@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "app"))
 sys.path.insert(0, str(ROOT / "spark"))
@@ -205,16 +207,56 @@ def test_qwen_full_runs_the_base_model_with_guidance():
         assert done.stdout.startswith(str(base)) and "--steps 40 --cfg 4" in done.stdout, done.stdout
 
 
-def test_a_spark_offers_moss_image_only_with_its_files_and_a_comfyui_that_knows_it():
+def test_qwen_turbo_runs_its_saved_nodes_as_saved():
+    # shifted for the size, the Turbo nodes leave a fine mesh over grass, rock and water; the Sparks run them as saved
+    if sys.platform.startswith("linux"):
+        assert '"1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0"' in (ROOT / "spark/spark_generate.py").read_text()
+        return
+    with tempfile.TemporaryDirectory() as folder:
+        turbo = Path(folder) / "Qwen-Image-2.1-Turbo"
+        turbo.mkdir()
+        (turbo / "model_index.json").write_text('{"_class_name": "QwenImage21Pipeline", "sample_sigmas": [1.0, 0.5]}')
+        prefix = Path(folder) / "prefix"
+        (prefix / "venv/bin").mkdir(parents=True)
+        (prefix / "venv/bin/python").write_text("#!/bin/sh\nshift\necho \"$@\"\n")
+        (prefix / "venv/bin/python").chmod(0o755)
+        done = subprocess.run(["bash", str(ROOT / "scripts/image.sh"), "a lighthouse", str(Path(folder) / "out.png")],
+                              capture_output=True, text=True,
+                              env={"PATH": "/usr/bin:/bin", "HOME": folder, "IMAGE_MODEL": "qwen", "PREFIX": str(prefix),
+                                   "QWEN_MODEL_DIR": str(turbo)})
+        assert done.returncode == 0, done.stderr
+        assert "--raw-nodes --nodes 1.0,0.978453," in done.stdout, done.stdout
+    script = (ROOT / "qwen_image_generate.py").read_text()
+    assert "holder.text_encoder.norm = nn.Identity()" in script and "elif nodes and args.raw_nodes:" in script
+
+
+def test_qwen_on_the_mac_draws_the_sparks_noise_for_a_seed():
+    # ComfyUI on a Spark draws torch.randn((1, 64, rows, columns), generator=torch.manual_seed(seed)); the Mac draws the
+    # same, so a seed gives the Spark's picture (MLX's own draw gave another picture, with heavier texture at seed 77)
+    np = pytest.importorskip("numpy")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("qwen_image_generate", ROOT / "qwen_image_generate.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    noise = module.torch_cpu_randn(0, (1, 64, 2, 2)).reshape(-1)
+    expected = [-1.1258398, -1.1523602, -0.2505786, -0.4338788, 0.3222749, 1.9028565, 0.3903958]
+    assert np.allclose(noise[[0, 1, 2, 3, 8, -2, -1]], expected, atol=1e-5)
+    assert '"--noise", choices=("spark", "mlx"), default="spark"' in (ROOT / "qwen_image_generate.py").read_text()
+
+
+def test_moss_image_is_offered_only_with_its_files_and_a_comfyui_that_knows_it():
     import server
 
-    had = server.SPARK, os.environ.get("SPARK_MODELS"), os.environ.get("PREFIX")
+    had = server.SPARK, {key: os.environ.get(key) for key in ("SPARK_MODELS", "PREFIX", "MAC_COMFY_MODELS")}
+    names = ("diffusion_models/moss_image_sft_bf16.safetensors", "text_encoders/qwen3.5_9b_bf16.safetensors",
+             "vae/flux2-vae_small.safetensors")
     with tempfile.TemporaryDirectory() as folder:
         try:
             server.SPARK = True
             os.environ["SPARK_MODELS"], os.environ["PREFIX"] = folder + "/models", folder + "/prefix"
+            os.environ.pop("MAC_COMFY_MODELS", None)
             files = Path(folder) / "models/MOSS-Image-Comfy"
-            for name in ("diffusion_models/moss_image_sft_bf16.safetensors", "text_encoders/qwen3.5_9b_bf16.safetensors"):
+            for name in names:
                 (files / name).parent.mkdir(parents=True, exist_ok=True)
                 (files / name).write_bytes(b"x")
             assert "moss-image" not in server.image_models()  # a ComfyUI from before v0.42.0 cannot load it
@@ -222,15 +264,40 @@ def test_a_spark_offers_moss_image_only_with_its_files_and_a_comfyui_that_knows_
             nodes.parent.mkdir(parents=True)
             nodes.write_text("")
             assert server.image_models()[-1] == "moss-image"
+            (files / names[2]).unlink()
+            assert "moss-image" not in server.image_models()  # the decoder too
+            # a Mac: the same files in the folder of its own ComfyUI (scripts/setup-comfy.sh), and that ComfyUI's environment
+            import capabilities
+            capabilities.use("mac")
             server.SPARK = False
-            assert "moss-image" not in server.image_models()  # no Mac build
+            mac = Path(folder) / "prefix/comfy-models"
+            for name in names:
+                (mac / name).parent.mkdir(parents=True, exist_ok=True)
+                (mac / name).write_bytes(b"x")
+            assert "moss-image" not in server.image_models()
+            (Path(folder) / "prefix/comfy-venv/bin").mkdir(parents=True)
+            (Path(folder) / "prefix/comfy-venv/bin/python").write_text("")
+            assert server.image_models()[-1] == "moss-image"
         finally:
+            import capabilities
+            capabilities.use(None)
             server.SPARK = had[0]
-            for key, value in (("SPARK_MODELS", had[1]), ("PREFIX", had[2])):
+            for key, value in had[1].items():
                 if value is None:
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+
+def test_a_mac_draws_moss_image_on_its_own_comfyui():
+    script = (ROOT / "scripts/image.sh").read_text()
+    branch = script[script.index("  moss-image)"):script.index("  qwen) ;;")]
+    assert '"$PREFIX/comfy-venv/bin/python" "$HERE/spark/spark_generate.py"' in branch and "--model moss-image" in branch
+    assert "no Mac build" not in script
+    import spark_generate as G
+
+    assert G.COMFY_SH.name == "comfy.sh" and (G.COMFY_SH.parent.name == "mac") == G.MAC
+    assert set(G.MAC_FILES) == {"ref2va", "text", "vae"} and all(name.endswith(".studio.sft") for name in G.MAC_FILES.values())
 
 
 def test_a_spark_without_qwens_files_does_not_offer_it_and_says_so_when_asked():
@@ -300,12 +367,12 @@ def test_the_moss_workflow_follows_comfys_template():
     assert w["7"]["inputs"]["text"] == "blurry" and w["12"]["inputs"]["steps"] == 50
 
 
-def test_moss_image_on_a_mac_says_where_it_runs():
+def test_moss_image_on_a_mac_without_its_comfyui_says_how_to_install_it():
     if sys.platform.startswith("linux"):
         return
     done = subprocess.run(["bash", str(ROOT / "scripts/image.sh"), "x", "/tmp/never.png"], capture_output=True, text=True,
                           env={"PATH": "/usr/bin:/bin", "HOME": "/tmp", "IMAGE_MODEL": "moss-image"})
-    assert done.returncode == 1 and "DGX Spark" in done.stderr
+    assert done.returncode == 1 and "oneshot-setup.sh --moss" in done.stderr
 
 
 def test_an_unknown_model_is_refused_by_the_script():

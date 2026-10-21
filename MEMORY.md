@@ -38,7 +38,7 @@ Recheck available memory, disk, and tools before implementation. During planning
 
 ## Existing ComfyUI discovered during planning
 
-- Location: `/home/mcpadmin/ComfyUI`, with its own `.venv`; active user systemd service `comfyui.service`.
+- Location: `/home/spark/ComfyUI`, with its own `.venv`; active user systemd service `comfyui.service`.
 - Version: ComfyUI 0.40.0, commit `e0a32bce84f4603f2b61b16b50f8958e68fd6171`, Python 3.12.3, PyTorch `2.14.1+cu130`. Its API sees the RTX 3060.
 - Listeners: `127.0.0.1:8188` and `172.17.0.1:8188`. `192.168.50.22:8190` is published by container `studio-studio-1` (also `:8443`); the socket uid is 0. Leave that container and both ports alone.
 - Model files already include SDXL Turbo (`checkpoints/sd_xl_turbo_1.0_fp16.safetensors`, about 6.46 GiB), SDXL base/refiner, FLUX 2 Klein variants, Wan variants, and supporting encoders/VAEs. Existing files are not proof of runtime fit. FLUX 2 Klein is not this repository's FLUX3-K.
@@ -101,7 +101,7 @@ Rechecked 2026-10-21 with `python3 scripts/doctor.py` (`--json --gpu-container -
 | Service | `comfyui.service` active, main PID 897018 at inspection. systemd `MemoryCurrent` about 11.4 GiB. An empty queue is not a GPU reservation |
 | Commit | Shared checkout `e0a32bce84f4603f2b61b16b50f8958e68fd6171`. Repository pin `b9b290e43f1eb379946dfeb013faf9bbefa1a618`. Studio HEAD `88fca5e` |
 | Nodes present | `CheckpointLoaderSimple`, `CLIPTextEncode`, `KSampler`, `VAEDecode`, `SaveImage`, `EmptyLatentImage`. Custom node names: `example_node.py.example`, `studio_film`, `studio_scene`, `websocket_image_save.py` |
-| Models | 48 weight files, about 181 GiB, under `/home/mcpadmin/ComfyUI/models`. Library was not hashed |
+| Models | 48 weight files, about 181 GiB, under `/home/spark/ComfyUI/models`. Library was not hashed |
 | SDXL Turbo candidate | `checkpoints/sd_xl_turbo_1.0_fp16.safetensors`, 6,938,081,905 bytes, sha256 `e869ac7d6942cb327d68d5ed83a40447aadf20e0c3358d98b2cc9e270db0da26`. Provenance against an upstream digest was not checked |
 | Port 8191 | Free. This is the provisional managed-renderer port |
 | Port 8190 | Container `studio-studio-1` publishes `192.168.50.22:8190` and `:8443`. Leave it alone |
@@ -212,8 +212,8 @@ Phase 0 added `scripts/doctor.py` and ran it. At the end of that slice the only 
 
 ## Maintenance
 
-Commit each finished slice before starting the next one. Push that slice to the fork `https://github.com/dogemackenzie/imagination-studio` (`fork`). Pull the original from `https://github.com/wassermanproductions/imagination-studio` (`origin`). Do not push to `origin` unless asked. The fork adds to the original. It stays able to take upstream updates.
+Commit each finished slice before starting the next one. Push that slice to the fork `https://github.com/dogemackenzie/imagination-studio` (`fork`). Pull updates from `https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman` (`origin`). `wasserman` is the previous remote. Do not push to `origin`. The fork adds to the original. It stays able to take upstream updates.
 
-GitHub on this machine is this checkout only. The CLI is logged in as dogemackenzie with `GH_CONFIG_DIR=/home/mcpadmin/.config/imagination-studio-gh`. The binary is `/home/mcpadmin/.local/share/imagination-studio/gh/bin/gh`. The credential helper is set on this repo's `fork` remote. Do not run `gh auth setup-git`, and do not give other projects that config.
+GitHub on this machine is this checkout only. The CLI is logged in as dogemackenzie with `GH_CONFIG_DIR=/home/spark/.config/imagination-studio-gh`. The binary is `/home/spark/.local/share/imagination-studio/gh/bin/gh`. The credential helper is set on this repo's `fork` remote. Do not run `gh auth setup-git`, and do not give other projects that config.
 
 Update this file when decisions are made or work is completed. Record what changed, validation results, unresolved issues, and the next concrete step. Keep proposals distinct from implemented behavior. Never store credentials, access tokens, or private prompt/media contents here.

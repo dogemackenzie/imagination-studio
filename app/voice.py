@@ -79,25 +79,46 @@ def tool(name: str) -> str | None:
 # ---------- backends ----------
 
 def mem_available_gb() -> float:
-    """MemAvailable of this machine in GB (a DGX Spark's GPU and system share one pool); on a Mac what vm_stat counts
-    as free, inactive, speculative and purgeable; -1 when unknown."""
+    """MemAvailable of this machine in GB (a DGX Spark's GPU and system share one pool); on a Mac what the kernel gets
+    back without compressing (telemetry.parse_vm_stat: free, file-backed and purgeable pages), 0 while macOS says its
+    memory pressure is critical; -1 when unknown."""
 
     if sys.platform == "darwin":
+        import telemetry
         try:
             said = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=2).stdout
-            size = int(re.search(r"page size of (\d+) bytes", said).group(1))
-            pages = sum(int(found) for found in re.findall(r"Pages (?:free|inactive|speculative|purgeable):\s+(\d+)", said))
-            return pages * size / 1024 ** 3
-        except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
+            mb = telemetry.parse_vm_stat(said, 1 << 40)
+            if mb is None:
+                return -1.0
+            return 0.0 if telemetry.mac_pressure_critical() else mb / 1024
+        except (OSError, ValueError, subprocess.TimeoutExpired):
             return -1.0
+    ram = -1.0
     try:
         with open("/proc/meminfo") as handle:
             for line in handle:
                 if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) / 1024 ** 2
+                    ram = int(line.split()[1]) / 1024 ** 2
+                    break
     except (OSError, ValueError, IndexError):
         pass
-    return -1.0
+    card = gpu_free_gb()
+    return ram if card is None or ram < 0 else min(ram, card)
+
+
+def gpu_free_gb() -> float | None:
+    """A discrete card's free memory in GB (spark/memory_guard.py's ``device``: an RTX Pro 6000, or the simulation of
+    one on a Spark); None on a DGX Spark, whose GPU memory is the machine's."""
+
+    try:
+        spark = str(Path(__file__).resolve().parent.parent / "spark")
+        if spark not in sys.path:
+            sys.path.insert(0, spark)
+        import memory_guard
+        card = memory_guard.device(fresh=True)
+    except Exception:  # noqa: BLE001  (a reading, never a reason to fail)
+        return None
+    return None if card is None else card["free_mb"] / 1024
 
 
 def comfy_up(port: int | None = None) -> bool:
@@ -282,6 +303,11 @@ class Served:
             settle()
             free = mem_available_gb()
             self.note("stopped ComfyUI before loading", available_gb=round(free, 1))
+        elif 0 <= free < self.NEED_GB:
+            # a server that has just ended (ComfyUI stopped by its memory floor, a render's process) gives its memory
+            # back over some seconds: a voice take queued right after one was refused with half of it still away
+            settle()
+            free = mem_available_gb()
         if 0 <= free < self.NEED_GB:
             raise RuntimeError(f"{self.title} needs about {self.NEED_GB:.0f} GB of free memory to load and this machine has "
                                f"{free:.0f} GB available")
@@ -646,15 +672,19 @@ class Cuda(Served):
                              lambda p: (p / "config.json").is_file() and (p / "model.safetensors.index.json").is_file())
         self.codec = located("drama3-codec", self.codec, Path.is_file)
         if not os.access(self.bin, os.X_OK):
-            return (f"No Drama 3 engine at {self.bin} (README, Voice: build TensorFold's drama3-cuda branch; DRAMA3_CUDA_BIN names another)."
+            return (f"No Drama 3 engine at {self.bin} (bash oneshot-setup-spark.sh --voice builds TensorFold's drama3-cuda engine "
+                    "and sets up the rest; DRAMA3_CUDA_BIN names another)."
                     + found_hint("drama3-binary"))
         if not self.lib.is_file():
-            return f"No libtensorfold_drama3.so at {self.lib} (the same build makes it; DRAMA3_CUDA_LIB names another)." + found_hint("drama3-lib")
+            return (f"No libtensorfold_drama3.so at {self.lib} (spark/build-drama3.sh makes it with the engine: bash "
+                    "oneshot-setup-spark.sh --voice; DRAMA3_CUDA_LIB names another)." + found_hint("drama3-lib"))
         if not (self.model / "config.json").is_file() or not (self.model / "model.safetensors.index.json").is_file():
-            return (f"No Drama 3 checkpoint at {self.model} (hf download fishaudio/drama-3; DRAMA3_CUDA_MODEL names another)."
+            return (f"No Drama 3 checkpoint at {self.model} (bash oneshot-setup-spark.sh --voice, or hf download fishaudio/drama-3; "
+                    "DRAMA3_CUDA_MODEL names another)."
                     + found_hint("drama3-checkpoint"))
         if not self.codec.is_file():
-            return (f"No converted codec at {self.codec} (once: codec_convert.py {self.model} {self.codec}; "
+            return (f"No converted codec at {self.codec} (converted once from the checkpoint's codec.pth: bash "
+                    f"oneshot-setup-spark.sh --voice, or spark/drama3_codec.py {self.model} {self.codec}; "
                     "DRAMA3_CUDA_CODEC names another)." + found_hint("drama3-codec"))
         free = mem_available_gb()
         if 0 <= free < self.NEED_GB and not comfy_up():

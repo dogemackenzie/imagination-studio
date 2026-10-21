@@ -12,7 +12,7 @@
     "sha256": "e869ac7d6942cb327d68d5ed83a40447aadf20e0c3358d98b2cc9e270db0da26",
     "sha256_source": "phase 0; this run checked the file size and did not read the file",
     "license": "Stability AI Non-Commercial Research Community License",
-    "path": "/home/mcpadmin/ComfyUI/models/checkpoints/sd_xl_turbo_1.0_fp16.safetensors"
+    "path": "/home/spark/ComfyUI/models/checkpoints/sd_xl_turbo_1.0_fp16.safetensors"
   },
   "recipe": {
     "width": 512,
@@ -39,7 +39,7 @@
   "gpu_processes": [
     {
       "pid": 897018,
-      "name": "/home/mcpadmin/ComfyUI/.venv/bin/python",
+      "name": "/home/spark/ComfyUI/.venv/bin/python",
       "vram_mib": 250
     }
   ],
@@ -51,7 +51,7 @@
   "attention": "pytorch",
   "precision": "fp16",
   "render": {
-    "output": "/home/mcpadmin/ImaginationStudio/sdxl-turbo/still_s1.png",
+    "output": "/home/spark/ImaginationStudio/sdxl-turbo/still_s1.png",
     "engine": "cuda",
     "model": "sdxl-turbo",
     "width": 512,

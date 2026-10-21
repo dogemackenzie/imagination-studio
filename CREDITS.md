@@ -41,7 +41,9 @@ brings work in from and sends work out to, each under its own licence (as its re
 
 The Studio reads and writes their files and ships none of their code, except where a section below says so (the
 Slate workflow and its files in `app/static/slate/`, and the Motion Previs analysis port, each with its NOTICE). Sam
-Wasserman's own art covers every engine, card and look in this studio.
+Wasserman's own art covers the engines, the start, action and vault cards and the look swatches; the Motion Previs
+action's card was rendered with the studio's own FLUX3-K and Qwen 2.1 models, and the home key art was generated with the
+image tool of Sam Wasserman's ChatGPT desktop app (OpenAI). Every picture's source is in `app/static/art/ART-SOURCES.md`.
 
 ## The film workflow in Production: Sam Wasserman's Slate
 
@@ -67,8 +69,9 @@ Wasserman (wassermanproductions.com). Powered by MiniMax H3.
 ## The LoRA hub's community presets: their authors
 
 From 2.6.3 the hub lists twenty-one community LoRAs in seven groups, twenty for MiniMax H3 and one for Qwen-Image-2.1. Each is its author's own work, under
-that file's own licence. The pack holds only their recipes; the essential bundle fetches each file from its author's
-page and keeps the author's model card and licence beside it.
+that file's own licence. The pack holds only their recipes. The essential bundle first takes the LoRAs whose stated licences allow passing them
+on (14 of the 22) from one hosted copy, `huggingface.co/drowzeys/keys-studio-lora-essential`, and every other file from
+its author's page; each keeps its author's model card and licence beside it.
 
 - **Camera & Viewpoint:** Camera Motion by Jojocodex; Head-mounted FPV by neph1; Equirectangular 360° by shamanic;
   360° Orbit by pablodawson.
@@ -127,8 +130,8 @@ them. Built with Qwen.
 Fast, 16 steps) and a base one (FLUX3-K Full, 50 steps), the Qwen3-VL-4B text encoder setup, the image autoencoder and
 the prompt upsampler with its system prompts, with their reference code and their files for ComfyUI. The weights are
 under the FLUX Kommunity License (non-commercial use; commercial use of the outputs for Qualifying Users under US$5M
-revenue); this pack ships none of them. On a DGX Spark they run on **ComfyUI**'s own FLUX 3 nodes (Jukka Seppänen
-(kijai) and the ComfyUI contributors, GPL-3.0, run as a separate program). On a Mac they run on **flux3-mlx** by
+revenue); this pack ships none of them. On a DGX Spark they run on **ComfyUI**'s own FLUX 3 nodes (comfyanonymous,
+Comfy Org and the ComfyUI contributors, GPL-3.0, run as a separate program). On a Mac they run on **flux3-mlx** by
 **felix-ab**, a port of BFL's reference code to MLX (Apache-2.0), with the 8-bit MLX conversion of the prompt
 upsampler by **VisualInference**.
 
@@ -137,7 +140,7 @@ upsampler by **VisualInference**.
 **OpenMOSS** released **MOSS-Image**: a 5B single-stream image transformer in a base and a supervised fine-tuned
 (SFT) checkpoint, with a Qwen3.5 9B text encoder and the FLUX.2 small decoder, and its JSON layout prompts. The weights
 are under the Apache License 2.0; this pack ships none of them. On a DGX Spark the SFT checkpoint runs on **ComfyUI**'s
-own MOSS-Image support (Jukka Seppänen (kijai) and the ComfyUI contributors, GPL-3.0, run as a separate program), from
+own MOSS-Image support (comfyanonymous, Comfy Org and the ComfyUI contributors, GPL-3.0, run as a separate program), from
 **Comfy Org**'s repackaged files.
 
 ## The MLX port the image family is adapted from: Filip Strand and the mflux contributors
@@ -282,6 +285,21 @@ of this pack's scripts. No code is shared; theirs is the far more complete tool.
 **ddalcu**'s **mlx-serve** showed how to make 30 steps cost nine: a velocity cache and attention reuse with careful
 gates. The engine pinned here carries an adaptation of it; it is not yet enabled in this pack's scripts.
 
+## The brain the studio runs itself: NVIDIA (Nemotron 3.5 Bolt) and Mia (MiaAI-Lab)
+
+**NVIDIA** made **NVIDIA Nemotron 3.5 Bolt** (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB, 74B parameters, 9B active)
+and its **LiLiCorr** drafter, the model the studio loads as its own brain (`app/bolt.py`): the official 24 GB
+checkpoint at a326822a and the drafter at 4c6a5613, downloaded by `--bolt`, under the **OpenMDW License Agreement 1.1**
+(use, modification and redistribution free, commercial use included; a copy passed on keeps the agreement and NVIDIA's
+notices). No weights are in this pack.
+
+**Mia (MiaAI-Lab)** made **Nemotron-3.5-Bolt-TensorFold-DGX-Spark** (MIT), the recipe that serves Bolt on one DGX Spark
+with TensorFold's native engine: the Bolt lane backend (`libbolt.so`, the packed-weight kernels, the LiLiCorr drafter
+run inside it) and the patches to TensorFold 46a08c18. The studio's CUDA engine is that build, copied out of Mia's
+image or the carrier by `spark/build-bolt.sh`; the trimmed settings it runs with (4 streams, 65,536 tokens, 2 GiB of
+prompt cache) are the studio's. TensorFold is Ash Hart's and the contributors'; **llama.cpp** (Georgi Gerganov and the
+ggml contributors) runs Bolt on a Mac until TensorFold's Metal port of the engine lands.
+
 ## The agents and brains you connect: their makers
 
 The studio drives the coding agents and model servers you already use, each with your own sign-in or on your own
@@ -314,6 +332,34 @@ machine; none of their code ships in this pack.
 - **Sebastián Ramírez** — **FastAPI**; **Encode** — **Starlette** and **Uvicorn**: the web app.
 - **The Geist Project Authors** — **Geist** and **Geist Mono**; **The Instrument Serif Project Authors** — **Instrument
   Serif** (SIL Open Font License, `app/static/fonts/`).
+
+## Libraries, conversions and build tools
+
+What the studio's installers fetch, its engines bundle and its code imports, beyond the models above. Each is its
+authors' work under its own licence; none of it is this pack's.
+
+- **Mobius Labs** — **faster-whisper-large-v3-turbo**, the CTranslate2 conversion the QA gate hears speech with (MIT).
+- **Lihe Yang et al.** (HKU, TikTok) — **Depth Anything** (Apache-2.0), and **Xenova** (Joshua Lochner) — its ONNX
+  conversion the Motion Previs tab's depth pass runs; **Google** — **MediaPipe** and its Pose Landmarker models
+  (Apache-2.0); **OpenCV**; **Microsoft** — **ONNX Runtime** (MIT). Their notices are in `THIRD_PARTY_NOTICES.md`.
+- **Google** — **T5-base**, the text encoder inside Stable Audio Open (Apache-2.0); **SentencePiece**.
+- **Descript** — **descript-audio-codec** (MIT), and the **sgl-project** SGLang-Omni team — the `fishaudio_s2_pro`
+  codec files (Apache-2.0): the installer fetches both by hash to build Fish Audio's codec on a DGX Spark.
+- Inside the Bolt engine (`spark/build-bolt.sh`): **MLC-AI** — **xgrammar** (Apache-2.0) with **DMLC**'s dlpack and
+  **Kazuho Oku**'s picojson; **libjpeg-turbo** and the **Independent JPEG Group**; **FFmpeg**'s decoders (LGPL-2.1+);
+  **ggml**'s quantization tables (MIT).
+- **BusyBox** (GPL-2.0) — the base layer of the GHCR carrier image.
+- **Zig Software Foundation** — **Zig** 0.17, which builds every native engine (MIT); **NVIDIA** — the **CUDA toolkit**.
+- **Simple Icons** contributors — the source of the Qwen, Claude, Gemini and Fish Audio marks (CC0-1.0,
+  `app/static/brand/THIRD-PARTY-MARKS.md`).
+- **NumPy**, **Pillow**, **PyAV**, **SciPy**, **soundfile**, **einops**, **safetensors**, **tokenizers** and
+  **accelerate** (Hugging Face), **mlx-lm**, **mlx-whisper** and **mlx-audio** (ml-explore, Prince Canuma), **aiohttp**,
+  **Pydantic**, **python-multipart**, **llguidance**, **sounddevice**, **miniaudio**, **Matplotlib**; and for
+  ComfyUI-MMAudio, **open_clip**, **timm**, **librosa**, **torchdiffeq** and **OmegaConf**.
+- **Astral** — **uv**; **Homebrew**; **Node.js** and **npm**; **Docker**.
+- **kohya-ss** — the LoRA file layout `scripts/convert-lora.py` reads; **OpenTimelineIO** (Academy Software
+  Foundation), Apple's **FCPXML** and the CMX **EDL** — the timeline formats the Suite writes with its own code.
+- **Anthropic** — **Claude**, which wrote much of this code with Keys.
 
 ## Test prompts
 

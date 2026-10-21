@@ -2,7 +2,7 @@
 """TensorFold Studio web app: a create wizard, a production board and a clip editor over the pack's scripts.
 
     bash scripts/app.sh            # http://127.0.0.1:7870
-    HOST=0.0.0.0 bash scripts/app.sh   # reachable from other machines on the network (no login: trusted LANs only)
+    HOST=0.0.0.0 bash scripts/app.sh   # reachable from other machines on the network (behind the access key, app/access.py: trusted LANs only)
 
 One job runs at a time, in the order queued; every job is one of this pack's scripts with environment variables.
 Projects, uploads and renders live under $STUDIO_HOME (default ~/ImaginationStudio; app/studio_home.py).
@@ -10,6 +10,7 @@ Projects, uploads and renders live under $STUDIO_HOME (default ~/ImaginationStud
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import ipaddress
 import json
@@ -27,11 +28,11 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 HERE = Path(__file__).resolve().parent
@@ -43,6 +44,9 @@ HOME = studio_home(move=__name__ == "__main__")  # moved only when the studio st
 os.environ["STUDIO_HOME"] = str(HOME)  # the scripts and engines it starts keep everything in the same folder
 for name in ("projects", "uploads", "renders", "scouts", "exports"):
     (HOME / name).mkdir(parents=True, exist_ok=True)
+import access  # noqa: E402  (the studio's access key, beside this file)
+ACCESS_KEY = access.ensure(HOME)  # <studio folder>/access-key, 0600, made once and kept
+APP_PORT = os.environ.get("PORT", "7870")
 
 import lengths  # noqa: E402  (which frame counts the model takes, beside this file)
 sys.path.insert(0, str(PACK / "spark"))
@@ -231,7 +235,9 @@ def machine() -> tuple[str, str]:
                                                text=True, timeout=5).stdout.strip().splitlines()[0])
             except (OSError, IndexError, subprocess.TimeoutExpired):
                 return "spark", "DGX SPARK · CUDA · H3-CUDA"  # not kept: asked again on a later call
-        return "spark", f"DGX SPARK · {GPU_NAME[0].upper()} · H3-CUDA"
+        # the same build on a CUDA workstation (an RTX Pro 6000): named by its card, not as a DGX Spark
+        return "spark", (f"DGX SPARK · {GPU_NAME[0].upper()} · H3-CUDA" if "GB10" in GPU_NAME[0].upper()
+                         else f"CUDA · {GPU_NAME[0].upper()} · H3-CUDA")
     if where == "mac":
         # no chip name: the same recipe runs from an M1 with 64 GB up
         return "mac", "MAC · APPLE SILICON MX · H3-METAL"
@@ -396,6 +402,17 @@ class WriteGuard:
                 return await send({"type": "websocket.close", "code": 1008})
             return await JSONResponse({"error": "Open the Studio by this computer's name, its address or its Tailscale name (STUDIO_ALLOWED_HOSTS adds another)."},
                                       status_code=403)(scope, receive, send)
+        if access.enabled():
+            client = (scope.get("client") or (None,))[0]
+            if (access.needs_key(scope["path"]) and not this_computer(client, headers.get("host", ""))
+                    and not access.allowed(headers, APP_PORT, ACCESS_KEY)):
+                if scope["type"] == "websocket":
+                    return await send({"type": "websocket.close", "code": 4401})
+                return await JSONResponse({"error": "This device needs the studio's access key once: on the computer running the "
+                                                    "studio, Settings → Access key has a QR code for it.", "access": "key"},
+                                          status_code=401)(scope, receive, send)
+            if scope["type"] == "http" and scope["method"] == "GET" and b"key=" in scope.get("query_string", b""):
+                return await self.take_key(scope, receive, send, headers)
         if scope["type"] != "http" or scope["method"] not in WRITES or not scope["path"].startswith("/api/"):
             return await self.app(scope, receive, send)
         why = refused(headers)
@@ -435,7 +452,161 @@ class WriteGuard:
             await too_large(scope, receive, send)
 
 
+    async def take_key(self, scope, receive, send, headers):
+        """``/?key=<key>`` (the launcher's first page): the key kept as this app's cookie and the page opened again
+        without it in the address bar. A wrong key is ignored: the page opens and asks for it."""
+
+        query = [(name, value) for name, value in parse_qsl(scope["query_string"].decode("latin-1"), keep_blank_values=True)]
+        offered = next((value for name, value in query if name == "key"), "")
+        if not access.matches(offered, ACCESS_KEY):
+            return await self.app(scope, receive, send)
+        rest = urlencode([(name, value) for name, value in query if name != "key"])
+        answer = Response(status_code=303, headers={"Location": scope["path"] + ("?" + rest if rest else ""), "Cache-Control": "no-store"})
+        answer.headers.append("Set-Cookie", access.cookie(APP_PORT, ACCESS_KEY, secure_request(scope, headers)))
+        return await answer(scope, receive, send)
+
+
+def _host_name(host: str) -> str:
+    """The host of a Host header, without a port. The same split as access.local."""
+
+    name = (host or "").strip().lower()
+    name = name[1:].split("]", 1)[0] if name.startswith("[") else name.rsplit(":", 1)[0] if name.count(":") == 1 else name
+    return name.rstrip(".")
+
+
+def this_computer(client: str | None, host: str) -> bool:
+    """access.local with this computer's own network addresses and names: its own browser opening the studio by the
+    machine's network address (HOST=0.0.0.0) or its .local name needs no key either.
+
+    A published container sees the host's browser as the docker bridge peer. A Host of localhost,
+    127.0.0.1 or ::1 is still this computer. The published LAN address is not: that browser sends
+    the LAN name and is asked for the key.
+    """
+
+    if client and client.startswith("::ffff:") and "." in client:
+        client = client[7:]
+    if os.environ.get("STUDIO_CONTAINER") == "1" and _host_name(host) in access.LOOPBACK_HOSTS:
+        return True
+    if access.local(client, host):
+        return True
+    if client not in access.LOOPBACK_CLIENTS and not on_network():
+        return False
+    return access.local(client, host, network_addresses(), OWN["labels"] or ())
+
+
+def secure_request(scope, headers) -> bool:
+    """Whether the page was opened over HTTPS (directly, or through `tailscale serve`): its cookie is then Secure."""
+
+    return scope.get("scheme") == "https" or headers.get("x-forwarded-proto", "").lower() == "https"
+
+
 app.add_middleware(WriteGuard)
+
+
+def keyed_answer(body: dict, request: Request, key: str) -> JSONResponse:
+    answer = JSONResponse(body)
+    answer.headers.append("Set-Cookie", access.cookie(APP_PORT, key, secure_request(request.scope, {k.lower(): v for k, v in request.headers.items()})))
+    return answer
+
+
+@app.get("/api/key")
+def key_state(request: Request):
+    """Whether this browser needs the key (not on the computer itself) and whether it has it."""
+
+    headers = {k.lower(): v for k, v in request.headers.items()}
+    here = this_computer(request.client.host if request.client else None, headers.get("host", ""))
+    return {"needed": access.enabled() and not here, "signed_in": here or access.allowed(headers, APP_PORT, ACCESS_KEY), "local": here}
+
+
+# interfaces that are not a network another computer reaches this one on: containers, VMs, VPN tunnels (Tailscale's
+# own link is offered by its name), Apple's peer-to-peer links
+VIRTUAL_IFACE = ("lo", "docker", "br-", "veth", "virbr", "vmnet", "vmenet", "bridge", "utun", "tailscale", "awdl", "llw",
+                 "anpi", "ap", "gif", "stf", "cni", "flannel", "podman")
+_NETWORK: dict = {"at": 0.0, "value": []}
+
+
+def network_addresses() -> list[str]:
+    """This computer's private IPv4 addresses on real network interfaces, the home network (192.168.x) first: where
+    another computer on the network opens the studio (when it listens beyond loopback, HOST=0.0.0.0). Kept a minute."""
+
+    if time.monotonic() - _NETWORK["at"] < 60:
+        return _NETWORK["value"]
+    found: list[tuple[str, str]] = []
+    try:
+        if sys.platform == "darwin":
+            iface = ""
+            for line in subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=3).stdout.splitlines():
+                if line and not line[0].isspace():
+                    iface = line.split(":", 1)[0]
+                elif line.strip().startswith("inet "):
+                    found.append((iface, line.split()[1]))
+        else:
+            for line in subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True, timeout=3).stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 4:
+                    found.append((parts[1], parts[3].split("/")[0]))
+    except (OSError, subprocess.SubprocessError):
+        found = []
+    out = []
+    for iface, address in found:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if iface.startswith(VIRTUAL_IFACE) or not ip.is_private or ip.is_loopback or ip.is_link_local or ip in ipaddress.ip_network("100.64.0.0/10"):
+            continue
+        out.append(address)
+    out.sort(key=lambda a: (not a.startswith("192.168."), not a.startswith("10."), a))
+    _NETWORK.update(at=time.monotonic(), value=list(dict.fromkeys(out)))
+    return _NETWORK["value"]
+
+
+def on_network() -> bool:
+    return os.environ.get("HOST", "127.0.0.1") in ("0.0.0.0", "::", "")
+
+
+@app.get("/api/key/share")
+def key_share(request: Request):
+    """For a signed-in browser (the key guards this route): the key and the addresses that sign another device in,
+    this computer's and its Tailscale name's (a phone, after `tailscale serve --bg PORT`)."""
+
+    links = [{"label": "This computer", "url": f"http://127.0.0.1:{APP_PORT}/?key={ACCESS_KEY}"}]
+    if on_network():  # opened to the network: another computer there signs in at this one's address
+        links = [{"label": f"Your network ({address})", "kind": "network", "url": f"http://{address}:{APP_PORT}/?key={ACCESS_KEY}"}
+                 for address in network_addresses()] + links
+    labels, tailnet = OWN.get("labels") or set(), OWN.get("tailnet")
+    if tailnet:
+        for label in sorted(labels):
+            if "." not in label and label.replace("-", "").isalnum():
+                links.insert(0, {"label": "Your phone (Tailscale)", "kind": "tailscale", "url": f"https://{label}.{tailnet}/?key={ACCESS_KEY}"})
+                break
+    return {"key": ACCESS_KEY, "links": links, "file": str(access.path(HOME)), "on_network": on_network(), "port": APP_PORT}
+
+
+@app.post("/api/key/new")
+def key_new(request: Request):
+    """A new key: every other browser and phone is signed out; this browser keeps working with the new one."""
+
+    global ACCESS_KEY
+    ACCESS_KEY = access.rotate(HOME)
+    return keyed_answer({"ok": True}, request, ACCESS_KEY)
+
+
+@app.post("/api/key")
+async def take_typed_key(request: Request):
+    """The key typed on the page's prompt (a phone, a browser the launcher did not open): kept as this app's cookie.
+    A wrong key waits a second before it is refused."""
+
+    try:
+        offered = str((await request.json()).get("key") or "").strip()
+    except (ValueError, AttributeError):
+        offered = ""
+    if not access.matches(offered, ACCESS_KEY):
+        await asyncio.sleep(1)
+        return JSONResponse({"error": "That is not this studio's access key.", "access": "key"}, status_code=401)
+    answer = JSONResponse({"ok": True})
+    answer.headers.append("Set-Cookie", access.cookie(APP_PORT, ACCESS_KEY, secure_request(request.scope, {k.lower(): v for k, v in request.headers.items()})))
+    return answer
 
 
 class SecurityHeaders:
@@ -939,7 +1110,8 @@ def turbo_ready() -> bool:
 # the model loaded, bf16: Qwen 9.7 on an M5 Ultra; FLUX3-K Fast 10.5 on a DGX Spark (ComfyUI) and 14.9 on an M5 Ultra
 # (flux3-mlx), Full 57.5 on a Spark and 53.6 on an M5 Ultra; BFL's prompt upsampler adds about 18 s on a Spark (8-bit,
 # ComfyUI) and 5 s on an M5 Ultra (8-bit MLX), once per prompt. MOSS-Image (OpenMOSS, Apache 2.0, oneshot-setup-spark.sh
-# --moss) runs on a Spark only, on ComfyUI v0.42.0's own support: 45 s for 1344x768 with the model loaded.
+# --moss / oneshot-setup.sh --moss) runs on ComfyUI v0.42.0's own support on both machines, the Mac's ComfyUI on
+# PyTorch's Metal device (mac/comfy.sh): 45 s for 1344x768 on a Spark with the model loaded.
 IMAGE_MODELS = {"qwen": ("Qwen 2.1 Turbo", "8 steps, the quickest draft; Qwen Research License (non-commercial)"),
                 "qwen-full": ("Qwen 2.1 Full", "the 40-step base model at CFG 4: more detail than Turbo, about 8x slower"),
                 "flux3k-fast": ("FLUX3-K Fast", "FLUX 3 Image Klein, 16 steps: sharper text, whole figures, better prompt following"),
@@ -978,19 +1150,26 @@ def image_models() -> list[str]:
                      and (folder / ("FLUX3-K-Fast" if name == "flux3k-fast" else "FLUX3-K-Full") / "model.safetensors").is_file())
         if ready:
             found.append(name)
-    if SPARK and moss_ready():
+    if moss_ready():
         found.append("moss-image")
     return found
 
 
 def moss_ready() -> bool:
-    """MOSS-Image's ComfyUI files, and a ComfyUI that knows the model (v0.42.0 and later)."""
+    """MOSS-Image's ComfyUI files, and a ComfyUI that knows the model (v0.42.0 and later): a Spark's, or on a Mac the
+    ComfyUI of scripts/setup-comfy.sh in its own environment."""
 
-    models = Path(os.environ.get("SPARK_MODELS", Path.home() / "spark-studio-models")) / "MOSS-Image-Comfy"
-    comfy = Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-studio")) / "ComfyUI"
+    prefix = Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-studio"))
+    if SPARK:
+        models = Path(os.environ.get("SPARK_MODELS", Path.home() / "spark-studio-models")) / "MOSS-Image-Comfy"
+    else:
+        models = Path(os.environ.get("MAC_COMFY_MODELS") or prefix / "comfy-models")
+        if not (prefix / "comfy-venv/bin/python").exists():
+            return False
     return ((models / "diffusion_models/moss_image_sft_bf16.safetensors").is_file()
             and (models / "text_encoders/qwen3.5_9b_bf16.safetensors").is_file()
-            and (comfy / "comfy_extras/nodes_moss_image.py").is_file())
+            and (models / "vae/flux2-vae_small.safetensors").is_file()
+            and (prefix / "ComfyUI/comfy_extras/nodes_moss_image.py").is_file())
 
 
 def qwen_ready() -> bool:
@@ -1025,7 +1204,7 @@ def image_model_env(params: dict) -> dict:
     if name not in image_models():
         if name == "sdxl-turbo":
             raise HTTPException(400, sdxl_turbo.script_block() or "SDXL Turbo is not offered on this machine.")
-        how = {"qwen": "", "qwen-full": " --image-edit", "moss-image": " --moss (on a DGX Spark)"}.get(name, " --flux3")
+        how = {"qwen": "", "qwen-full": " --image-edit", "moss-image": " --moss"}.get(name, " --flux3")
         raise HTTPException(400, f"{IMAGE_MODELS[name][0]} is not installed here: oneshot-setup.sh{how} adds it"
                                  + (" (Machine → Models & weights shows what is missing)" if name == "qwen" else ""))
     env = {"IMAGE_MODEL": name}
@@ -1270,14 +1449,90 @@ def clip_seconds(params: dict) -> float:
 
 
 def held_room() -> int | None:
-    """What this machine has for a render while Drama 3 or MiniMax Music 3's CUDA engine is loaded (both are unloaded
-    before any other job starts, so their memory counts as that job's, like the ComfyUI server's own); None otherwise."""
+    """What this machine has for a render while Drama 3, MiniMax Music 3's CUDA engine or NVIDIA Nemotron 3.5 Bolt is
+    loaded (each is unloaded before a job that needs its memory starts, so their memory counts as that job's, like the
+    ComfyUI server's own); None otherwise."""
 
-    held = [one for one in (voice.room_mb(), music.room_mb()) if one]
+    held = [one for one in (voice.room_mb(), music.room_mb(), bolt.room_mb()) if one]
     return max([memory_guard.room_mb() or 0] + held) if held else None
 
 
-def memory_of(params: dict, env: dict, frames: int, lora: bool, found: dict | None = None) -> dict:
+def bolt_room_mb(resident_gb: float) -> int | None:
+    """What this machine has for a job with Bolt resident beside it (MB): the memory guard's room (what is available,
+    or what ComfyUI's guard noted before its server loaded) less what Bolt holds, or would hold once loaded."""
+
+    room = memory_guard.room_mb()
+    if room is None:
+        return None
+    one = bolt.engine()
+    if not one.loaded():
+        return int(room - resident_gb * 1024)
+    if memory_guard.discrete():  # the card's room already counts what Bolt holds on it
+        return int(room)
+    now = memory_guard.meminfo().get("MemAvailable") or room
+    try:
+        noted = Path(memory_guard.state_file()).stat().st_mtime
+    except OSError:
+        noted = None
+    if room > now and noted is not None and noted < one.loaded_at:  # ComfyUI's note was made before Bolt loaded
+        room -= bolt.held_mb()
+    return int(room)
+
+
+def bolt_need(job: dict, resident_gb: float) -> tuple[bool, str] | None:
+    """Whether a job of this machine's queue fits with NVIDIA Nemotron 3.5 Bolt resident beside it (``resident_gb``
+    held by it), from the measured peaks: (fits, the figures said in the job's log), or None when the job's kind has no
+    measured peak here (Bolt then goes). On a DGX Spark the memory guard's estimate (clips, songs, sound; Drama 3's
+    NEED_GB); on a Mac the peaks measured on an M5 Ultra (bolt.MAC_PEAK_GB) against what vm_stat counts as available."""
+
+    kind, params = job["kind"], job["params"]
+    if not SPARK:
+        free = voice.mem_available_gb()
+        if free < 0:
+            return None
+        one = bolt.engine()
+        # loaded, the available memory already lacks what it took, but not its mapped weights (counted as available)
+        have = free - getattr(one, "uncounted_gb", 0.0) if one.loaded() else free - resident_gb
+        turbo = params.get("quality") == "turbo" or params.get("engine") == "turbo" or bool(params.get("references"))
+        peak = bolt.MAC_PEAK_GB["turbo"] if turbo and kind in ("video", "studio", "long") else bolt.MAC_PEAK_GB.get(kind, bolt.MAC_PEAK_UNKNOWN_GB)
+        left, floor = have - peak, one.guard_gb
+        return left >= floor, (f"{have:.0f} GB available with Bolt resident, the job's measured peak about {peak:.0f} GB, "
+                               f"{left:.0f} GB left against a floor of {floor:g}")
+    room = bolt_room_mb(resident_gb)
+    if room is None:
+        return None
+    floor = memory_guard.floor_mb()
+    try:
+        if kind in ("video", "studio", "long"):
+            chosen, _ = custom(params) if params.get("preset") == "custom" else ({}, False)
+            sized = {**(PRESETS[params["preset"]][2] if params.get("preset") in PRESETS else {}), **chosen}
+            frames = lengths.of({"frames": params.get("frames"), "seconds": min(float(params.get("seconds") or 5), LONGEST)})
+            pictures, videos = params.get("references") or [], params.get("reference_videos") or []
+            found = {"pictures": pictures, "videos": [str(inside(v)) for v in videos]} if pictures or videos else None
+            said = memory_of(params, sized, frames, bool(params.get("loras")), found, available_mb=room)
+        elif kind == "music":
+            said = memory_guard.music_check(float(params.get("seconds") or 60), available_mb=room,
+                                            route=getattr(music.engine(), "guard_route", "music"))
+        elif kind in sound.KINDS:
+            said = memory_guard.sound_check(kind, float(params.get("seconds") or 10), available_mb=room)
+            if said.get("need_mb") is None:
+                return None
+        elif kind == "voice":
+            one = voice.backend()
+            need = 0 if one.loaded() else int(float(getattr(one, "NEED_GB", 50)) * 1024)
+            said = {"fits": room - need >= floor, "need_mb": need, "available_mb": room}
+        else:
+            return None
+    except (HTTPException, ValueError, KeyError, TypeError):
+        return None
+    if said.get("route") is None and said.get("need_mb") is None:
+        return None
+    need, have = said.get("need_mb") or 0, said.get("available_mb") or room
+    return bool(said.get("fits")), (f"{have / 1000:.0f} GB for the job with Bolt resident, the job's estimated peak about "
+                                    f"{need / 1000:.0f} GB, the floor {floor / 1000:.0f} GB")
+
+
+def memory_of(params: dict, env: dict, frames: int, lora: bool, found: dict | None = None, available_mb: int | None = None) -> dict:
     """Whether a clip fits this machine's memory (spark/memory_guard.py; a DGX Spark only, everything fits on a Mac):
     the size it is generated at, its frames, whether references put it on ComfyUI's own bfloat16 blocks and whether a
     LoRA is merged into TensorFold's engine (or, with an engine build that cannot take one, goes to those blocks too)."""
@@ -1293,8 +1548,9 @@ def memory_of(params: dict, env: dict, frames: int, lora: bool, found: dict | No
     lora = lora or bool(found and params.get("ref_turbo"))
     engine = SPARK_ENGINE_LIB.exists() and (not lora or memory_guard.engine_takes_lora(SPARK_ENGINE_LIB))
     # a Drama 3 server kept loaded after a voice take is unloaded before this job starts (voice.release): its memory
-    # counts as this job's, like the ComfyUI server's own; so does MiniMax Music 3's CUDA engine (music.release)
-    room = held_room()
+    # counts as this job's, like the ComfyUI server's own; so does MiniMax Music 3's CUDA engine (music.release), and
+    # NVIDIA Nemotron 3.5 Bolt's (bolt.admit unloads it when the job does not fit beside it)
+    room = held_room() if available_mb is None else available_mb
     return memory_guard.check(width, height, frames, lora=lora, references=bool(found), available_mb=room,
                               base=env.get("SPARK_BASE") == "h3", engine=engine,
                               pictures=len(found.get("pictures") or []),
@@ -1329,13 +1585,69 @@ def without_ffmpeg(kind: str, params: dict) -> str:
     return f"{what} needs ffmpeg, which is not installed on this machine: {FFMPEG_HOW}" if what else ""
 
 
+# A Mac's ComfyUI jobs (mac/comfy.sh: Upscale, Find and Remove a person, MOSS-Image): their peaks, measured on the
+# M5 Ultra (GB, the ComfyUI server's own memory at its highest, models loaded from nothing). Remove a person and Upscale
+# hold MiniMax H3's bf16 Ref2VA transformer and text encoder (62 GB each) at once.
+MAC_COMFY_PEAK_GB = {"upscale": 125.0, "mask": 12.0, "remove": 135.0, "moss-image": 40.0}  # measured 118, SAM only, 127, 36
+MAC_COMFY_FLOOR_GB = 16.0  # what stays available beside it: mac/comfy.sh's kill-guard stops the server under this
+
+
+def mac_heaviest(limit: int = 3, least_gb: float = 4.0) -> str:
+    """The processes holding the most memory on this Mac other than the Studio's ComfyUI, for a refusal's reason:
+    "ollama 114 GB, tensorfold-native 34 GB"."""
+
+    try:
+        said = subprocess.run(["ps", "-axo", "rss=,comm="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    rows = []
+    for line in said.splitlines():
+        size, _, name = line.strip().partition(" ")
+        if size.isdigit() and int(size) / 1024 ** 2 >= least_gb and "comfy-venv" not in name:
+            rows.append((int(size) / 1024 ** 2, Path(name.strip()).name))
+    return ", ".join(f"{name} {gb:.0f} GB" for gb, name in sorted(rows, reverse=True)[:limit])
+
+
+def mac_comfy_room(what: str) -> None:
+    """On a Mac, refuses a ComfyUI job whose measured peak does not fit: what is available now (voice.mem_available_gb:
+    what macOS gets back without compressing) and what the Studio's ComfyUI server already holds, less the floor. A job
+    that did not fit stalled the window server for 125 s and the Mac restarted (2026-10-20: ollama held 114 GB)."""
+
+    peak = MAC_COMFY_PEAK_GB.get(what)
+    # A Spark has its own guard. Linux app-only, a controller and a managed RTX are not a Mac:
+    # this check is the Mac's ComfyUI peak, and a test turns it on with capabilities.use("mac").
+    if SPARK or capabilities.mode(SPARK) != "mac" or not peak:
+        return
+    free = voice.mem_available_gb()
+    if free < 0:
+        return
+    held = 0.0
+    try:
+        said = subprocess.run(["pgrep", "-f", "[m]ain.py --listen 127.0.0.1 --port " + os.environ.get("MAC_COMFY_PORT", "8191")],
+                              capture_output=True, text=True, timeout=5).stdout.split()
+        if said:
+            rss = subprocess.run(["ps", "-o", "rss=", "-p", said[0]], capture_output=True, text=True, timeout=5).stdout.strip()
+            held = int(rss) / 1024 ** 2 if rss.isdigit() else 0.0
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    have = free + held
+    if have - peak < MAC_COMFY_FLOOR_GB:
+        others = mac_heaviest()
+        raise HTTPException(400, f"this needs about {peak:.0f} GB and this Mac has {have:.0f} GB for it (keeping "
+                                 f"{MAC_COMFY_FLOOR_GB:.0f} GB free), so it is not started"
+                            + (f": the most memory is held by {others}. Quit what you do not need and try again" if others else ""))
+
+
 def build(kind: str, params: dict, job_id: str, room: bool = True) -> tuple[list[str], dict, list[str]]:
     """(command, environment, output paths) for one job. ``room`` False leaves this machine's memory out of it: the
     clip renders on another Spark, whose own guard is asked (sparks.py)."""
 
     scripts = PACK / "scripts"
     if kind in actions.KINDS:  # a Library action (actions.py): turnaround, upscale, mask, remove
-        return action_build(kind, params, job_id)
+        built = action_build(kind, params, job_id)
+        if room:
+            mac_comfy_room(kind)
+        return built
     if kind in sound.KINDS:  # a sound effect or a clip's foley (sound.py)
         return sound_build(kind, params, job_id)
     seed = str(int(params.get("seed", 0)))
@@ -1360,6 +1672,8 @@ def build(kind: str, params: dict, job_id: str, room: bool = True) -> tuple[list
             count = int(params.get("count", 1))
             if not 1 <= count <= sdxl_turbo.max_count():
                 raise HTTPException(400, f"SDXL Turbo scouts are 1 to {sdxl_turbo.max_count()} pictures, one at a time")
+        if room:
+            mac_comfy_room(params.get("image_model") or "")
         first = int(seed)
         outputs = [str(folder / f"scout_s{first + i}.png") for i in range(count)] + [str(folder / "sheet.jpg")]
         return ["bash", str(scripts / "scout.sh"), prompt, str(count), str(folder)], env, outputs
@@ -1368,7 +1682,7 @@ def build(kind: str, params: dict, job_id: str, room: bool = True) -> tuple[list
     if kind == "edit":  # a picture re-drawn by the image model (picture_edit.py)
         return edit_build(params, job_id)
     preset = params.get("preset", "small" if SPARK else "draft")
-    quality = params.get("quality", "standard")
+    quality = params.get("quality", "fh8" if SPARK else "standard")  # a Spark has no "standard": an API call or an agent may leave it out
     chosen, _ = custom(params)
     if (preset not in PRESETS and preset != "custom") or quality not in QUALITIES:
         raise HTTPException(400, "unknown preset or quality")
@@ -1728,6 +2042,10 @@ def perform(job: dict, worker: dict | None = None) -> None:
         if job["kind"] not in ("music", "export", "soundtrack") and worker is None and not job.get("remote"):
             if music.release(f"a {job['kind']} job needs the GPU"):
                 job["log"] += "[tensorfold] MiniMax Music 3 was unloaded to give this job its memory\n"
+        # NVIDIA Nemotron 3.5 Bolt (bolt.py), the Studio's brain engine: unloaded before this job when the job's measured
+        # peak does not fit beside it (bolt_need), after the answers in flight; held until the queue is empty
+        if job["kind"] not in ("export", "soundtrack") and worker is None and not job.get("remote"):
+            job["log"] += bolt.admit(job, lambda resident: bolt_need(job, resident))
         if params.get("first_frame_from"):  # continuity: open on the last frame of an earlier clip
             source = inside(params["first_frame_from"])
             if not source.is_file():
@@ -1811,7 +2129,9 @@ def work() -> None:
             job = hub.claim()  # the next job for this machine; on a DGX Spark a worker may have taken others (sparks.py)
             if job is None:
                 wake.clear()
-                continue
+        if job is None:
+            bolt.queue_empty()  # nothing for this machine: a Bolt unloaded for the queue's jobs may load again
+            continue
         perform(job)
         hub.kick.set()
 
@@ -1883,14 +2203,16 @@ def state() -> dict:
                         "presets": {k: longest_frames(v[2]) for k, v in PRESETS.items()}, "custom": longest_frames({"WIDTH": 1344, "HEIGHT": 768})},
             "ffmpeg": media_tools()["ffmpeg"], "ffmpeg_note": "" if media_tools()["ffmpeg"] else FFMPEG_NOTE,
             "shot_check": True, "negation_reason": negation.REASON,
-            # how many DGX Sparks a job may use (sparks.py); a Mac renders on itself
-            "sparks": {"supported": SPARK, "limit": sparks.LIMIT},
+            # how many DGX Sparks a job may use (sparks.py): a Spark, a Mac at the head, or a controller
+            "sparks": {"supported": hub.schedules(), "limit": sparks.LIMIT},
             # Sam Wasserman's QA gate: whether it can run here, and what is missing when it cannot (qa.py)
             "qa": qa.ready(),
             # Voice: Fish Audio Drama 3 text to speech on this machine (voice.py): MLX on a Mac, CUDA on a DGX Spark
             "voice": voice.state(),
             # Music: MiniMax Music 3 (MiniMax-Music3) on this machine (music.py): MLX on a Mac, ComfyUI on a DGX Spark
             "music": music.state(),
+            # NVIDIA Nemotron 3.5 Bolt, the brains' Studio-managed engine (bolt.py): its state, backend and memory
+            "bolt": bolt.summary(),
             "engine": (("CUDA · TensorFold int8" if SPARK_ENGINE_LIB.exists() else "CUDA · ComfyUI") if capabilities.mode(SPARK) == "spark"
                        else ("native Zig engine" if zig_ready() else "MLX engine") if mac else "none"),
             "capabilities": capabilities.public(SPARK)}
@@ -1988,7 +2310,7 @@ def clip_estimate(kind: str, params: dict, referenced: bool = False, ref_media: 
 
     if kind not in ("video", "studio", "long") or params.get("preset") == "custom" or params.get("steps") not in (None, "") or params.get("loras"):
         return None
-    return estimate(params.get("preset", ""), params.get("quality", "standard"), clip_seconds(params),
+    return estimate(params.get("preset", ""), params.get("quality", "fh8" if SPARK else "standard"), clip_seconds(params),
                     kind == "video" and not params.get("image") and not params.get("first_frame_from"), referenced,
                     bool(params.get("ref_turbo")), ref_media)
 
@@ -2073,13 +2395,22 @@ def queue_job(body: dict) -> dict:
     referenced, ref_media = bool(found), bool(found and (found["videos"] or found["audios"]))
     if kind in ("video", "studio", "long") and not referenced and not params.get("quality"):
         params["quality"] = API_QUALITY  # a job that names no quality gets the page's own default, as Home sends it
-    if kind in ("video", "studio", "long") and not referenced and not str(params.get("quality", "standard")).startswith("fh") and not turbo_ready():
+    if kind in ("video", "studio", "long") and not referenced and not str(params.get("quality", "fh8" if SPARK else "standard")).startswith("fh") and not turbo_ready():
         raise HTTPException(400, "MiniMax H3 Turbo is not installed here (oneshot-setup.sh --turbo adds it): use FastH3, quality fh4, fh8 or fh20")
     job_id = time.strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    # how many Sparks the job may use, this one counted (sparks.py): the number given, or the one set on the Sparks page
+    try:
+        chosen = int(body.get("sparks") or hub.config()["sparks"])
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"sparks is a whole number from 1 to {sparks.LIMIT}")
+    if not 1 <= chosen <= sparks.LIMIT:
+        raise HTTPException(400, f"sparks is a whole number from 1 to {sparks.LIMIT}")
+    said = hub.plan({"sparks": chosen, "kind": kind, "params": params})
     if kind not in ("export", "long"):
-        # A controller clip is checked here for prompt, frames, paths and references.
-        # The worker's own memory guard is asked when the clip is sent, not this machine's.
-        build(kind, params, job_id, room=not remote_clip)
+        # Reject bad settings now, not when the job's turn comes. A controller clip is checked here for
+        # prompt, frames, paths and references; the worker's own memory guard is asked when the clip is sent.
+        # A clip other Sparks may take is held to their memory guards, not to this one's.
+        build(kind, params, job_id, room=not remote_clip and not (kind in ("video", "studio") and said["used"] > 1))
     job = {"id": job_id, "kind": kind, "status": "queued", "title": body.get("title") or (action_title(kind, params) if kind in actions.KINDS else sound_title(kind, params) if kind in sound.KINDS else kind), "params": params,
            "source": action_source(kind, params) if kind in actions.KINDS else sound_source(kind, params) if kind in sound.KINDS else None,
            "outputs": [], "progress": None, "error": None, "log": "", "created": time.time(), "started": None,
@@ -2089,16 +2420,7 @@ def queue_job(body: dict) -> dict:
     if kind in ("video", "studio", "long"):
         # said beside the job too, for a prompt that did not come through the wizard; the prompt goes as written
         job["negations"] = negation.check(params.get("prompt") or "")["negations"] or None
-    # how many Sparks the job may use, this one counted (sparks.py): the number given, or the one set on the Sparks page
-    try:
-        chosen = int(body.get("sparks") or hub.config()["sparks"])
-    except (TypeError, ValueError):
-        raise HTTPException(400, f"sparks is a whole number from 1 to {sparks.LIMIT}")
-    if not 1 <= chosen <= sparks.LIMIT:
-        raise HTTPException(400, f"sparks is a whole number from 1 to {sparks.LIMIT}")
-    said = hub.plan({"sparks": chosen, "kind": kind, "params": params})
-    counts = SPARK or capabilities.mode(SPARK) == "controller"
-    job["sparks"] = {"chosen": chosen if counts else 1, "available": said["available"], "used": said["used"], "says": said["says"]}
+    job["sparks"] = {"chosen": chosen if hub.schedules() else 1, "available": said["available"], "used": said["used"], "says": said["says"]}
     with lock:
         accepting_jobs()
         waiting = sum(1 for one in jobs.values() if one["status"] in ("queued", "running"))
@@ -2402,7 +2724,7 @@ def qa_gate(body: dict) -> dict:
         raise HTTPException(400, "give the clip: a path, or another app's address (from) with a path or a job id")
     try:
         if body.get("from"):
-            remote.address(str(body["from"]))
+            remote.remember(remote.address(str(body["from"])), body.get("key"))  # its access key: in memory, never in the job
     except ValueError as error:
         raise HTTPException(400, str(error))
     can = qa.ready()
@@ -2507,6 +2829,18 @@ def wait(ms: int = 1000):
 AGENT_RECORDS = ("stderr.txt", "stream.jsonl", "log.txt", "mcp.json")
 
 
+@app.get("/api/credits")
+def credits():
+    """CREDITS.md and THIRD_PARTY_NOTICES.md as they are in this checkout: the page's Credits shows the repo's own
+    files, so the app and the repo credit the same people (tests/test_credits.py)."""
+    def read(name):
+        try:
+            return (PACK / name).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+    return {"credits": read("CREDITS.md"), "notices": read("THIRD_PARTY_NOTICES.md")}
+
+
 @app.get("/files/{path:path}")
 def files(path: str, request: Request):
     if "\0" in path or hidden(path):
@@ -2559,6 +2893,17 @@ import qa  # noqa: E402  (Sam Wasserman's QA gate, beside this file)
 import remote  # noqa: E402  (another machine's Studio app, read over its own API, beside this file)
 import slate  # noqa: E402  (Wasserman Slate AI Studio, beside this file)
 import voice  # noqa: E402  (Voice: Fish Audio Drama 3 text to speech, run locally, beside this file)
+import bolt  # noqa: E402  (NVIDIA Nemotron 3.5 Bolt, the brains' Studio-managed engine, beside this file)
+
+
+def local_running() -> bool:
+    """Whether a job of the queue renders on this machine now (bolt.make_room leaves ComfyUI alone then)."""
+
+    with lock:
+        return any(job["status"] == "running" and not job.get("remote") for job in jobs.values())
+
+
+bolt.busy = local_running
 
 
 def route_spark(kind: str) -> bool:
@@ -2622,12 +2967,41 @@ app.include_router(slate.attach(HOME, DURATIONS, compose, compose_references, RE
                                 lambda: {"ref2va": ref2va_ready(), "ref2va_turbo": ref2va_turbo_ready()}, slate_room))
 import agents  # noqa: E402  (Brains and agents: the user's own CLI sign-ins and MCP tools, beside this file)
 app.include_router(agents.attach(HOME))
+
+
+@app.get("/api/bolt/state")
+def bolt_state() -> dict:
+    """NVIDIA Nemotron 3.5 Bolt, the brains' Studio-managed engine (bolt.py): state, backend, memory, why not."""
+
+    return bolt.state()
+
+
+@app.post("/api/bolt/load")
+def bolt_load(request: Request) -> dict:
+    """The Brains page's Load: starts the engine aside (about 40 s) and answers at once with its state."""
+
+    agents.local(request)
+    try:
+        return bolt.load_async()
+    except RuntimeError as error:
+        raise HTTPException(409, str(error))
+
+
+@app.post("/api/bolt/unload")
+def bolt_unload(request: Request) -> dict:
+    """The Brains page's Unload: the engine stopped now and its memory given back (refused while it answers)."""
+
+    agents.local(request)
+    try:
+        return bolt.unload()
+    except RuntimeError as error:
+        raise HTTPException(409, str(error))
 import motion  # noqa: E402  (Motion Previs: a Python port of Sam Wasserman's Motion Previs Studio analysis, beside this file)
 app.include_router(motion.attach(HOME, PACK, SPARK))
 import actions  # noqa: E402  (Turnaround sheet, Upscale and Remove a person: Library actions, beside this file)
 action_router, action_build, action_title, action_source = actions.attach(HOME, PACK, SPARK, inside, relative)
 import sound  # noqa: E402  (sound effects and foley: Stable Audio Open and MMAudio, run locally, beside this file)
-sound_router, sound_build, sound_title, sound_source = sound.attach(HOME, PACK, SPARK, inside, relative, held_room)
+sound_router, sound_build, sound_title, sound_source = sound.attach(HOME, PACK, SPARK, inside, relative, held_room, media_seconds)
 app.include_router(action_router)
 app.include_router(sound_router)
 import clear  # noqa: E402  (finished jobs and their files into the trash folder, and back, beside this file)
@@ -2644,7 +3018,12 @@ def about_this_spark() -> dict:
               "floor_mb": memory_guard.floor_mb(info.get("MemTotal"))} if SPARK and info else {}
     with lock:
         active = sum(1 for job in jobs.values() if job["status"] in ("queued", "running"))
-    return sparks.about(HOME, hub.code(), state(), [one["id"] for one in listing() if one.get("installed")], active, memory, SPARK_REF2VA.parent)
+    # what it renders with its own settings: a head on a Mac hands a Spark only these (sparks.capable)
+    renders = {"presets": [name for name, (_, _, env) in PRESETS.items() if not SPARK or not {"X2", "TWOK", "QHD"} & set(env)] + ["custom"],
+               "qualities": [name for name in QUALITIES if name.startswith("fh") or (turbo_ready() and not SPARK)]}
+    if not SPARK:  # a Mac's models are not in ComfyUI's folders: what its own row on the Sparks tab says it renders
+        renders.update(fasth3=Path(os.environ.get("FASTH3_DIR", Path.home() / "h3-models/FastH3-8-Step-V2")).is_dir(), image=bool(image_models()))
+    return sparks.about(HOME, hub.code(), state(), [one["id"] for one in listing() if one.get("installed")], active, memory, SPARK_REF2VA.parent, renders)
 
 
 def clip_time(kind: str, params: dict) -> int | None:
@@ -2657,8 +3036,11 @@ def clip_time(kind: str, params: dict) -> int | None:
         return None
 
 
+_studio_mode = capabilities.mode(SPARK)
+_spark_head = ("controller" if _studio_mode == "controller" else "spark" if _studio_mode == "spark"
+               else "mac" if _studio_mode == "mac" else "alone")
 hub = sparks.Hub(HOME, PACK, SPARK, jobs, order, lock, wake, about_this_spark, inside, perform, clip_time,
-                  controller=capabilities.mode(SPARK) == "controller")
+                  controller=_studio_mode == "controller", head=_spark_head)
 app.include_router(hub.router())
 import updates  # noqa: E402  (Git source updates after an idle, graceful app shutdown)
 
@@ -2669,17 +3051,35 @@ def update_busy():
     return (update_writes > 0 or workers_active
             or any(job["status"] in ("queued", "running") for job in jobs.values())
             or running.get("process") is not None
+            or bool(bolt.summary().get("in_flight"))  # an answer of the Studio's Bolt engine (an agent turn) in flight
             or Path(os.environ.get("STUDIO_GPU_LOCK", Path.home() / "studio-gpu.lock.d")).exists())
 
 
 updater = updates.Manager(PACK, HOME, lock, update_busy)
+hub.follow = updater.automatic  # automatic updates here bring the workers to this code too (sparks.Hub.catch_up)
+
+
+def fits_here(job: dict) -> bool:
+    """Whether a queued clip fits this machine's memory now (sparks.Hub.claim leaves one that does not to a worker)."""
+
+    if job["kind"] not in ("video", "studio"):
+        return True
+    try:
+        build(job["kind"], job["params"], job["id"])
+    except HTTPException:
+        return False
+    return True
+
+
+hub.fits_here = fits_here
 app.include_router(updater.router())
 app.router.on_startup.append(updater.start)
 app.router.on_shutdown.append(updater.stop.set)
 if hasattr(app.router, "on_shutdown"):
-    app.router.on_shutdown.append(hub.close)  # the tunnels to the workers are this app's: closed with it (and at exit, sparks.py)
+    app.router.on_shutdown.append(hub.close)
+    app.router.on_shutdown.append(bolt.shutdown)  # the Studio's Bolt engine ends with the app (its leash also sees the pipe close)  # the tunnels to the workers are this app's: closed with it (and at exit, sparks.py)
 import telemetry  # noqa: E402  (this machine's readings for the status bar: GPU, memory, disk, queue, beside this file)
-app.include_router(telemetry.attach(HOME, jobs, order, lock, memory_guard))
+app.include_router(telemetry.attach(HOME, jobs, order, lock, memory_guard, engines=lambda: {"bolt": bolt.summary()}))
 import suite  # noqa: E402  (the filmmaker suite's files in and out: imports, timeline, dailies, beside this file)
 app.include_router(suite.attach(HOME, jobs, lock, PRESETS, app))
 app.include_router(settings.attach(HOME))
