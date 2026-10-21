@@ -1,0 +1,48 @@
+# App-only Studio. This project is not the container that publishes 8190.
+# Rendering stays off. Do not attach a GPU, and do not publish 8188, 8190, 8191, or 8443.
+name: imagination-studio-app
+
+services:
+  studio:
+    build:
+      context: .
+      dockerfile: Dockerfile.studio
+      args:
+        SOURCE_REV: ${SOURCE_REV:-unknown}
+    image: imagination-studio-app:${SOURCE_REV:-local}
+    ports:
+      - "127.0.0.1:${STUDIO_PORT:-7870}:7870"
+    environment:
+      STUDIO_CONTAINER: "1"
+      STUDIO_HOME: /data
+      STUDIO_DISCOVER_DELAY: "-1"
+      STUDIO_MODE: app-only
+      PORT: "7870"
+      # Inside the container only, so the published loopback port can reach the app.
+      # HOST is unset: 0.0.0.0 would open the LAN with no login.
+      STUDIO_BIND: "0.0.0.0"
+      STUDIO_COMFY_STATE: /data/comfy
+      STUDIO_GPU_LOCK: /data/studio-gpu.lock.d
+      STUDIO_STAGED_NODES: /opt/studio/staged-nodes
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - studio-data:/data
+    tmpfs:
+      - /tmp:size=256m
+    security_opt:
+      - no-new-privileges:true
+    # Uvicorn re-raises SIGTERM after the lifespan stops. 20s matches the shutdown test.
+    stop_grace_period: 20s
+    # Measured app-only on this machine (2026-10-21): 59 MiB RSS, 8 pids, 35% of one
+    # core during a 1-second export, 2% idle. The ceiling below is headroom over that run.
+    # It does not replace the 8000 MB admission floor, and memswap adds no extra swap.
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 64
+    cpus: 1
+    restart: "no"
+
+volumes:
+  studio-data:
+    name: imagination-studio-app-data

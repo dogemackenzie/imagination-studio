@@ -7,7 +7,8 @@ Spark worker or a bookmark that still names the old folder finds the same files.
 folder is used as it is, and nothing moves, when:
 - it is itself a link (to a larger disk or a share): that place is the home;
 - a studio server is running (an older one may be using the folder);
-- the move or the link cannot be made (another disk, no permission): said on stderr.
+- the move or the link cannot be made (another disk, no permission): said on stderr;
+- this process is the container (STUDIO_CONTAINER=1): the image never renames a home folder.
 
 Every part of the pack asks here: the app (server.py, launcher.py, discover.py, loras.py), the scripts
 (lora-bundle.py imports it, the shell scripts run ``python3 app/studio_home.py``, which prints the folder)."""
@@ -38,6 +39,8 @@ def server_running() -> bool:
 
 
 def studio_home(move: bool = False, base: Path | None = None) -> Path:
+    if os.environ.get("STUDIO_CONTAINER") == "1":
+        move = False  # a container has an explicit data volume; never rename ~/TensorFoldStudio
     named = os.environ.get("STUDIO_HOME", "").strip()
     if named:
         return Path(named).expanduser()

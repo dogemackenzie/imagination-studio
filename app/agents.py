@@ -55,6 +55,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Request
 
 import slate  # the brain's local server lookup and CLI folders, beside this file
+import updates  # may_manage: a published container's peer is the bridge, not 127.0.0.1
 
 HOME: Path | None = None
 PACK = Path(__file__).resolve().parent.parent
@@ -2717,8 +2718,8 @@ def tool_reach(config: dict | None = None) -> dict:
 def local(request: Request, mutation: bool = False):
     # Brains and agents run programs with the user's sign-ins: this computer or its Tailscale address only (as updates.py).
     host = request.url.hostname or ""
-    if not request.client or request.client.host not in ("127.0.0.1", "::1", "testclient") or not (
-            host in ("localhost", "127.0.0.1", "::1", "testserver") or host.endswith(".ts.net")):
+    peer = request.client.host if request.client else ""
+    if not updates.may_manage(peer, host, os.environ.get("STUDIO_CONTAINER") == "1"):
         raise HTTPException(403, "Set up brains and agents on this computer or through its Tailscale address.")
     origin = request.headers.get("origin")
     if request.headers.get("sec-fetch-site") == "cross-site" or (origin and urlsplit(origin).netloc != request.headers.get("host")):

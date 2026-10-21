@@ -21,6 +21,25 @@ from fastapi import APIRouter, HTTPException, Request
 
 INTERVAL = 6 * 60 * 60
 GIT_TIMEOUT = 45
+CONTAINER_UPDATE = "This Studio is a container image. Rebuild the image and recreate the container to update."
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "testserver"}
+_LOOPBACK_PEERS = {"127.0.0.1", "::1", "testclient"}
+
+
+def may_manage(peer: str, host: str, container: bool) -> bool:
+    """Updates can run downloaded code, so only this computer may manage them.
+
+    A container publishes 127.0.0.1 on the host. That connection is proxied, so the
+    peer inside the container is the bridge address rather than 127.0.0.1. A loopback
+    Host is accepted there. Native installs still require a loopback peer.
+    """
+
+    host_ok = host in _LOOPBACK_HOSTS or host.endswith(".ts.net")
+    if not host_ok or not peer:
+        return False
+    if peer in _LOOPBACK_PEERS:
+        return True
+    return bool(container) and host in _LOOPBACK_HOSTS
 
 
 class UpdateError(Exception):
@@ -273,7 +292,12 @@ class Manager:
         except (OSError, ValueError):
             return False
 
+    def in_container(self) -> bool:
+        return os.environ.get("STUDIO_CONTAINER") == "1"
+
     def managed(self) -> bool:
+        if self.in_container():
+            return False
         return bool(os.environ.get("STUDIO_UPDATE_SESSION")) and not os.environ.get("STUDIO_PIDFILE")
 
     def status(self) -> dict:
@@ -291,15 +315,24 @@ class Manager:
             version = (self.pack / "VERSION").read_text().strip()[:80] or None
         except OSError:
             version = None
-        try:
-            commit = git(self.pack, "rev-parse", "--short", "HEAD", timeout=5)
-        except UpdateError:
-            commit = None
-        return {"installed_version": version, "installed_commit": commit}
+        revision = os.environ.get("STUDIO_REVISION", "").strip()
+        if self.in_container():
+            commit = revision or None  # the image has no git checkout and must not fetch one
+        else:
+            try:
+                commit = git(self.pack, "rev-parse", "--short", "HEAD", timeout=5)
+            except UpdateError:
+                commit = None
+        return {"installed_version": version, "installed_commit": commit,
+                "revision": revision or None, "container": self.in_container()}
 
     def check(self) -> dict:
         with self.mutex:
             if self.info["checking"] or self.maintenance.is_set():
+                return self.status()
+            if self.in_container():
+                self.info.update(checking=False, available=False, message=CONTAINER_UPDATE, checked_at=time.time())
+                self.checked_monotonic = time.monotonic()
                 return self.status()
             self.info.update(checking=True, available=False, message="Checking GitHub…")
         threading.Thread(target=self._check, daemon=True).start()
@@ -332,6 +365,8 @@ class Manager:
 
     def set_automatic(self, enabled: bool):
         with self.mutex:
+            if self.in_container():
+                raise UpdateError(CONTAINER_UPDATE)
             if enabled:
                 if not self.managed():
                     raise UpdateError("Open Studio with scripts/app.sh to enable automatic updates. Managed workers update through Sparks.")
@@ -341,6 +376,8 @@ class Manager:
 
     def apply(self, automatic: bool = False):
         with self.mutex:
+            if self.in_container():
+                raise UpdateError(CONTAINER_UPDATE)
             if self.maintenance.is_set():
                 return self.status()
             if self.info.get("checking") or not self.info.get("available"):
@@ -383,7 +420,7 @@ class Manager:
         threading.Thread(target=loop, daemon=True).start()
 
     def tick(self):
-        if not self.automatic() or not self.managed() or self.maintenance.is_set():
+        if self.in_container() or not self.automatic() or not self.managed() or self.maintenance.is_set():
             return
         if self.checked_monotonic is None or time.monotonic() - self.checked_monotonic >= INTERVAL:
             self.check()
@@ -400,8 +437,8 @@ class Manager:
         def local(request: Request, mutation: bool = False):
             # Updates execute downloaded code: restrict management to this computer / trusted tailnet proxy.
             host = request.url.hostname or ""
-            if not request.client or request.client.host not in ("127.0.0.1", "::1", "testclient") or not (
-                    host in ("localhost", "127.0.0.1", "::1", "testserver") or host.endswith(".ts.net")):
+            peer = request.client.host if request.client else ""
+            if not may_manage(peer, host, self.in_container()):
                 raise HTTPException(403, "Manage Studio updates on this computer or through its Tailscale address.")
             origin = request.headers.get("origin")
             if request.headers.get("sec-fetch-site") == "cross-site" or (origin and urlsplit(origin).netloc != request.headers.get("host")):

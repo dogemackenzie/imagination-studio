@@ -17,7 +17,16 @@ SEEDS=$(seq -s, "$FIRST" $((FIRST + COUNT - 1)))
 export WIDTH="${WIDTH:-1280}" HEIGHT="${HEIGHT:-736}"
 mkdir -p "$DIR"
 EXTRA="${EXTRA:-} --seeds ${SEEDS%,}" bash "$HERE/image.sh" "$PROMPT" "$DIR/scout.png"
-"$PREFIX/venv/bin/python" - "$DIR" "${SEEDS%,}" <<'PY'
+# The contact sheet is PIL, not a render. Native installs use the renderer venv; a container sets
+# STUDIO_PYTHON, and python3 is the fallback when that venv was never installed.
+if [ -n "${STUDIO_PYTHON:-}" ]; then
+  PY="$STUDIO_PYTHON"
+elif [ -x "$PREFIX/venv/bin/python" ]; then
+  PY="$PREFIX/venv/bin/python"
+else
+  PY="python3"
+fi
+"$PY" - "$DIR" "${SEEDS%,}" <<'PY'
 import sys
 from pathlib import Path
 from PIL import Image, ImageDraw

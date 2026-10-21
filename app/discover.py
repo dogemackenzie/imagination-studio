@@ -662,9 +662,14 @@ def roots() -> list[Path]:
     for item in catalogue():
         place = item["expected"].parent if item["kind"] == "file" else item["expected"]
         first.append(place.parent if item["kind"] == "folder" else place)
-    rest = [home(), Path("/data"), Path("/opt"), Path("/srv"), Path("/mnt"), Path("/media"), Path("/Volumes")]
-    if os.environ.get("STUDIO_SCAN_ROOTS"):  # the machine's own roots, named instead (os.pathsep between them)
+    broad = [Path("/data"), Path("/opt"), Path("/srv"), Path("/mnt"), Path("/media"), Path("/Volumes")]
+    if os.environ.get("STUDIO_CONTAINER") == "1":
+        # Named roots only. An empty STUDIO_SCAN_ROOTS walks none of the mounted disks.
+        rest = [Path(p).expanduser() for p in os.environ.get("STUDIO_SCAN_ROOTS", "").split(os.pathsep) if p.strip()]
+    elif os.environ.get("STUDIO_SCAN_ROOTS"):  # the machine's own roots, named instead (os.pathsep between them)
         rest = [home()] + [Path(p).expanduser() for p in os.environ["STUDIO_SCAN_ROOTS"].split(os.pathsep) if p]
+    else:
+        rest = [home(), *broad]
     out, seen, own = [], set(), str(studio_home())
     for one in first + rest:
         key = str(one)
@@ -1253,9 +1258,11 @@ def schedule(delay: float | None = None) -> None:
     global _scheduled
     if delay is None:
         try:
-            delay = float(os.environ.get("STUDIO_DISCOVER_DELAY", "20"))
+            # A container does not walk disks on startup unless the delay is set on purpose.
+            default = "-1" if os.environ.get("STUDIO_CONTAINER") == "1" else "20"
+            delay = float(os.environ.get("STUDIO_DISCOVER_DELAY", default))
         except (TypeError, ValueError):
-            delay = 20.0
+            delay = -1.0 if os.environ.get("STUDIO_CONTAINER") == "1" else 20.0
     if delay < 0:
         return
 

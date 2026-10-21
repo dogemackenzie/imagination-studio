@@ -17,9 +17,20 @@ set -euo pipefail
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"
 PORT="${SPARK_COMFY_PORT:-8190}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Native installs keep kind, log, and outputs beside PREFIX. STUDIO_COMFY_STATE names a writable Studio folder.
+STATE="${STUDIO_COMFY_STATE:-$PREFIX}"
 MATCH="[m]ain.py --listen 127.0.0.1 --port $PORT"
+refuse_container() {
+  echo "this container does not start a renderer: nodes are staged at image build (${STUDIO_STAGED_NODES:-/opt/studio/staged-nodes}) and are not copied at runtime" >&2
+  exit 1
+}
 case "${1:-start}" in
   stop)
+    if [ "${STUDIO_CONTAINER:-}" = 1 ]; then
+      rm -f "$STATE/comfy.kind"
+      echo "not running"
+      exit 0
+    fi
     if [ -n "${SPARK_GOVERNOR:-}" ]; then
       # the managed server first, and its wrapper is given the time to end its reservation itself; then only a server
       # process still on this port is killed (the wrapper's own command line names the port too)
@@ -27,10 +38,18 @@ case "${1:-start}" in
       for _ in $(seq 1 25); do pgrep -f "$MATCH" >/dev/null || break; sleep 1; done
       MATCH="^[^ ]+ main\.py --listen 127\.0\.0\.1 --port $PORT( |\$)"
     fi
-    pkill -f "$MATCH" 2>/dev/null && echo "stopped" || echo "not running"; rm -f "$PREFIX/comfy.kind";;
+    pkill -f "$MATCH" 2>/dev/null && echo "stopped" || echo "not running"; rm -f "$STATE/comfy.kind";;
   status) pgrep -f "$MATCH" >/dev/null && echo "running on 127.0.0.1:$PORT" || echo "not running";;
   run)
+    if [ "${STUDIO_CONTAINER:-}" = 1 ]; then
+      refuse_container
+    fi
     export PATH="/usr/local/cuda/bin:$PATH" CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}" MAX_JOBS="${MAX_JOBS:-2}"
+    DIRS=""
+    if [ -n "${STUDIO_COMFY_STATE:-}" ]; then
+      mkdir -p "$STATE/output" "$STATE/input" "$STATE/temp"
+      DIRS="--output-directory $STATE/output --input-directory $STATE/input --temp-directory $STATE/temp"
+    fi
     # TensorFold's H3 engine as a ComfyUI node, when it has been built (spark/build-engine.sh)
     NODE="$PREFIX/ComfyUI/custom_nodes/tensorfold_h3"
     rm -rf "$NODE"
@@ -48,10 +67,10 @@ case "${1:-start}" in
     # --use-ck-attention: ComfyUI's own flash-attention kernel, 12% faster a pass than PyTorch's on a GB10
     if [ -n "${SPARK_GOVERNOR:-}" ]; then
       # shellcheck disable=SC2086
-      exec python3 "$HERE/managed_comfy.py" run "$PREFIX/venv/bin/python" main.py --listen 127.0.0.1 --port "$PORT" ${SPARK_COMFY_ARGS:---use-ck-attention}
+      exec python3 "$HERE/managed_comfy.py" run "$PREFIX/venv/bin/python" main.py --listen 127.0.0.1 --port "$PORT" $DIRS ${SPARK_COMFY_ARGS:---use-ck-attention}
     fi
     # shellcheck disable=SC2086
-    nice -n 19 "$PREFIX/venv/bin/python" main.py --listen 127.0.0.1 --port "$PORT" ${SPARK_COMFY_ARGS:---use-ck-attention} &
+    nice -n 19 "$PREFIX/venv/bin/python" main.py --listen 127.0.0.1 --port "$PORT" $DIRS ${SPARK_COMFY_ARGS:---use-ck-attention} &
     pid=$!
     trap 'kill $pid 2>/dev/null' TERM INT
     # the guard stands beside the server until it ends (status 3: it stopped the server). It is started with the
@@ -72,10 +91,14 @@ case "${1:-start}" in
     fi
     wait $pid 2>/dev/null || true;;
   start)
+    if [ "${STUDIO_CONTAINER:-}" = 1 ]; then
+      refuse_container
+    fi
     pgrep -f "$MATCH" >/dev/null && { echo "already running"; exit 0; }
     [ -x "$PREFIX/venv/bin/python" ] && [ -f "$PREFIX/ComfyUI/main.py" ] || { echo "run oneshot-setup-spark.sh first: nothing at $PREFIX" >&2; exit 1; }
-    rm -f "$PREFIX/comfy.kind"
-    nohup setsid bash "$0" run > "$PREFIX/comfy.log" 2>&1 < /dev/null &
-    echo "ComfyUI starting on 127.0.0.1:$PORT (log: $PREFIX/comfy.log)";;
+    mkdir -p "$STATE"
+    rm -f "$STATE/comfy.kind"
+    nohup setsid bash "$0" run > "$STATE/comfy.log" 2>&1 < /dev/null &
+    echo "ComfyUI starting on 127.0.0.1:$PORT (log: $STATE/comfy.log)";;
   *) echo "usage: comfy.sh start|stop|status" >&2; exit 2;;
 esac

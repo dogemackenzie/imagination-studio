@@ -246,6 +246,7 @@ lock = threading.Lock()
 wake = threading.Event()
 running: dict = {"process": None, "id": None}
 update_writes = 0
+_closing = threading.Event()  # set while this process is shutting down; new writes are refused
 
 
 @app.middleware("http")
@@ -253,6 +254,8 @@ async def update_maintenance(request, call_next):
     global update_writes
     writes = request.method not in ("GET", "HEAD", "OPTIONS") and not request.url.path.startswith("/api/updates")
     with lock:
+        if writes and _closing.is_set():
+            return JSONResponse({"error": "Studio is shutting down."}, status_code=503)
         if writes and updater.maintenance.is_set():
             return JSONResponse({"error": "Studio is restarting for an update. This page will reconnect shortly."}, status_code=503)
         if writes:
@@ -460,6 +463,8 @@ app.add_middleware(SecurityHeaders)
 
 def accepting_jobs():
     """Called under the queue lock, shared with the updater's idle check."""
+    if _closing.is_set():
+        raise HTTPException(503, "Studio is shutting down.")
     if updater.maintenance.is_set():
         raise HTTPException(503, "Studio is restarting for an update. Try again after it reconnects.")
 
@@ -873,7 +878,11 @@ def plan(total: int, piece: int = LONGEST) -> list[int]:
 def zig_ready() -> bool:
     """Whether FastH3 will run on the native engine here (scripts/video.sh decides the same way)."""
 
-    if not (ZIG_ENGINE / "tf-h3-dit").is_file() or os.environ.get("FASTH3_ENGINE") == "mlx":
+    try:
+        present = (ZIG_ENGINE / "tf-h3-dit").is_file()
+    except OSError:
+        return False
+    if not present or os.environ.get("FASTH3_ENGINE") == "mlx":
         return False
     try:
         chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, timeout=5).stdout
@@ -896,7 +905,12 @@ def turbo_ready() -> bool:
     """
 
     model = Path(os.environ.get("H3_MODEL_DIR", Path.home() / "h3-models/MiniMax-H3"))
-    return any((model / "FL2VA" / "transformer").glob("*.safetensors")) and any((ZIG_ENGINE.parent / "adapters").glob("lightx2v*"))
+    try:
+        weights = any((model / "FL2VA" / "transformer").glob("*.safetensors"))
+        adapter = any((ZIG_ENGINE.parent / "adapters").glob("lightx2v*"))
+    except OSError:
+        return False
+    return weights and adapter
 
 
 # The picture models a person picks from (`image_model` on a scout or studio job, IMAGE_MODEL to scripts/image.sh).
@@ -1765,6 +1779,40 @@ def public(job: dict) -> dict:
     return out
 
 
+def image_revision() -> str:
+    return os.environ.get("STUDIO_REVISION", "").strip()
+
+
+def in_container() -> bool:
+    return os.environ.get("STUDIO_CONTAINER") == "1"
+
+
+def listen_host() -> str:
+    """Address uvicorn binds. HOST=0.0.0.0 opens the LAN with no login and is refused in a container.
+
+    A container publishes 127.0.0.1 on the host. STUDIO_BIND is the address inside the container
+    (0.0.0.0 there lets the published loopback port reach the app). It is not the LAN switch."""
+
+    host = os.environ.get("HOST", "").strip()
+    if in_container() and host in {"0.0.0.0", "::", "::0"}:
+        raise SystemExit("container mode does not open the LAN: leave HOST unset")
+    bind = os.environ.get("STUDIO_BIND", "").strip()
+    if bind:
+        return bind
+    return host or "127.0.0.1"
+
+
+@app.get("/api/health")
+def health() -> dict:
+    """Process check for the container. No disk walk, GPU query, update fetch, or model load."""
+
+    try:
+        version = (PACK / "VERSION").read_text().strip()
+    except OSError:
+        version = ""
+    return {"ok": True, "version": version, "revision": image_revision(), "container": in_container()}
+
+
 @app.get("/api/state")
 def state() -> dict:
     mac = capabilities.mode(SPARK) == "mac"
@@ -1772,6 +1820,7 @@ def state() -> dict:
     return {"presets": {k: {"label": v[0], "size": v[1]} for k, v in PRESETS.items()},
             "qualities": {k: v[0] for k, v in QUALITIES.items()}, "durations": DURATIONS, "long": LONG,
             "home": str(HOME), "pack": str(PACK), "version": (PACK / "VERSION").read_text().strip(),
+            "revision": image_revision(), "container": in_container(),
             "zig": zig_ready() and mac, "turbo": turbo_ready() and mac, "x2": mac,
             "ref2va": ref2va_ready() and rendering, "ref2va_turbo": ref2va_turbo_ready() and rendering, "reference_limit": REFERENCE_LIMIT,
             # reference videos and audio: wherever Ref2VA is installed, and only on a machine that renders
@@ -2586,6 +2635,7 @@ def begin() -> None:
     with _begin_lock:
         if _began:
             return
+        _closing.clear()
         _worker_stop.clear()
         _worker_thread = threading.Thread(target=work, daemon=True, name="studio-queue")
         _worker_thread.start()
@@ -2595,11 +2645,61 @@ def begin() -> None:
         _began = True
 
 
+def _cancel_owned_work() -> None:
+    """Cancel this process's queued and running jobs, and signal only the child it started."""
+
+    with lock:
+        process = running.get("process")
+        for job in jobs.values():
+            if job.get("status") in ("queued", "running"):
+                job["status"] = "cancelled"
+        running.update(process=None, id=None)
+    if process is not None and getattr(process, "pid", None):
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                process.terminate()
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+
+def _release_owned_lock() -> None:
+    """Remove the GPU lock only when this process wrote its owner file."""
+
+    try:
+        lock_path = voice.LOCK
+    except Exception:
+        lock_path = Path(os.environ.get("STUDIO_GPU_LOCK", Path.home() / "studio-gpu.lock.d"))
+    try:
+        owner = (lock_path / "owner").read_text().strip()
+    except OSError:
+        return
+    pid = owner.split()[-1] if owner else ""
+    if pid == str(os.getpid()):
+        shutil.rmtree(lock_path, ignore_errors=True)
+
+
+def _unload_owned_models() -> None:
+    """Unload engines this process loaded. A container has none; the calls are the same path."""
+
+    try:
+        voice.release("shutdown")
+    except Exception:
+        pass
+    try:
+        import music as music_mod
+        music_mod.release("shutdown")
+    except Exception:
+        pass
+
+
 def end() -> None:
-    """Stop the queue before it claims another job, and cancel a model scan that has not started."""
+    """Stop accepting work, cancel only this process's jobs, unload what it loaded, and release its lock."""
 
     global _began
     with _begin_lock:
+        _closing.set()
         if not _began:
             return
         with lock:
@@ -2609,6 +2709,9 @@ def end() -> None:
             discover.cancel()
         thread = _worker_thread
         _began = False
+    _cancel_owned_work()
+    _unload_owned_models()
+    _release_owned_lock()
     if thread is not None and thread is not threading.current_thread():
         thread.join(timeout=2.0)
 
@@ -2646,7 +2749,7 @@ if __name__ == "__main__":
 
     # Update authorization needs the actual socket peer. Tailscale Serve forwards the browser's IP,
     # but its authenticated local proxy is the peer allowed to manage this loopback installation.
-    web_server = uvicorn.Server(uvicorn.Config(app, host=os.environ.get("HOST", "127.0.0.1"),
+    web_server = uvicorn.Server(uvicorn.Config(app, host=listen_host(),
                                port=int(os.environ.get("PORT", "7870")), log_level="warning", proxy_headers=False,
                                timeout_graceful_shutdown=10))  # open connections (event streams) never hold a restart
 

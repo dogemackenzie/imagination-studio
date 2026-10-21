@@ -17,6 +17,7 @@ a ZIP is taken apart by hand: no absolute paths, no "..", no links, and a cap on
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -30,6 +31,8 @@ from xml.sax.saxutils import quoteattr
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response
+
+import updates  # may_manage: a published container's peer is the bridge, not 127.0.0.1
 
 UPLOAD_LIMIT = 2 * 1024 ** 3      # one uploaded file
 ZIP_FILES, ZIP_BYTES = 2000, 4 * 1024 ** 3   # what one ZIP may hold, unpacked
@@ -45,8 +48,8 @@ def local(request: Request, json_body: bool = False) -> None:
     JSON post. A multipart import passes ``json_body`` False."""
 
     host = request.url.hostname or ""
-    if not request.client or request.client.host not in ("127.0.0.1", "::1", "testclient") or not (
-            host in ("localhost", "127.0.0.1", "::1", "testserver") or host.endswith(".ts.net")):
+    peer = request.client.host if request.client else ""
+    if not updates.may_manage(peer, host, os.environ.get("STUDIO_CONTAINER") == "1"):
         raise HTTPException(403, "Do this on this computer or through its Tailscale address.")
     origin = request.headers.get("origin")
     if request.headers.get("sec-fetch-site") == "cross-site" or (origin and urlsplit(origin).netloc != request.headers.get("host")):

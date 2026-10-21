@@ -32,13 +32,22 @@ def other_app():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    served = uvicorn.Server(uvicorn.Config(server.app, host="127.0.0.1", port=port, log_level="error"))
-    threading.Thread(target=served.run, daemon=True).start()
+    served = uvicorn.Server(uvicorn.Config(
+        server.app, host="127.0.0.1", port=port, log_level="error", timeout_graceful_shutdown=2))
+    thread = threading.Thread(target=served.run, daemon=True)
+    thread.start()
     for _ in range(100):
         if served.started:
             break
         time.sleep(0.05)
-    return f"http://127.0.0.1:{port}", lambda: setattr(served, "should_exit", True)
+
+    def stop() -> None:
+        # This server is the same app. Its lifespan shutdown refuses new writes until begin() runs again.
+        served.should_exit = True
+        thread.join(10)
+        server.begin()
+
+    return f"http://127.0.0.1:{port}", stop
 
 
 def wait(job_id: str) -> dict:
