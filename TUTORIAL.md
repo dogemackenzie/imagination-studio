@@ -5,9 +5,9 @@ Black Forest Labs (FLUX 3 Image Klein) and felix-ab (flux3-mlx), OpenMOSS (MOSS-
 Lab (FastH3), Fish Audio (Drama 3), Ash Hart (TensorFold), mrbizarro, LightX2V, Viggle, speach1sdef178 and Apple's MLX
 team. Full list in [CREDITS.md](CREDITS.md). **Built with Fish Audio.**
 
-What you get: an app on your Mac or DGX Spark that turns a prompt into an **image**, an edited picture, or a **video
+What you get: an app on your own machine. On an Apple-silicon Mac or an NVIDIA DGX Spark it turns a prompt into an **image**, an edited picture, or a **video
 with sound** from under a second to 30 minutes at 480p up to 2K; speech in cast voices (**Voice**); and whole songs with
-sung vocals (**Music**). The app's own **Tutorial** tab has a short lesson for each of these, with *Show me in the
+sung vocals (**Music**). On another computer the same app runs, and a picture can go through a ComfyUI you already have. The app's own **Tutorial** tab has a short lesson for each of these, with *Show me in the
 app* buttons that take you to the control.
 
 ## 1. Check your Mac
