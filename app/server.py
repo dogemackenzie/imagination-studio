@@ -53,6 +53,7 @@ sys.path.insert(0, str(PACK / "spark"))
 import memory_guard  # noqa: E402  (a DGX Spark's memory: what a clip needs and whether this machine has it, in spark/)
 import rtx_admit  # noqa: E402  (RTX admission and which renderer this Studio may stop)
 import sdxl_turbo  # noqa: E402  (the measured RTX still; unoffered until its profile is enabled)
+import z_image_turbo  # noqa: E402  (the measured Z-Image Turbo still; unoffered until its profile is enabled)
 import settings  # noqa: E402  (Settings: looks, layout, presets, settings.json, beside this file)
 
 FPS = 24
@@ -1146,7 +1147,8 @@ IMAGE_MODELS = {"qwen": ("Qwen 2.1 Turbo", "8 steps, the quickest draft; Qwen Re
                 "flux3k-fast": ("FLUX3-K Fast", "FLUX 3 Image Klein, 16 steps: sharper text, whole figures, better prompt following"),
                 "flux3k-full": ("FLUX3-K Full", "FLUX 3 Image Klein base, 50 steps: the most detail, about 5x slower than Fast"),
                 "moss-image": ("MOSS-Image", "25 steps: exact lettering for posters, titles and signs; Apache 2.0, commercial use allowed"),
-                "sdxl-turbo": (sdxl_turbo.LABEL, sdxl_turbo.NOTE)}
+                "sdxl-turbo": (sdxl_turbo.LABEL, sdxl_turbo.NOTE),
+                "z-image": (z_image_turbo.LABEL, z_image_turbo.NOTE)}
 # BFL's file names, the present one first (renamed 2026-10-17, the same files; spark_generate.FLUX3_OLD)
 FLUX3_FILES = {"flux3k-fast": ("flux3-image-klein-bf16.safetensors", "flux3_image_klein_sd_bf16.safetensors"),
                "flux3k-full": ("flux3-image-klein-base-bf16.safetensors", "flux3_image_klein_base_bf16.safetensors")}
@@ -1157,6 +1159,8 @@ def image_model_card(name: str) -> dict:
     card = {"id": name, "label": label, "note": note}
     if name == "sdxl-turbo":
         card.update(sdxl_turbo.public_limits())
+    elif name == "z-image":
+        card.update(z_image_turbo.public_limits())
     return card
 
 
@@ -1166,7 +1170,14 @@ def image_models() -> list[str]:
     is listed only when its measured profile is enabled and the checkpoint is the recorded file."""
 
     if not capabilities.renders(SPARK):
-        return ["sdxl-turbo"] if (not SPARK and sdxl_turbo.offered()) else []
+        if SPARK:
+            return []
+        found = []
+        if sdxl_turbo.offered():
+            found.append("sdxl-turbo")
+        if z_image_turbo.offered():
+            found.append("z-image")
+        return found
     found = (["qwen"] if qwen_ready() else []) + (["qwen-full"] if qwen_base_ready() else [])
     for name, unets in FLUX3_FILES.items():
         if SPARK:
@@ -1233,11 +1244,13 @@ def image_model_env(params: dict) -> dict:
     if name not in image_models():
         if name == "sdxl-turbo":
             raise HTTPException(400, sdxl_turbo.script_block() or "SDXL Turbo is not offered on this machine.")
+        if name == "z-image":
+            raise HTTPException(400, z_image_turbo.script_block() or "Z-Image Turbo is not offered on this machine.")
         how = {"qwen": "", "qwen-full": " --image-edit", "moss-image": " --moss"}.get(name, " --flux3")
         raise HTTPException(400, f"{IMAGE_MODELS[name][0]} is not installed here: oneshot-setup.sh{how} adds it"
                                  + (" (Machine → Models & weights shows what is missing)" if name == "qwen" else ""))
     env = {"IMAGE_MODEL": name}
-    if name == "sdxl-turbo":
+    if name in ("sdxl-turbo", "z-image"):
         env["STUDIO_PYTHON"] = sys.executable
     return env
 
@@ -1695,12 +1708,21 @@ def build(kind: str, params: dict, job_id: str, room: bool = True) -> tuple[list
                 width, height = sdxl_turbo.canvas(params)
             except ValueError as error:
                 raise HTTPException(400, str(error)) from None
+        if params.get("image_model") == "z-image":
+            try:
+                width, height = z_image_turbo.canvas(params)
+            except ValueError as error:
+                raise HTTPException(400, str(error)) from None
         env = {"SEED": seed, "WIDTH": width, "HEIGHT": height, **image_model_env(params)}
         # After the profile check inside image_model_env, so a missing profile is the error, not the count.
         if params.get("image_model") == "sdxl-turbo":
             count = int(params.get("count", 1))
             if not 1 <= count <= sdxl_turbo.max_count():
                 raise HTTPException(400, f"SDXL Turbo scouts are 1 to {sdxl_turbo.max_count()} pictures, one at a time")
+        if params.get("image_model") == "z-image":
+            count = int(params.get("count", 1))
+            if not 1 <= count <= z_image_turbo.max_count():
+                raise HTTPException(400, f"Z-Image Turbo scouts are 1 to {z_image_turbo.max_count()} pictures, one at a time")
         if room:
             mac_comfy_room(params.get("image_model") or "")
         first = int(seed)
@@ -2395,6 +2417,8 @@ def queue_job(body: dict) -> dict:
         raise HTTPException(400, "a last frame is for single clips: a long video is a chain of clips")
     # After the structural checks, before ffmpeg, build and the memory guard. Export is not a generative route.
     gate = sdxl_turbo.submission(kind, params)
+    if gate is None:
+        gate = z_image_turbo.submission(kind, params)
     if gate is not None and not gate["ok"]:
         raise HTTPException(400, gate)
     remote_clip = kind == "video" and capabilities.mode(SPARK) == "controller"

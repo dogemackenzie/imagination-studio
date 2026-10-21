@@ -33,6 +33,13 @@ os.environ.setdefault("STUDIO_ACCESS_KEY", "off")
 # An inherited shared-ComfyUI address must not open a socket during the suite. A test that
 # reads it sets the variable itself. The default in sdxl_turbo is not used from telemetry.
 os.environ.pop("SDXL_COMFY_URL", None)
+# The measured Z-Image profile is enabled in the tree and the weights sit on this host.
+# A missing file keeps the suite from offering that still or posting one. A test that
+# offers it sets these itself.
+os.environ["ZIMAGE_PROFILE"] = "/tmp/studio-test-zimage-missing.json"
+os.environ["ZIMAGE_UNET"] = "/tmp/studio-test-zimage-missing-unet.safetensors"
+os.environ["ZIMAGE_CLIP"] = "/tmp/studio-test-zimage-missing-clip.safetensors"
+os.environ["ZIMAGE_VAE"] = "/tmp/studio-test-zimage-missing-vae.safetensors"
 
 # A named RTX card, with memory above the floor. Tests that describe this card pin it, so a runner
 # with no GPU still checks the same refusal. It is not a claim that the runner has this card.

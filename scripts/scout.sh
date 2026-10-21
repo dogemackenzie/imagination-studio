@@ -11,6 +11,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Before image.sh, so a scout is refused as a scout. SDXL Turbo is refused on its own route until measured.
 if [ "${IMAGE_MODEL:-}" = "sdxl-turbo" ]; then
   bash "$HERE/require-route.sh" sdxl-turbo
+elif [ "${IMAGE_MODEL:-}" = "z-image" ]; then
+  bash "$HERE/require-route.sh" z-image
 else
   bash "$HERE/require-route.sh" scout
 fi

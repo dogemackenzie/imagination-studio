@@ -77,11 +77,12 @@ const hcPictureModel = () => { const want = homePrefs().presets.image_model;
 // SDXL Turbo is not Qwen. The chip names the model the server actually lists.
 const pictureBadge = () => { const model = hcPictureModel();
   if (model === "sdxl-turbo") return el("span", { class: "mk" }, "SDXL Turbo");
+  if (model === "z-image") return el("span", { class: "mk" }, "Z-Image Turbo");
   if (/^flux/.test(model)) return typeof mark === "function" ? mark("flux", "FLUX3-K") : "FLUX3-K";
   return typeof mark === "function" ? mark("qwen", "Qwen 2.1") : "Qwen 2.1"; };
 function hcBlock(mode) { if (typeof routeBlock !== "function") return null;
-  // SDXL Turbo is one measured still. Video, voice, and music stay on the machine route.
-  if (mode === "picture" && hcPictureModel() === "sdxl-turbo") return null;
+  // A measured still. Video, voice, and music stay on the machine route.
+  if (mode === "picture" && (hcPictureModel() === "sdxl-turbo" || hcPictureModel() === "z-image")) return null;
   const kind = mode === "picture" ? "scout" : mode === "voice" ? "voice" : mode === "song" ? "music" : (hcLongs()[hcSeconds()] ? "long" : "video");
   return routeBlock(kind); }
 const hcSeed = () => typeof prefSeed === "function" ? prefSeed() : 1;

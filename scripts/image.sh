@@ -15,9 +15,11 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # App-only stops here. A Mac and a DGX Spark continue, and Linux that is a Spark still hands over below.
-# SDXL Turbo is its own route: it stays stopped until a measured profile enables it.
+# A measured still is its own route: it stays stopped until a measured profile enables it.
 if [ "${IMAGE_MODEL:-qwen}" = "sdxl-turbo" ]; then
   bash "$HERE/require-route.sh" sdxl-turbo
+elif [ "${IMAGE_MODEL:-qwen}" = "z-image" ]; then
+  bash "$HERE/require-route.sh" z-image
 else
   bash "$HERE/require-route.sh" scout
 fi
@@ -57,6 +59,7 @@ case "${IMAGE_MODEL:-qwen}" in
     # shellcheck disable=SC2086
     PREFIX="$PREFIX" exec "$PREFIX/comfy-venv/bin/python" "$HERE/spark/spark_generate.py" "${ARGS[@]}" ${EXTRA:-};;
   sdxl-turbo) echo "SDXL Turbo submits a still to the shared ComfyUI on the measured RTX machine." >&2; exit 1;;
+  z-image) echo "Z-Image Turbo submits a still to the shared ComfyUI on the measured RTX machine." >&2; exit 1;;
   qwen) ;;
   qwen-full) TURBO=0;;
   *) echo "IMAGE_MODEL is qwen, qwen-full, flux3k-fast, flux3k-full or moss-image, not ${IMAGE_MODEL}" >&2; exit 2;;

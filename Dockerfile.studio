@@ -50,12 +50,13 @@ COPY spark /opt/studio/spark
 COPY VERSION /opt/studio/VERSION
 # The measured still profile. The checkpoint stays on the host and is mounted read-only.
 COPY docs/benchmarks/rtx3060-images.json /opt/studio/docs/benchmarks/rtx3060-images.json
+COPY docs/benchmarks/rtx3060-z-image-turbo.json /opt/studio/docs/benchmarks/rtx3060-z-image-turbo.json
 # picture_edit imports this from the pack root. It is the standard library only.
 COPY edit_plan.py /opt/studio/edit_plan.py
 COPY spark/tensorfold_h3 /opt/studio/staged-nodes/tensorfold_h3
 COPY spark/studio_mmaudio /opt/studio/staged-nodes/studio_mmaudio
 
-RUN chmod -R a-w /opt/studio/staged-nodes /opt/studio/app /opt/studio/scripts /opt/studio/spark /opt/studio/VERSION /opt/studio/edit_plan.py /opt/studio/docs/benchmarks/rtx3060-images.json \
+RUN chmod -R a-w /opt/studio/staged-nodes /opt/studio/app /opt/studio/scripts /opt/studio/spark /opt/studio/VERSION /opt/studio/edit_plan.py /opt/studio/docs/benchmarks/rtx3060-images.json /opt/studio/docs/benchmarks/rtx3060-z-image-turbo.json \
     && chmod a+x /opt/studio/scripts/container-entrypoint.sh /opt/studio/scripts/container-healthcheck.py \
     && rm -rf /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.* \
          /usr/local/lib/python3.12/site-packages/pip \

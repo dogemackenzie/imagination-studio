@@ -57,7 +57,7 @@ def test_state_is_app_only_and_names_the_gpu(named_rtx):
     assert "APPLE SILICON" not in state["platform_label"]
     assert state["engine"] == "none"
     ids = [item["id"] if isinstance(item, dict) else item for item in state["image_models"]]
-    assert "qwen" not in ids and set(ids) <= {"sdxl-turbo"}
+    assert "qwen" not in ids and set(ids) <= {"sdxl-turbo", "z-image"}
     assert state["turbo"] is False and state["x2"] is False
     caps = state["capabilities"]
     assert caps["mode"] == "app-only" and caps["local_render"] is False

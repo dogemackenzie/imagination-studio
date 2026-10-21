@@ -32,7 +32,8 @@ IGNORED = (
 )
 KEPT = (
     ".env.example", "samples/singer_standard_8s.mp4", "samples/ui_library.png",
-    "docs/benchmarks/rtx3060-images.json", "compose.yaml", "app/server.py", "spark/smi-pin/nvidia-smi",
+    "docs/benchmarks/rtx3060-images.json", "docs/benchmarks/rtx3060-z-image-turbo.json",
+    "compose.yaml", "app/server.py", "spark/smi-pin/nvidia-smi",
 )
 
 

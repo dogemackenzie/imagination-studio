@@ -38,6 +38,9 @@ services:
       # docker0, where the shared server already listens. Not the container's own loopback.
       SDXL_COMFY_URL: "http://172.17.0.1:8188"
       SDXL_CHECKPOINT: /models/sd_xl_turbo_1.0_fp16.safetensors
+      ZIMAGE_UNET: /models/z_image_turbo_int8_convrot.safetensors
+      ZIMAGE_CLIP: /models/qwen_3_4b_fp8_mixed.safetensors
+      ZIMAGE_VAE: /models/ae.safetensors
       # Free space left on the data volume before a job is queued. This is not the 8000 MB RAM floor.
       STUDIO_DISK_RESERVE_BYTES: "1073741824"
       PYTHONDONTWRITEBYTECODE: "1"
@@ -54,6 +57,9 @@ services:
       # compose.nvml.yaml for that reading only. Those devices are not a render attachment: this image
       # has no CUDA toolkit, STUDIO_MODE stays app-only, and local_render stays false.
       - ${SDXL_CHECKPOINT_SRC:?set SDXL_CHECKPOINT_SRC in .env}:/models/sd_xl_turbo_1.0_fp16.safetensors:ro
+      - ${ZIMAGE_UNET_SRC:?set ZIMAGE_UNET_SRC in .env}:/models/z_image_turbo_int8_convrot.safetensors:ro
+      - ${ZIMAGE_CLIP_SRC:?set ZIMAGE_CLIP_SRC in .env}:/models/qwen_3_4b_fp8_mixed.safetensors:ro
+      - ${ZIMAGE_VAE_SRC:?set ZIMAGE_VAE_SRC in .env}:/models/ae.safetensors:ro
     tmpfs:
       - /tmp:size=256m
     security_opt:

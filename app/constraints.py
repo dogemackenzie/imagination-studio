@@ -501,6 +501,7 @@ def report(spark: bool, picture_models: list[str] | None, fresh: bool = False) -
                 f"Port {PORT} did not answer. Studio does not start that server."))
 
     import sdxl_turbo  # the measured still's size and licence; no prompt is built here
+    import z_image_turbo  # the measured Z-Image still; no prompt is built here
 
     if "sdxl-turbo" in pictures:
         sdxl_state = "runs"
@@ -537,7 +538,10 @@ def report(spark: bool, picture_models: list[str] | None, fresh: bool = False) -
     qwen_detail_missing = "Qwen-Image-2.1 weights are not on this machine."
     if flags["qwen_vae"] and not qwen_on and not flags["qwen_file"]:
         qwen_detail_missing += " A Qwen image VAE is on the shared ComfyUI. The picture weights are a separate file."
-    if "z-image" in stands:
+    if "z-image" in pictures:
+        stands.pop("z-image", None)
+        qwen_detail_missing += " Z-Image Turbo is a different model and has its own measured still."
+    elif "z-image" in stands:
         qwen_detail_missing += f" {stands['z-image']['label']} stands in."
     flux_detail_missing = "FLUX 3 Image Klein runs where its own weights are installed."
     if "flux2-klein" in stands:
@@ -550,7 +554,16 @@ def report(spark: bool, picture_models: list[str] | None, fresh: bool = False) -
         picture_row("qwen", "Qwen-Image-2.1", qwen_on, flags["qwen_file"],
                     qwen_detail_missing, "Qwen-Image weights are on the shared ComfyUI. They wait for a measured route."),
     ]
-    if "z-image" in stands:
+    if "z-image" in pictures:
+        z_detail = (
+            f"{z_image_turbo.WIDTH}×{z_image_turbo.HEIGHT}, {z_image_turbo.STEPS} steps, through the shared ComfyUI. "
+            f"A still is sent when that queue is empty and the host has {capabilities.FLOOR_MB} MB free. "
+            f"{z_image_turbo.LICENSE}."
+        )
+        if reading_origin() and not (shared_renderer() or {}).get("up"):
+            z_detail += " The shared ComfyUI is not answering right now. Studio does not start it."
+        software.append(_row("z-image", "Z-Image Turbo", "runs", z_detail))
+    elif "z-image" in stands:
         software.append(stands["z-image"])
     software.append(picture_row("flux3k", "FLUX3-K", flux_on, flags["flux3_file"],
                                 flux_detail_missing,
@@ -569,7 +582,7 @@ def report(spark: bool, picture_models: list[str] | None, fresh: bool = False) -
         route = (public["routes"] or {}).get(kind) or {}
         software.append(_row(kind, label, "runs" if route.get("enabled", True) else "closed", detail))
 
-    skip = {"sdxl-turbo", "qwen-image", "flux3k", "minimax-h3", "qwen-vae", *stands}
+    skip = {"sdxl-turbo", "qwen-image", "flux3k", "minimax-h3", "qwen-vae", "z-image", *stands}
     present = []
     for item in families:
         if item["id"] in skip:

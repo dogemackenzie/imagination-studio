@@ -187,12 +187,16 @@ def script_exit(kind: str) -> int:
     if kind == "video" and mode(hardware.is_spark()) == "controller":
         sys.stderr.write("This machine does not render H3. A clip is queued for a worker from the app.\n")
         return 1
-    if kind == "sdxl-turbo":
+    if kind in ("sdxl-turbo", "z-image"):
         spark = Path(__file__).resolve().parent.parent / "spark"
         if str(spark) not in sys.path:
             sys.path.insert(0, str(spark))
-        import sdxl_turbo
-        reason = sdxl_turbo.script_block()
+        if kind == "sdxl-turbo":
+            import sdxl_turbo
+            reason = sdxl_turbo.script_block()
+        else:
+            import z_image_turbo
+            reason = z_image_turbo.script_block()
         if reason is None:
             return 0
         sys.stderr.write(reason + "\n")
