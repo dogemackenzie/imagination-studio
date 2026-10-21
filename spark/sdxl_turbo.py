@@ -45,6 +45,9 @@ MAX_COUNT = 4
 WEIGHT_MIB = (BYTES + 1024 * 1024 - 1) // (1024 * 1024)
 PINNED_COMFY = "b9b290e43f1eb379946dfeb013faf9bbefa1a618"
 SHARED_URL = "http://127.0.0.1:8188"
+# The app container is on its own bridge. The shared server already listens on docker0, and that
+# address is not published. 8190 and every other port stay refused.
+SHARED_BRIDGE_URL = "http://172.17.0.1:8188"
 SHARED_PORT = 8188
 WAIT_S = 600
 
@@ -240,6 +243,19 @@ def listener_pids(port: int = SHARED_PORT) -> set[int] | None:
     return found
 
 
+def shared_origin() -> str:
+    """The shared ComfyUI, and no other address."""
+
+    raw = os.environ.get("SDXL_COMFY_URL", SHARED_URL).strip().rstrip("/")
+    if raw not in (SHARED_URL, SHARED_BRIDGE_URL):
+        raise RuntimeError("SDXL Turbo only submits to the shared ComfyUI on port 8188")
+    return raw
+
+
+def in_container() -> bool:
+    return os.environ.get("STUDIO_CONTAINER", "").strip() == "1"
+
+
 def exchange(method: str, path: str, payload: dict | None = None, timeout: float = 30):
     """One read, or a POST to /prompt. Anything else is refused before a socket opens."""
 
@@ -251,8 +267,9 @@ def exchange(method: str, path: str, payload: dict | None = None, timeout: float
         allowed = True
     else:
         raise RuntimeError("Studio does not start, stop, interrupt, unload, or clear the shared ComfyUI")
+    origin = shared_origin()
     request = urllib.request.Request(
-        SHARED_URL + path, data=None if payload is None else json.dumps(payload).encode(),
+        origin + path, data=None if payload is None else json.dumps(payload).encode(),
         method=method, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as reply:
@@ -261,7 +278,7 @@ def exchange(method: str, path: str, payload: dict | None = None, timeout: float
         detail = error.read().decode(errors="replace")[:500]
         raise RuntimeError(f"the shared ComfyUI answered {error.code}: {detail}") from None
     except OSError as error:
-        raise RuntimeError(f"the shared ComfyUI at {SHARED_URL} did not answer: {error}") from None
+        raise RuntimeError(f"the shared ComfyUI at {origin} did not answer: {error}") from None
     if path.startswith("/view?"):
         return body
     return json.loads(body) if body else {}
@@ -302,9 +319,92 @@ def gpu_processes() -> list[dict] | None:
     return rows
 
 
+def _checkpoint_size() -> tuple[Path | None, int | None]:
+    path = checkpoint_path()
+    if path is None:
+        return None, None
+    try:
+        return path, path.stat().st_size
+    except OSError:
+        return path, None
+
+
+def _assess_shared() -> dict:
+    """Budgets for a still that runs in the shared ComfyUI, not in this container.
+
+    The app cgroup is 1 GiB and does not hold the checkpoint, so it is not the render cap.
+    Free VRAM is the shared server's own reading. This does not start or unload that server.
+    """
+
+    path, size = _checkpoint_size()
+    sample = rtx_admit.collect()
+    sample["need_vram_mib"] = WEIGHT_MIB
+    sample["profile"] = True
+    sample["cgroup"] = {"known": True, "cap": False, "headroom_mb": None, "pressure_full_avg10": 0.0}
+    reasons = []
+    if size != BYTES:
+        reasons.append({"code": "missing_model", "reason": "The SDXL Turbo checkpoint is not the measured file."})
+    try:
+        origin = shared_origin()
+    except RuntimeError as error:
+        origin = ""
+        reasons.append({"code": "protected_endpoint", "reason": str(error)})
+    stats = None
+    if origin:
+        try:
+            stats = exchange("GET", "/system_stats", timeout=5)
+        except RuntimeError:
+            stats = None
+        if not isinstance(stats, dict):
+            reasons.append({"code": "renderer_down",
+                            "reason": "The shared ComfyUI did not answer. Studio does not start it."})
+            stats = None
+    if isinstance(stats, dict):
+        device = next((item for item in (stats.get("devices") or []) if item.get("type") == "cuda"), None)
+        free = device.get("vram_free") if isinstance(device, dict) else None
+        if isinstance(free, int):
+            sample["vram_free_mib"] = free // (1024 * 1024)
+            sample["vram_known"] = True
+        else:
+            sample["vram_known"] = False
+            sample["vram_free_mib"] = None
+        found = rtx_admit.decide(sample)
+        if not found["ok"]:
+            reasons.append({"code": found["code"], "reason": found["reason"]})
+    return {
+        "ok": not reasons,
+        "model": ID,
+        "enabled": False,
+        "reasons": reasons,
+        "code": reasons[0]["code"] if reasons else "",
+        "reason": reasons[0]["reason"] if reasons else "",
+        "checkpoint": {"file": CHECKPOINT, "bytes": size, "expected_bytes": BYTES, "sha256": SHA256,
+                       "sha256_source": "phase 0; this run checked the file size and did not read the file",
+                       "license": "Stability AI Non-Commercial Research Community License",
+                       "path": str(path) if path else ""},
+        "recipe": public_limits(),
+        "host_available_mb": sample.get("host_available_mb"),
+        "host_total_mb": sample.get("host_total_mb"),
+        "floor_mb": rtx_admit.host_floor_mb(sample.get("host_total_mb")),
+        "vram_free_mib": sample.get("vram_free_mib"),
+        "vram_need_mib": WEIGHT_MIB,
+        "vram_reserve_mib": sample.get("vram_reserve_mib") or rtx_admit.vram_reserve_mib(),
+        "cgroup": sample.get("cgroup"),
+        "gpu_processes": None,
+        "shared_pids": [],
+        "shared_url": origin,
+        "comfy_pinned": PINNED_COMFY,
+        "attention": "pytorch",
+        "precision": "fp16",
+        "render": None,
+    }
+
+
 def assess() -> dict:
     """Budgets, the checkpoint size, and whether another process holds the GPU. No render."""
 
+    if in_container():
+        return _assess_shared()
     path = checkpoint_path()
     size = None
     if path is not None:
@@ -451,7 +551,7 @@ def render_images(args, text: str, render=None, fetch=None, url: str | None = No
         row = {"output": str(out), "engine": "cuda", "model": ID, "width": wide, "height": tall,
                "seed": seed, "steps": STEPS, "cfg": CFG, "sampler": SAMPLER, "scheduler": SCHEDULER,
                "prompt_id": prompt_id, "bytes": len(data), "total_s": round(time.time() - started, 1),
-               "url": SHARED_URL, "host_available_mb_min": peaks.get("host_available_mb"),
+               "url": shared_origin(), "host_available_mb_min": peaks.get("host_available_mb"),
                "vram_free_mib_min": peaks.get("vram_free_mib")}
         print("[tensorfold] " + json.dumps(row), flush=True)
         made.append(row)

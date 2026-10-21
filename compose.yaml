@@ -1,5 +1,6 @@
-# App-only Studio. This project is not the container that publishes 8190.
-# Rendering stays off. Do not attach a GPU, and do not publish 8188, 8190, 8191, or 8443.
+# App container. This project is not the container that publishes 8190.
+# A still is one prompt to the shared ComfyUI. Do not attach a GPU, and do not publish
+# 8188, 8190, 8191, or 8443. Do not start, stop, or unload that server.
 name: imagination-studio-app
 
 services:
@@ -27,10 +28,15 @@ services:
       STUDIO_COMFY_STATE: /data/comfy
       STUDIO_GPU_LOCK: /data/studio-gpu.lock.d
       STUDIO_STAGED_NODES: /opt/studio/staged-nodes
+      # docker0, where the shared server already listens. Not the container's own loopback.
+      SDXL_COMFY_URL: "http://172.17.0.1:8188"
+      SDXL_CHECKPOINT: /models/sd_xl_turbo_1.0_fp16.safetensors
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
     volumes:
       - studio-data:/data
+      # One checkpoint, read-only. The rest of the shared ComfyUI tree stays unmounted.
+      - /home/mcpadmin/ComfyUI/models/checkpoints/sd_xl_turbo_1.0_fp16.safetensors:/models/sd_xl_turbo_1.0_fp16.safetensors:ro
     tmpfs:
       - /tmp:size=256m
     security_opt:

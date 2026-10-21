@@ -94,6 +94,47 @@ def test_the_workflow_keeps_the_prompt_and_uses_cfg_one():
         S.workflow(PROMPT, 1, 768, 768)
 
 
+def test_the_shared_address_is_only_port_8188(monkeypatch):
+    for bad in ("http://127.0.0.1:8190", "http://192.168.50.22:8188", "http://172.17.0.1:8190", "http://0.0.0.0:8188"):
+        monkeypatch.setenv("SDXL_COMFY_URL", bad)
+        with pytest.raises(RuntimeError):
+            S.shared_origin()
+    monkeypatch.setenv("SDXL_COMFY_URL", "http://172.17.0.1:8188")
+    assert S.shared_origin() == "http://172.17.0.1:8188"
+    monkeypatch.delenv("SDXL_COMFY_URL", raising=False)
+    assert S.shared_origin() == "http://127.0.0.1:8188"
+
+
+def test_a_container_reads_vram_from_the_shared_server(tmp_path, monkeypatch):
+    weight = tmp_path / "w.safetensors"
+    weight.write_bytes(b"x")
+    monkeypatch.setenv("STUDIO_CONTAINER", "1")
+    monkeypatch.setenv("SDXL_COMFY_URL", "http://172.17.0.1:8188")
+    monkeypatch.setattr(S, "BYTES", 1)
+    monkeypatch.setattr(S, "checkpoint_path", lambda: weight)
+    monkeypatch.setattr(S.rtx_admit, "collect", lambda: budgets())
+
+    def stats(free_mib):
+        def exchange(method, path, payload=None, timeout=30):
+            assert method == "GET" and path == "/system_stats"
+            return {"devices": [{"type": "cuda", "vram_free": free_mib * 1024 * 1024}]}
+        return exchange
+
+    monkeypatch.setattr(S, "exchange", stats(12000))
+    report = S.assess()
+    assert report["ok"] is True and report["enabled"] is False
+    assert report["vram_free_mib"] == 12000 and report["shared_url"] == "http://172.17.0.1:8188"
+    assert report["cgroup"]["cap"] is False
+    monkeypatch.setattr(S, "exchange", stats(100))
+    assert S.assess()["code"] == "insufficient_vram"
+
+    def down(method, path, payload=None, timeout=30):
+        raise RuntimeError("did not answer")
+
+    monkeypatch.setattr(S, "exchange", down)
+    assert S.assess()["code"] == "renderer_down"
+
+
 def test_a_still_only_posts_a_prompt_to_the_shared_server(monkeypatch):
     source = (ROOT / "spark/sdxl_turbo.py").read_text()
     assert "main.py --listen" not in source and "comfy.sh" not in source
