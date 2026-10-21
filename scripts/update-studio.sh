@@ -133,14 +133,45 @@ if [[ -z "${STUDIO_UPDATE_COMPOSE:-}" && ! -f compose.yaml ]]; then
   exit 1
 fi
 
+# nvidia-smi and its NVML library, so the Machine tab can read temperature and watts.
+# The devices are for that query. The image has no CUDA toolkit and does not render with them.
+prepare_nvml() {
+  rm -f compose.nvml.yaml
+  if [[ ! -x /usr/bin/nvidia-smi || ! -e /dev/nvidiactl || ! -e /dev/nvidia0 || ! -e /dev/nvidia-uvm ]]; then
+    return 0
+  fi
+  local lib
+  lib="$(readlink -f /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1 2>/dev/null || true)"
+  if [[ -z "$lib" || ! -f "$lib" ]]; then
+    return 0
+  fi
+  cat > compose.nvml.yaml <<EOF
+# Generated for this host. Temperature and power only. Not a render device.
+services:
+  studio:
+    devices:
+      - /dev/nvidiactl
+      - /dev/nvidia0
+      - /dev/nvidia-uvm
+    volumes:
+      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
+      - ${lib}:/usr/lib/libnvidia-ml.so.1:ro
+EOF
+}
+
 compose() {
   if [[ -n "${STUDIO_UPDATE_COMPOSE:-}" ]]; then
     "$STUDIO_UPDATE_COMPOSE" "$@"
   else
-    docker compose "$@"
+    local -a files=(-f compose.yaml)
+    if [[ -f compose.nvml.yaml ]]; then
+      files+=(-f compose.nvml.yaml)
+    fi
+    docker compose "${files[@]}" "$@"
   fi
 }
 
+prepare_nvml
 echo "Building imagination-studio-app:${short}…"
 SOURCE_REV="$short" UPSTREAM_REV="$upstream" compose build studio
 SOURCE_REV="$short" UPSTREAM_REV="$upstream" compose up -d --force-recreate --no-deps studio

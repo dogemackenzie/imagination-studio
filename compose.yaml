@@ -51,6 +51,9 @@ services:
     volumes:
       - studio-data:/data
       # One checkpoint, read-only. The rest of the shared ComfyUI tree stays unmounted.
+      # Temperature and watts come from nvidia-smi when this host has it. update-studio.sh writes
+      # compose.nvml.yaml for that reading only. Those devices are not a render attachment: this image
+      # has no CUDA toolkit, STUDIO_MODE stays app-only, and local_render stays false.
       - ${SDXL_CHECKPOINT_SRC:?set SDXL_CHECKPOINT_SRC in .env}:/models/sd_xl_turbo_1.0_fp16.safetensors:ro
     tmpfs:
       - /tmp:size=256m

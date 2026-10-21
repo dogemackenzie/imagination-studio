@@ -661,10 +661,12 @@ def test_the_machine_tab_shows_a_vram_reading_and_what_this_machine_can_use():
         vram_total_mb: 11911, vram_free_mb: 11798, source: "comfyui" };
       const line = gpuLine({ gpu: card });
       out.ring = line.ring; out.foot = line.foot; out.text = line.text; out.temp = line.temp; out.power = line.power;
-      out.none = gpuLine({}).foot; out.noneTemp = gpuLine({}).temp;
+      out.showPower = sensorPlan(card).power; out.nonePower = sensorPlan(null).power;
+      out.none = gpuLine({}).foot; out.noneTemp = gpuLine({}).temp; out.noneDraw = gpuLine({}).power;
       out.say = gpuSay({ gpu: card }); out.sayNone = gpuSay({});
-      const hot = gpuLine({ gpu: { name: "NVIDIA GB10", util_pct: 12, temp_c: 40, power_w: 30, clock_mhz: 1800 } });
-      out.hotRing = hot.ring; out.hotText = hot.text; out.hotFoot = hot.foot;
+      const hotGpu = { name: "NVIDIA GB10", util_pct: 12, temp_c: 40, power_w: 30, clock_mhz: 1800 };
+      const hot = gpuLine({ gpu: hotGpu });
+      out.hotRing = hot.ring; out.hotText = hot.text; out.hotFoot = hot.foot; out.hotPower = hot.power; out.hotShow = sensorPlan(hotGpu).power;
       const fake = () => { const n = el("span", {}); n.setAttribute = (k, v) => { n.attrs[k] = v; }; n.textContent = ""; return n; };
       NODES["#mdot"] = fake(); NODES["#mpill"] = fake(); NODES["#mtxt"] = fake();
       telApply({ gpu: card, memory: { total_mb: 32000, available_mb: 16000 }, jobs: {}, warnings: [], disk: { free_gb: 10 } });
@@ -677,6 +679,7 @@ def test_the_machine_tab_shows_a_vram_reading_and_what_this_machine_can_use():
           { id: "memory", label: "Memory", state: "ok", detail: "15.6 GB free." }],
         software: [{ id: "sdxl-turbo", label: "SDXL Turbo", state: "runs", detail: "512×512" },
           { id: "qwen", label: "Qwen-Image-2.1", state: "missing", detail: "Qwen-Image-2.1 weights are not on this machine." },
+          { id: "z-image", label: "Z-Image Turbo", state: "stands", detail: "Stands in for Qwen-Image-2.1." },
           { id: "flux3k", label: "FLUX3-K", state: "unknown", detail: "The shared ComfyUI did not list its files." }],
         present: [{ id: "flux2-klein", label: "FLUX.2 Klein", state: "present", detail: "On the shared ComfyUI. It is a different model from FLUX3-K." }],
         present_note: "These files are on the shared ComfyUI. A job is sent only for a measured route above." });
@@ -698,7 +701,8 @@ def test_the_machine_tab_shows_a_vram_reading_and_what_this_machine_can_use():
     assert out["ring"] == "VRAM" and out["foot"] == "NVIDIA GeForce RTX 3060 · 11.5 GB free of 11.6 GB"
     assert "no GPU readings" not in out["foot"]
     assert out["temp"] == "This reading has no temperature."
-    assert out["power"] == "This reading has no power draw."
+    assert out["power"] == "" and out["showPower"] is False and out["nonePower"] is False and out["noneDraw"] == ""
+    assert out["hotPower"] == "power draw" and out["hotShow"] is True
     assert out["none"] == "no GPU readings on this machine" and out["noneTemp"] == "reported on a DGX Spark"
     assert "RTX 3060" in out["say"] and "GB free" in out["say"] and out["sayNone"] == "n/a"
     assert out["hotRing"] == "GPU" and out["hotText"] == "12%" and "NVIDIA GB10" in out["hotFoot"]
@@ -707,8 +711,9 @@ def test_the_machine_tab_shows_a_vram_reading_and_what_this_machine_can_use():
     assert "VRAM" in out["home"] and "GB free" in out["home"] and "no GPU readings" not in out["home"]
     assert "What this machine can use" in out["limits"] and "Read again" in out["limits"]
     assert "runs here" in out["limits"] and "not installed" in out["limits"] and "not listed" in out["limits"]
+    assert "stands in" in out["limits"]
     assert "does not open a route" in out["limits"] and "different model" in out["limits"]
-    assert out["ids"] == ["gpu", "memory", "sdxl-turbo", "qwen", "flux3k", "flux2-klein"]
+    assert out["ids"] == ["gpu", "memory", "sdxl-turbo", "qwen", "z-image", "flux3k", "flux2-klein"]
     assert "Shared ComfyUI" in out["status"] and "RTX 3060" in out["status"] and "8190" in out["status"] and "8188" in out["status"]
     assert "Shared ComfyUI" not in out["plain"] and "8190" in out["plain"]
     assert "What this machine can use" in out["page"] and "Reading this machine" in out["page"]

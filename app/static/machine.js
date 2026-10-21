@@ -14,12 +14,14 @@ function ringSet(id, fraction, text, color) { const r = document.querySelector('
   const v = r.querySelector(".val"); v.setAttribute("stroke-dashoffset", RING * (1 - Math.max(0, Math.min(1, fraction || 0)))); if (color && v.style) v.style.stroke = color;
   r.querySelector("[data-v]").textContent = text; }
 function ringLabel(id, text) { const r = document.querySelector('[data-ring="' + id + '"]'); if (!r || !text) return; const span = r.querySelector(".lab span"); if (span) span.textContent = text; }
+// Temperature is always shown. Power is the card's own watts, and the gauge stays off when the reading has none.
+function sensorPlan(g) { return { temp: true, power: !!(g && g.power_w != null) }; }
 // util when nvidia-smi reports it; VRAM when the shared ComfyUI is the reading this process has
 function gpuLine(t) {
   const g = t && t.gpu;
   const quiet = g && (g.source === "comfyui" || g.vram_total_mb != null);
   const temp = !g ? "reported on a DGX Spark" : g.temp_c == null ? (quiet ? "This reading has no temperature." : "GPU temperature") : g.temp_c > 85 ? "hot: renders may slow" : "GPU temperature";
-  const power = !g ? "reported on a DGX Spark" : g.power_w == null ? (quiet ? "This reading has no power draw." : "power draw") : "power draw";
+  const power = g && g.power_w != null ? "power draw" : "";
   if (!g) return { fraction: 0, text: "–", color: "var(--green)", ring: "GPU", foot: "no GPU readings on this machine", temp, power };
   const name = g.name || "GPU";
   if (g.util_pct != null) return { fraction: g.util_pct / 100, text: g.util_pct + "%", color: g.util_pct > 60 ? "var(--amber)" : "var(--green)", ring: "GPU", foot: name + (g.clock_mhz ? " · " + g.clock_mhz + " MHz" : ""), temp, power };
@@ -38,8 +40,8 @@ function sparkline(id, tone) { return el("div", { class: "stack m-sparkbox" }, s
   svg("path", { d: "", class: "area" }), svg("path", { d: "", class: "line", "vector-effect": "non-scaling-stroke" }))); }
 function sparkSet(id, values, max) { const s = document.querySelector('[data-spark="' + id + '"]'); if (!s) return; const [line, area] = sparkPath(values, 600, 64, max); const p = s.querySelectorAll("path"); p[0].setAttribute("d", area); p[1].setAttribute("d", line); }
 const M = { storage: null, loading: false, history: null, limits: null };
-const LIMIT_WORD = { runs: "runs here", present: "on the server", missing: "not installed", closed: "not offered", seen: "seen", down: "not answering", ok: "within the floor", tight: "under the floor", unknown: "not listed" };
-const limitTone = s => s === "runs" || s === "seen" || s === "ok" ? "ok" : s === "closed" || s === "tight" ? "warn" : s === "present" ? "t" : "";
+const LIMIT_WORD = { runs: "runs here", present: "on the server", stands: "stands in", missing: "not installed", closed: "not offered", seen: "seen", down: "not answering", ok: "within the floor", tight: "under the floor", unknown: "not listed" };
+const limitTone = s => s === "runs" || s === "seen" || s === "ok" ? "ok" : s === "closed" || s === "tight" ? "warn" : s === "present" || s === "stands" ? "t" : "";
 function limitsView(d) {
   const head = el("div", { class: "kv" }, el("h2", { class: "m-flat" }, "What this machine can use"),
     el("button", { class: "small", onclick: () => { M.limits = null; const box = document.querySelector("#limits"); if (box) limitsDraw(box); api("/api/constraints?fresh=1").then(next => { M.limits = next; const live = document.querySelector("#limits"); if (live) limitsDraw(live); }).catch(() => { M.limits = { error: true }; const live = document.querySelector("#limits"); if (live) limitsDraw(live); }); } }, "Read again"));
@@ -63,11 +65,14 @@ function machineLive(t) {
   ringSet("gpu", line.fraction, line.text, line.color); ringLabel("gpu", line.ring);
   ringSet("mem", used, Math.round(used * 100) + "%", used > .85 ? "var(--red)" : used > .65 ? "var(--amber)" : "var(--blue)");
   ringSet("temp", (g.temp_c || 0) / 100, g.temp_c == null ? "–" : g.temp_c + "°", g.temp_c > 85 ? "var(--red)" : g.temp_c > 70 ? "var(--amber)" : "var(--green)");
-  ringSet("power", (g.power_w || 0) / 240, g.power_w == null ? "–" : Math.round(g.power_w) + "W", "var(--blue)");
+  const showPower = sensorPlan(g).power;
+  const gauges = document.querySelector(".gauges"); if (gauges) gauges.dataset.power = showPower ? "on" : "off";
+  const powerGauge = document.querySelector('[data-gauge="power"]'); if (powerGauge) powerGauge.hidden = !showPower;
+  if (showPower) ringSet("power", g.power_w / 240, Math.round(g.power_w) + "W", "var(--blue)");
   const foot = (k, s) => { const n = document.querySelector('[data-foot="' + k + '"]'); if (n) n.textContent = s; };
   foot("gpu", line.foot);
   foot("mem", mem.total_mb ? Math.round((mem.total_mb - mem.available_mb) / 1024) + " of " + Math.round(mem.total_mb / 1024) + " GB" + (mem.floor_mb ? " · guard floor " + Math.round(mem.floor_mb / 1024) + " GB" : "") : "–");
-  foot("temp", line.temp); foot("power", line.power);
+  foot("temp", line.temp); if (showPower) foot("power", line.power);
   const hist = [...(M.history || []), ...SHELL.samples.map(s => ({ gpu: s.gpu, mem: s.mem }))].slice(-300);
   // a missing load is not 0%. VRAM stays on the ring; it is not drawn as GPU load.
   const gpuVals = hist.map(s => s.gpu).filter(v => typeof v === "number");
@@ -112,11 +117,11 @@ function viewMachine() {
   put(wrap, pageHead("Studio Vault", "Machine", where + ": live readings. Read only, nothing here changes the machine."),
     S.platform_label ? el("div", { class: "m-plat" }, S.platform_label) : null,
     el("div", { id: "machwarn", class: "stack m-warns" }),
-    el("div", { class: "gauges" },
+    el("div", { class: "gauges", "data-power": "off" },
       el("div", { class: "gauge" }, ring("gpu", "GPU", "var(--green)"), el("div", { class: "foot", "data-foot": "gpu" }, "–")),
       el("div", { class: "gauge" }, ring("mem", "Memory", "var(--blue)"), el("div", { class: "foot", "data-foot": "mem" }, "–")),
       el("div", { class: "gauge" }, ring("temp", "Temp", "var(--green)"), el("div", { class: "foot", "data-foot": "temp" }, "–")),
-      el("div", { class: "gauge" }, ring("power", "Power", "var(--blue)"), el("div", { class: "foot", "data-foot": "power" }, "–"))),
+      el("div", { class: "gauge", "data-gauge": "power", hidden: true }, ring("power", "Power", "var(--blue)"), el("div", { class: "foot", "data-foot": "power" }, "–"))),
     limitsPanel(),
     el("div", { class: "split m-gap" },
       el("div", { class: "stack" },

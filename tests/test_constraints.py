@@ -115,7 +115,7 @@ def test_only_the_two_origins_and_three_folders_are_read(monkeypatch):
         assert constraints.reading_origin() == ok
     monkeypatch.delenv("SDXL_COMFY_URL", raising=False)
     assert constraints.allowed_path("/system_stats")
-    for folder in ("checkpoints", "diffusion_models", "vae"):
+    for folder in ("checkpoints", "diffusion_models", "vae", "text_encoders"):
         assert constraints.allowed_path("/models/" + folder)
     for path in ("/prompt", "/object_info", "/models/loras", "/models/checkpoints/x", "/models/../checkpoints"):
         assert not constraints.allowed_path(path)
@@ -172,17 +172,25 @@ def test_a_seen_card_does_not_open_a_local_render(monkeypatch):
     sdxl = _row(body, "software", "sdxl-turbo")
     assert sdxl["state"] == "runs" and "512" in sdxl["detail"] and "8000" in sdxl["detail"]
     assert "Stability AI Non-Commercial Research Community License" in sdxl["detail"]
-    assert _row(body, "software", "qwen")["state"] == "missing"
-    assert "separate file" in _row(body, "software", "qwen")["detail"]
-    assert _row(body, "software", "flux3k")["state"] == "missing"
-    assert _row(body, "software", "h3")["state"] == "missing"
+    qwen = _row(body, "software", "qwen")
+    assert qwen["state"] == "missing" and "separate file" in qwen["detail"] and "Z-Image stands in." in qwen["detail"]
+    assert _row(body, "software", "z-image")["state"] == "stands"
+    assert "z_image.safetensors" in _row(body, "software", "z-image")["detail"]
+    flux = _row(body, "software", "flux3k")
+    assert flux["state"] == "missing" and "different model" in flux["detail"]
+    klein = _row(body, "software", "flux2-klein")
+    assert klein["state"] == "stands" and "different model" in klein["detail"] and klein["state"] != "runs"
+    h3 = _row(body, "software", "h3")
+    assert h3["state"] == "missing" and "Wan 2.1 stands in" in h3["detail"] and "own sound" in h3["detail"]
+    assert _row(body, "software", "wan")["state"] == "stands"
     assert _row(body, "software", "export")["state"] == "runs"
     assert _row(body, "software", "soundtrack")["state"] == "runs"
     present = {row["id"]: row for row in body["present"]}
-    assert "flux2-klein" in present and "different model" in present["flux2-klein"]["detail"]
+    assert "flux2-klein" not in present and "z-image" not in present and "wan" not in present
     assert "sdxl-turbo" not in present and "qwen-vae" not in present and "minimax-h3" not in present
     assert present["sdxl-base"]["state"] == "present"
     assert "qwen-image" not in body["listed"]["known"]
+    assert "stand in" in body["note"] and "not a route" in body["note"]
 
 
 def test_a_failed_file_list_is_not_a_list_of_absences(monkeypatch):
@@ -201,6 +209,58 @@ def test_a_failed_file_list_is_not_a_list_of_absences(monkeypatch):
         assert "not on this machine" not in row["detail"]
         assert "being absent" in row["detail"]
     assert body["present"] == []
+
+
+def test_a_missing_text_encoder_list_does_not_hide_the_catalogue(monkeypatch):
+    monkeypatch.setenv("SDXL_COMFY_URL", "http://127.0.0.1:8188")
+
+    def fetch(_origin, path, timeout=None):
+        if path.endswith("/text_encoders"):
+            return None
+        folder = path.rsplit("/", 1)[-1]
+        return list(FILES.get(folder, []))
+
+    monkeypatch.setattr(constraints, "fetch_json", fetch)
+    found = constraints.model_files(force=True)
+    assert found is not None and found["text_encoders"] is None
+    assert "sd_xl_turbo_1.0_fp16.safetensors" in found["checkpoints"]
+
+
+def test_the_stand_in_is_the_smaller_file_and_it_is_not_a_route():
+    rich = {
+        "checkpoints": ["sd_xl_turbo_1.0_fp16.safetensors"],
+        "diffusion_models": [
+            "flux-2-klein-base-4b.safetensors",
+            "flux-2-klein-4b.safetensors",
+            "flux-2-klein-4b-fp8.safetensors",
+            "z_image_int8.safetensors",
+            "z_image_turbo_int8.safetensors",
+            "wan2.2_ti2v_5B_fp16.safetensors",
+            "wan2.1_vace_1.3B_fp16.safetensors",
+            "wan2.1_t2v_1.3B_fp16.safetensors",
+        ],
+        "vae": ["ae.safetensors", "flux2-vae.safetensors", "wan_2.1_vae.safetensors"],
+        "text_encoders": ["qwen_3_4b.safetensors", "umt5_xxl_fp8.safetensors"],
+    }
+    rows = constraints.stand_ins(rich, {})
+    assert rows["z-image"]["label"] == "Z-Image Turbo" and rows["z-image"]["state"] == "stands"
+    assert "z_image_turbo_int8.safetensors" in rows["z-image"]["detail"]
+    assert "measured route" in rows["z-image"]["detail"] and "not listed" not in rows["z-image"]["detail"]
+    assert "flux-2-klein-4b-fp8.safetensors" in rows["flux2-klein"]["detail"]
+    assert "different model" in rows["flux2-klein"]["detail"]
+    assert "wan2.1_t2v_1.3B_fp16.safetensors" in rows["wan"]["detail"]
+    assert "vace" not in rows["wan"]["detail"] and "5B" not in rows["wan"]["detail"]
+    assert "own sound" in rows["wan"]["detail"] and "Other Wan" in rows["wan"]["detail"]
+    assert constraints.stand_ins(rich, {"qwen": True, "flux3k": True, "h3": True}) == {}
+    only_big = constraints.stand_ins(
+        {"diffusion_models": ["wan2.2_ti2v_5B_fp16.safetensors"], "vae": [], "text_encoders": []}, {})
+    assert "wan" not in only_big and "z-image" not in only_big
+    bare = constraints.stand_ins(
+        {"diffusion_models": ["z_image_turbo_int8.safetensors"], "vae": ["qwen_image_vae.safetensors"], "text_encoders": []},
+        {})
+    assert "text encoder" in bare["z-image"]["detail"] and "VAE" in bare["z-image"]["detail"]
+    assert constraints.match_file("diffusion_models", "z_image_turbo_int8.safetensors")[2] == ""
+    assert constraints.match_file("diffusion_models", "wan2.1_t2v_1.3B_fp16.safetensors")[2] == ""
 
 
 def test_nvidia_smi_wins_when_this_process_can_run_it(monkeypatch):

@@ -7,7 +7,10 @@ from an unmeasured machine is SDXL Turbo, and only when ``image_models()`` alrea
 The shared ComfyUI is read with GET, and only at the two allowed origins (loopback and
 docker0, port 8188). Nothing here posts a prompt, and nothing starts, stops, interrupts,
 unloads, or clears that server. A filename on that server is not a licence and not a route.
-FLUX.2 Klein is not FLUX3-K. A Qwen image VAE is not Qwen-Image.
+When Qwen-Image-2.1, FLUX3-K, or MiniMax H3 is not installed, a file already on that server
+can stand in for the same kind of job. The stand-in is a different model, and it is not a route.
+FLUX.2 Klein is not FLUX3-K. A Qwen image VAE is not Qwen-Image. Z-Image is not Qwen-Image.
+Wan is not MiniMax H3.
 """
 from __future__ import annotations
 
@@ -24,7 +27,9 @@ import capabilities
 import hardware
 
 ORIGINS = ("http://127.0.0.1:8188", "http://172.17.0.1:8188")
-MODEL_FOLDERS = ("checkpoints", "diffusion_models", "vae")
+MODEL_FOLDERS = ("checkpoints", "diffusion_models", "vae", "text_encoders")
+# A server that does not list text encoders still has a catalogue. The other three folders are required.
+OPTIONAL_FOLDERS = frozenset({"text_encoders"})
 TIMEOUT = 2.0
 MAX_BYTES = 1_000_000
 STATS_FRESH = 5.0
@@ -33,7 +38,9 @@ PORT = 8188
 
 NOTE = (
     "The studio uses what this machine can run. "
-    "A GPU reading does not open a route that was never measured."
+    "A GPU reading does not open a route that was never measured. "
+    "When a studio model is not installed, a file already on the shared ComfyUI can stand in for it. "
+    "A stand-in is a different model, and it is not a route."
 )
 CONTAINER_NOTE = " This app process does not hold the GPU. A measured still is sent to the shared ComfyUI, which does."
 
@@ -222,6 +229,9 @@ def model_files(force: bool = False) -> dict | None:
     for folder in MODEL_FOLDERS:
         payload = fetch_json(origin, "/models/" + folder, timeout=TIMEOUT)
         if not isinstance(payload, list):
+            if folder in OPTIONAL_FOLDERS:
+                found[folder] = None
+                continue
             with _lock:
                 _files.update(at=time.monotonic(), value=None, asked=True)
             return None
@@ -330,6 +340,116 @@ def _row(ident: str, label: str, state: str, detail: str) -> dict:
     return {"id": ident, "label": label, "state": state, "detail": detail}
 
 
+def _names(files: dict, folder: str) -> list[str] | None:
+    """Filenames in one folder, or None when that folder was not listed."""
+
+    names = files.get(folder)
+    if not isinstance(names, list):
+        return None
+    return [name for name in names if isinstance(name, str)]
+
+
+def _pick(names: list[str] | None, *preds) -> str | None:
+    if not names:
+        return None
+    folded = [(name, name.casefold()) for name in names]
+    for pred in preds:
+        for name, low in folded:
+            if pred(low):
+                return name
+    return None
+
+
+def _gap(files: dict, folder: str, pred) -> bool:
+    """True when the folder was listed and nothing in it matches."""
+
+    names = _names(files, folder)
+    if names is None:
+        return False
+    return not any(pred(name.casefold()) for name in names)
+
+
+def stand_ins(files: dict | None, covered: dict | None = None) -> dict[str, dict]:
+    """Files on the shared ComfyUI that can stand in for a studio model that is not installed.
+
+    The choice is the smallest file of that family this process can name. A 12 GB card gets
+    FLUX.2 Klein 4B in fp8 before the larger Klein files, Z-Image Turbo before Z-Image, and
+    Wan 2.1's 1.3B text-to-video file before any other Wan file. Wan 2.2 is not the stand-in.
+    Nothing here builds a prompt. ``covered`` names studio models that are already installed.
+    """
+
+    if not isinstance(files, dict):
+        return {}
+    covered = covered or {}
+    diffusion = _names(files, "diffusion_models") or []
+    found: dict[str, dict] = {}
+
+    def note(gaps: list[str], *parts: str) -> str:
+        text = " ".join(part for part in parts if part)
+        missing = [gap for gap in gaps if gap]
+        if missing:
+            text += " " + " ".join(missing)
+        return text
+
+    if not covered.get("qwen"):
+        turbo = _pick(diffusion, lambda low: "z_image_turbo" in low or "z-image-turbo" in low)
+        plain = _pick(diffusion, lambda low: low.startswith("z_image") or low.startswith("z-image"))
+        chosen = turbo or plain
+        if chosen:
+            label = "Z-Image Turbo" if turbo else "Z-Image"
+            gaps = []
+            if _gap(files, "text_encoders", lambda low: low.startswith("qwen_3_4b")):
+                gaps.append("Its text encoder is not listed.")
+            if _gap(files, "vae", lambda low: low == "ae.safetensors" or low.startswith("ae.")):
+                gaps.append("Its VAE is not listed.")
+            found["z-image"] = _row("z-image", label, "stands", note(
+                gaps,
+                f"Stands in for Qwen-Image-2.1. The Qwen picture weights are not installed. {chosen} is on the shared ComfyUI.",
+                "It is a different model. A job is sent only on a measured route.",
+            ))
+    if not covered.get("flux3k"):
+        def klein(low: str) -> bool:
+            return "flux-2-klein" in low or "flux2-klein" in low or low.startswith("flux-2")
+
+        chosen = _pick(
+            diffusion,
+            lambda low: klein(low) and "4b" in low and "fp8" in low and "base" not in low,
+            lambda low: klein(low) and "4b" in low and "base" not in low,
+            klein,
+        )
+        if chosen:
+            gaps = []
+            if _gap(files, "text_encoders", lambda low: low.startswith("qwen_3_4b")):
+                gaps.append("Its text encoder is not listed.")
+            if _gap(files, "vae", lambda low: "flux2-vae" in low or "flux2_vae" in low):
+                gaps.append("Its VAE is not listed.")
+            found["flux2-klein"] = _row("flux2-klein", "FLUX.2 Klein", "stands", note(
+                gaps,
+                f"Stands in for FLUX3-K. {chosen} is on the shared ComfyUI.",
+                "It is a different model from FLUX3-K. A job is sent only on a measured route.",
+            ))
+    if not covered.get("h3"):
+        def wan_t2v(low: str) -> bool:
+            return low.startswith("wan2.1") and "t2v" in low and "vace" not in low
+
+        chosen = _pick(diffusion, lambda low: wan_t2v(low) and "1.3" in low, wan_t2v)
+        if chosen:
+            others = [name for name in diffusion if name.casefold().startswith("wan") and name != chosen]
+            gaps = []
+            if _gap(files, "text_encoders", lambda low: "umt5" in low):
+                gaps.append("Its text encoder is not listed.")
+            if _gap(files, "vae", lambda low: "wan_2.1_vae" in low or "wan2.1_vae" in low):
+                gaps.append("Its VAE is not listed.")
+            extra = " Other Wan files on the server are not this stand-in." if others else ""
+            found["wan"] = _row("wan", "Wan 2.1", "stands", note(
+                gaps,
+                f"Stands in for MiniMax H3. {chosen} is on the shared ComfyUI.",
+                "Wan 2.1 makes a short silent clip. It does not make MiniMax H3's own sound.",
+                "A job is sent only on a measured route." + extra,
+            ))
+    return found
+
+
 def report(spark: bool, picture_models: list[str] | None, fresh: bool = False) -> dict:
     """Hardware this process can see, the routes it will run, and files that stay on the server."""
 
@@ -411,20 +531,37 @@ def report(spark: bool, picture_models: list[str] | None, fresh: bool = False) -
                         "The shared ComfyUI did not list its files. Studio does not treat that as this model being absent.")
         return _row(ident, label, "missing", missing)
 
+    qwen_on = bool(pictures & {"qwen", "qwen-full"})
+    flux_on = any(name.startswith("flux3k") for name in pictures)
+    stands = {} if unknown else stand_ins(files, {"qwen": qwen_on or flags["qwen_file"], "flux3k": flux_on or flags["flux3_file"], "h3": local or flags["h3_file"]})
     qwen_detail_missing = "Qwen-Image-2.1 weights are not on this machine."
-    if flags["qwen_vae"] and "qwen" not in pictures and not flags["qwen_file"]:
+    if flags["qwen_vae"] and not qwen_on and not flags["qwen_file"]:
         qwen_detail_missing += " A Qwen image VAE is on the shared ComfyUI. The picture weights are a separate file."
+    if "z-image" in stands:
+        qwen_detail_missing += f" {stands['z-image']['label']} stands in."
+    flux_detail_missing = "FLUX 3 Image Klein runs where its own weights are installed."
+    if "flux2-klein" in stands:
+        flux_detail_missing += " FLUX.2 Klein stands in. It is a different model."
+    h3_detail_missing = "Video runs on a Mac or a DGX Spark, or on a worker a controller sends it to."
+    if "wan" in stands:
+        h3_detail_missing += " Wan 2.1 stands in for a clip. It does not make MiniMax H3's own sound."
     software = [
         _row("sdxl-turbo", "SDXL Turbo", sdxl_state, sdxl_detail),
-        picture_row("qwen", "Qwen-Image-2.1", bool(pictures & {"qwen", "qwen-full"}), flags["qwen_file"],
+        picture_row("qwen", "Qwen-Image-2.1", qwen_on, flags["qwen_file"],
                     qwen_detail_missing, "Qwen-Image weights are on the shared ComfyUI. They wait for a measured route."),
-        picture_row("flux3k", "FLUX3-K", any(name.startswith("flux3k") for name in pictures), flags["flux3_file"],
-                    "FLUX 3 Image Klein runs where its own weights are installed.",
-                    "FLUX3-K weights are on the shared ComfyUI. They wait for a measured route."),
-        picture_row("h3", "MiniMax H3", local, flags["h3_file"],
-                    "Video runs on a Mac or a DGX Spark, or on a worker a controller sends it to.",
-                    "MiniMax H3 weights are on the shared ComfyUI. This process does not render video locally."),
     ]
+    if "z-image" in stands:
+        software.append(stands["z-image"])
+    software.append(picture_row("flux3k", "FLUX3-K", flux_on, flags["flux3_file"],
+                                flux_detail_missing,
+                                "FLUX3-K weights are on the shared ComfyUI. They wait for a measured route."))
+    if "flux2-klein" in stands:
+        software.append(stands["flux2-klein"])
+    software.append(picture_row("h3", "MiniMax H3", local, flags["h3_file"],
+                                h3_detail_missing,
+                                "MiniMax H3 weights are on the shared ComfyUI. This process does not render video locally."))
+    if "wan" in stands:
+        software.append(stands["wan"])
     for kind, label, detail in (
         ("export", "Export", "Assembles files that already exist."),
         ("soundtrack", "Soundtrack", "Lays a finished song under a clip."),
@@ -432,7 +569,7 @@ def report(spark: bool, picture_models: list[str] | None, fresh: bool = False) -
         route = (public["routes"] or {}).get(kind) or {}
         software.append(_row(kind, label, "runs" if route.get("enabled", True) else "closed", detail))
 
-    skip = {"sdxl-turbo", "qwen-image", "flux3k", "minimax-h3", "qwen-vae"}
+    skip = {"sdxl-turbo", "qwen-image", "flux3k", "minimax-h3", "qwen-vae", *stands}
     present = []
     for item in families:
         if item["id"] in skip:
