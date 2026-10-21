@@ -664,8 +664,15 @@ def roots() -> list[Path]:
         first.append(place.parent if item["kind"] == "folder" else place)
     broad = [Path("/data"), Path("/opt"), Path("/srv"), Path("/mnt"), Path("/media"), Path("/Volumes")]
     if os.environ.get("STUDIO_CONTAINER") == "1":
-        # Named roots only. An empty STUDIO_SCAN_ROOTS walks none of the mounted disks.
-        rest = [Path(p).expanduser() for p in os.environ.get("STUDIO_SCAN_ROOTS", "").split(os.pathsep) if p.strip()]
+        # Configured mounts only. Expected folders and broad disks are not walked.
+        # An empty STUDIO_SCAN_ROOTS walks nothing.
+        out, seen = [], set()
+        for one in (Path(p).expanduser() for p in os.environ.get("STUDIO_SCAN_ROOTS", "").split(os.pathsep) if p.strip()):
+            key = str(one)
+            if key not in seen and one.is_dir() and one != Path("/"):
+                seen.add(key)
+                out.append(one)
+        return out
     elif os.environ.get("STUDIO_SCAN_ROOTS"):  # the machine's own roots, named instead (os.pathsep between them)
         rest = [home()] + [Path(p).expanduser() for p in os.environ["STUDIO_SCAN_ROOTS"].split(os.pathsep) if p]
     else:
@@ -1031,6 +1038,41 @@ def find_need(nid: str) -> dict | None:
     return next((n for n in all_needs() if n["id"] == nid), None)
 
 
+def readiness(item: dict, known: dict | None = None) -> dict:
+    """A file on disk is not a licence and is not a measured route.
+
+    ``present`` means the expected file or a named candidate exists. ``compatible`` means it is
+    at the expected place or a verified candidate. ``licensed``, ``benchmarked`` and ``runnable``
+    stay false here: a catalogue row does not grant a licence or a route. The measured picture
+    profile is ``measured_picture``, separately.
+    """
+
+    known = known or {}
+    candidates = [c for c in known.get("candidates") or [] if isinstance(c, dict) and c.get("path")]
+    verified = [c for c in candidates if c.get("verified")]
+    at_expected = present(item)
+    return {
+        "present": bool(at_expected or candidates),
+        "compatible": bool(at_expected or verified),
+        "licensed": False,
+        "benchmarked": False,
+        "runnable": False,
+    }
+
+
+def measured_picture() -> list[dict]:
+    """The measured still profile, when this tree can import it. No prompt is submitted."""
+
+    spark = Path(__file__).resolve().parent.parent / "spark"
+    if str(spark) not in sys.path:
+        sys.path.insert(0, str(spark))
+    try:
+        import sdxl_turbo
+    except ImportError:
+        return []
+    return [sdxl_turbo.standing()]
+
+
 def present(item: dict) -> bool:
     place = item["expected"]
     if item.get("unlisted"):
@@ -1212,6 +1254,7 @@ def state() -> dict:
                     "env": item["env"], "candidates": good, "conversions": convert, "download": item.get("download", ""),
                     "link": {**record, "shown": shown(record["path"]), "link_shown": shown(record["link"])} if record else None,
                     "linked_by_studio": bool(record), "unlisted": bool(item.get("unlisted")), "linkable": item.get("linkable", True),
+                    "readiness": readiness(item, known),
                     "install": install_plan(item)})
     scan_info = data.get("scan")
     try:
@@ -1220,6 +1263,7 @@ def state() -> dict:
     except ImportError:
         installing = {"need": None, "state": "idle"}
     return {"needs": out, "scanning": scanning(), "progress": dict(_progress), "last_scan": scan_info, "installing": installing,
+            "measured": measured_picture(),
             "tools": {k: [shown(p) for p in v] for k, v in (data.get("tools") or {}).items()},
             "platform": "spark" if SPARK else "mac" if MAC else sys.platform, "note": NOTE}
 

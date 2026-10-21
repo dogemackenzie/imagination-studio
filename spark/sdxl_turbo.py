@@ -30,6 +30,7 @@ ID = "sdxl-turbo"
 LABEL = "SDXL Turbo"
 NOTE = ("1 step at 512×512, fp16, batch size one. Stability AI Non-Commercial Research Community License. "
         "A still picture only: no edit, LoRA, reference, or video.")
+LICENSE = "Stability AI Non-Commercial Research Community License"
 CHECKPOINT = "sd_xl_turbo_1.0_fp16.safetensors"
 # Phase 0 recorded this size and sha256. The size is checked again. The file is not re-read under the floor.
 BYTES = 6_938_081_905
@@ -90,25 +91,75 @@ def max_count() -> int:
     return max(1, min(count, MAX_COUNT))
 
 
+def classify(profile: dict | None, size: int | None) -> dict:
+    """Separate a file that exists from a model this process may run.
+
+    ``present`` is a size we could read. ``compatible`` is that size matching the recorded
+    checkpoint. ``licensed`` is the recorded non-commercial research licence, which is not
+    a commercial grant. ``benchmarked`` is a finished render on named hardware.
+    ``runnable`` is the enabled measured profile. Admission, including the 8000 MB floor
+    and an empty queue, is checked again when a still is submitted. This does not submit one.
+    """
+
+    profile = profile or {}
+    checkpoint = profile.get("checkpoint") if isinstance(profile.get("checkpoint"), dict) else {}
+    recipe = profile.get("recipe") if isinstance(profile.get("recipe"), dict) else {}
+    render = profile.get("render") if isinstance(profile.get("render"), dict) else {}
+    present = size is not None
+    compatible = bool(present and size == BYTES and checkpoint.get("bytes") == BYTES)
+    licensed = checkpoint.get("license") == LICENSE
+    benchmarked = bool(render.get("output") and profile.get("gpu_name") and profile.get("model") == ID)
+    recipe_ok = (recipe.get("width"), recipe.get("height"), recipe.get("steps"), recipe.get("cfg"),
+                 recipe.get("sampler"), recipe.get("scheduler"), recipe.get("batch_size")) == (
+                 WIDTH, HEIGHT, STEPS, CFG, SAMPLER, SCHEDULER, BATCH)
+    runnable = bool(profile.get("enabled") is True and profile.get("model") == ID and recipe_ok and compatible)
+    return {
+        "id": ID,
+        "present": present,
+        "compatible": compatible,
+        "licensed": licensed,
+        "license": LICENSE if licensed else "",
+        "benchmarked": benchmarked,
+        "runnable": runnable,
+        "enabled": profile.get("enabled") is True,
+        "hardware": {
+            "gpu_name": profile.get("gpu_name") or "",
+            "gpu_uuid": profile.get("gpu_uuid") or "",
+            "driver": profile.get("driver") or "",
+            "comfy_installed": profile.get("comfy_installed") or "",
+            "comfy_pinned": profile.get("comfy_pinned") or "",
+            "floor_mb": profile.get("floor_mb"),
+        },
+        "note": ("A checkpoint on disk is present. It is runnable when the measured profile is enabled "
+                 "and the file is the recorded size. The licence is non-commercial research. "
+                 "Admission, including the 8000 MB floor and an empty queue, is checked again when a still is submitted."),
+    }
+
+
+def standing() -> dict:
+    """This machine's SDXL Turbo file, classified. A stat of the checkpoint, not a hash and not a prompt."""
+
+    path = checkpoint_path()
+    size = None
+    if path is not None:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None
+    return classify(load_profile(), size)
+
+
 def offered() -> bool:
     """True only for a finished measured profile whose checkpoint is still the same size."""
 
-    profile = load_profile()
-    if not profile or profile.get("enabled") is not True or profile.get("model") != ID:
-        return False
-    recipe = profile.get("recipe") or {}
-    if (recipe.get("width"), recipe.get("height"), recipe.get("steps"), recipe.get("cfg"),
-            recipe.get("sampler"), recipe.get("scheduler"), recipe.get("batch_size")) != (
-            WIDTH, HEIGHT, STEPS, CFG, SAMPLER, SCHEDULER, BATCH):
-        return False
     path = checkpoint_path()
-    recorded = (profile.get("checkpoint") or {}).get("bytes")
-    if path is None or recorded != BYTES:
+    if path is None:
         return False
     try:
-        return path.stat().st_size == BYTES
+        size = path.stat().st_size
     except OSError:
         return False
+    return classify(load_profile(), size)["runnable"]
 
 
 def public_limits() -> dict:

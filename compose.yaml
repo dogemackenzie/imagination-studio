@@ -31,8 +31,15 @@ services:
       # docker0, where the shared server already listens. Not the container's own loopback.
       SDXL_COMFY_URL: "http://172.17.0.1:8188"
       SDXL_CHECKPOINT: /models/sd_xl_turbo_1.0_fp16.safetensors
+      # Free space left on the data volume before a job is queued. This is not the 8000 MB RAM floor.
+      STUDIO_DISK_RESERVE_BYTES: "1073741824"
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - studio-data:/data
       # One checkpoint, read-only. The rest of the shared ComfyUI tree stays unmounted.

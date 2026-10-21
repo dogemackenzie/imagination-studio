@@ -10,6 +10,7 @@ Projects, uploads and renders live under $STUDIO_HOME (default ~/ImaginationStud
 
 from __future__ import annotations
 
+import fcntl
 import ipaddress
 import json
 import math
@@ -36,6 +37,8 @@ from fastapi.staticfiles import StaticFiles
 HERE = Path(__file__).resolve().parent
 PACK = HERE.parent
 from studio_home import studio_home  # noqa: E402  (~/ImaginationStudio, an older ~/TensorFoldStudio moved there once)
+import history  # noqa: E402  (a record of jobs, not the queue)
+import housekeeping  # noqa: E402  (disk reserve and Studio-owned temp files)
 HOME = studio_home(move=__name__ == "__main__")  # moved only when the studio starts, never by a script that imports this
 os.environ["STUDIO_HOME"] = str(HOME)  # the scripts and engines it starts keep everything in the same folder
 for name in ("projects", "uploads", "renders", "scouts", "exports"):
@@ -472,6 +475,18 @@ def accepting_jobs():
         raise HTTPException(503, "Studio is shutting down.")
     if updater.maintenance.is_set():
         raise HTTPException(503, "Studio is restarting for an update. Try again after it reconnects.")
+    short = housekeeping.short_disk(HOME)
+    if short:
+        raise HTTPException(507, short)
+
+
+def _keep(job: dict) -> None:
+    """Write one history row. A failure to write the record does not fail the job."""
+
+    try:
+        history.remember(job)
+    except OSError:
+        pass
 
 
 def inside(path: str | Path) -> Path:
@@ -1773,6 +1788,7 @@ def perform(job: dict, worker: dict | None = None) -> None:
     finally:
         if job["status"] != "queued":
             job["finished"] = time.time()
+        _keep(job)
 
 
 # The queue thread is started by begin(), not by importing this module. Tests collect the app with pytest already
@@ -2086,12 +2102,20 @@ def queue_job(body: dict) -> dict:
         order.append(job_id)
     wake.set()
     hub.kick.set()
+    _keep(job)
     return public(job)
 
 
 @app.get("/api/jobs")
 def list_jobs() -> list[dict]:
     return [public(jobs[i]) for i in reversed(order)]
+
+
+@app.get("/api/jobs/history")
+def job_history() -> dict:
+    """The on-disk record. ``queue`` is false: this is not the live queue and it is not replayed."""
+
+    return history.load()
 
 
 @app.get("/api/jobs/{job_id}")
@@ -2117,6 +2141,7 @@ def cancel(job_id: str) -> dict:
             if SPARK and job["kind"] not in NOT_ON_COMFY:
                 stop_comfy(job)
         hub.kick.set()  # a clip on another Spark is cancelled there by the thread that follows it
+    _keep(job)
     return public(job)
 
 
@@ -2357,6 +2382,7 @@ def qa_run(job: dict) -> None:
             job["status"], job["error"] = "failed", str(getattr(error, "detail", error))[-400:]
     finally:
         job["finished"] = time.time()
+        _keep(job)
 
 
 @app.post("/api/qa")
@@ -2385,6 +2411,7 @@ def qa_gate(body: dict) -> dict:
         accepting_jobs()
         jobs[job_id] = job
         order.append(job_id)
+    _keep(job)
     threading.Thread(target=qa_run, args=(job,), daemon=True).start()
     return public(job)
 
@@ -2565,6 +2592,7 @@ def enqueue(kind: str, title: str, params: dict, estimate: int | None = None) ->
         order.append(job_id)
     wake.set()
     hub.kick.set()
+    _keep(job)
     return public(job)
 
 
@@ -2674,6 +2702,10 @@ def begin() -> None:
             return
         _closing.clear()
         _worker_stop.clear()
+        try:
+            history.recover()  # an interrupted record stays a record; it is not put back on the queue
+        except OSError:
+            pass
         _worker_thread = threading.Thread(target=work, daemon=True, name="studio-queue")
         _worker_thread.start()
         threading.Thread(target=lambda into=OWN: into.update(learn_own_names()), daemon=True, name="own-names").start()
@@ -2685,12 +2717,18 @@ def begin() -> None:
 def _cancel_owned_work() -> None:
     """Cancel this process's queued and running jobs, and signal only the child it started."""
 
+    stopped = []
     with lock:
         process = running.get("process")
         for job in jobs.values():
             if job.get("status") in ("queued", "running"):
                 job["status"] = "cancelled"
+                if not job.get("error"):
+                    job["error"] = history.CANCELLED
+                stopped.append(job)
         running.update(process=None, id=None)
+    for job in stopped:
+        _keep(job)
     if process is not None and getattr(process, "pid", None):
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -2759,6 +2797,44 @@ if hasattr(app.router, "on_shutdown"):
 
 # pytest is already imported while it collects modules, and PYTEST_CURRENT_TEST is unset until a test runs. A test
 # that first imports the app during its own run still starts the queue. A script and `python app/server.py` do too.
+_instance_fd = None
+
+
+def claim_instance() -> None:
+    """One Studio process for this data directory.
+
+    A second process exits before it takes work. A GPU lock held by a live process that is
+    not this one also refuses the start. A lock whose owner is already gone does not.
+    """
+
+    global _instance_fd
+    home = Path(os.environ.get("STUDIO_HOME", str(HOME))).expanduser()
+    home.mkdir(parents=True, exist_ok=True)
+    fd = os.open(home / "studio.lock", os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        print(f"[studio] another Studio already has this data directory ({home}). This one was not started.", file=sys.stderr)
+        raise SystemExit(1)
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    _instance_fd = fd
+    try:
+        held = voice.LOCK.exists() and not voice.stale()
+        owner = voice.lock_owner()
+    except Exception:
+        held, owner = False, ""
+    pid = owner.split()[-1] if owner else ""
+    if held and pid != str(os.getpid()):
+        print(f"[studio] the GPU lock is held by pid {pid or 'another process'}. This Studio was not started.", file=sys.stderr)
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    claim_instance()
+    housekeeping.sweep(HOME)
+
 if not ("pytest" in sys.modules and not os.environ.get("PYTEST_CURRENT_TEST")):
     begin()
 

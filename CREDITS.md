@@ -15,6 +15,12 @@ image, the TensorFold families for Qwen-Image and MiniMax H3 with their int8 ten
 engines the studio runs (FastH3 on Metal, H3, Drama 3 and MiniMax Music 3 on CUDA, and Music 3 on Metal), and the
 measurements every setting here is held to. Imagination Studio is **by keys+Wasserman**.
 
+**SDXL Turbo** on this Linux deployment is Stability AI's `sd_xl_turbo_1.0_fp16.safetensors` checkpoint,
+under the **Stability AI Non-Commercial Research Community License**. The pack does not ship those
+weights and does not redistribute them. One measured still on an NVIDIA GeForce RTX 3060 is recorded
+in `docs/benchmarks/rtx3060-images.json`. That profile does not make an RTX card a production H3 or
+Spark render mode.
+
 ## The studio's design and Wasserman's Filmmaker Suite: Sam Wasserman and Wasserman Productions
 
 **Sam Wasserman and Wasserman Productions** helped design and build Imagination Studio in collaboration with Keys, and

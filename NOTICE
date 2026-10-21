@@ -36,6 +36,11 @@ generation to third parties (a Hosted Service) needs a separate licence from Fis
 without their consent is not allowed. This pack ships no Drama 3 weights: they are downloaded from Fish Audio's
 release (huggingface.co/fishaudio/drama-3) when a user installs them.
 
+SDXL Turbo (`sd_xl_turbo_1.0_fp16.safetensors`) is licensed under the Stability AI Non-Commercial
+Research Community License, Copyright Stability AI Ltd. This pack ships no SDXL weights. A measured
+still on one NVIDIA GeForce RTX 3060 uses a checkpoint that was already on that machine. The weights
+are not redistributed. Commercial use of that checkpoint is outside that licence.
+
 Read these licences before downloading the weights.
 
 Engine source: TensorFold (Apache-2.0, Ash Hart and contributors) with

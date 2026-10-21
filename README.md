@@ -1235,6 +1235,14 @@ editor's timeline; ComfyUI's H3 decoder makes 32 kHz. The picture is copied unch
 > the base-model sound fixed what was wrong with the adapter's (harsh, echo-like, thin). A 15 second clip takes 219 s
 > this way against 606 s for the full 20 steps, which remain one switch away: `QUALITY=high`.
 
+## Linux app container
+
+The system runs on a Mac, a DGX Spark, and Linux. On this Linux machine the published app is a
+container. Build, start, stop, logs, health, outputs, model inventory, refusal reasons, backup,
+and rollback are in [docs/OPERATIONS.md](docs/OPERATIONS.md). The container does not attach a GPU
+and it leaves the shared ComfyUI service running. Settings without secrets are listed in
+[.env.example](.env.example).
+
 ## Install, and the one-click app
 
 Everything the studio makes and keeps (renders, projects, uploads, voice, music, LoRAs, settings) is in

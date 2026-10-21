@@ -43,15 +43,13 @@ def test_a_container_does_not_rename_the_old_home(tmp_path, monkeypatch):
 def test_a_container_does_not_walk_mounted_disks(tmp_path, monkeypatch):
     monkeypatch.setenv("STUDIO_CONTAINER", "1")
     monkeypatch.delenv("STUDIO_SCAN_ROOTS", raising=False)
-    found = {str(path) for path in discover.roots()}
-    for broad in ("/data", "/opt", "/srv", "/mnt", "/media", "/Volumes"):
-        assert broad not in found
+    assert discover.roots() == []
     named = tmp_path / "named-models"
+    other = tmp_path / "not-configured"
     named.mkdir()
+    other.mkdir()
     monkeypatch.setenv("STUDIO_SCAN_ROOTS", str(named))
-    found = {str(path) for path in discover.roots()}
-    assert str(named) in found
-    assert "/mnt" not in found and "/media" not in found
+    assert [str(path) for path in discover.roots()] == [str(named)]
 
 
 def test_a_container_does_not_schedule_a_scan_on_startup(monkeypatch):

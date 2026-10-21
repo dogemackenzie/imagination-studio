@@ -25,6 +25,8 @@ export PORT="${PORT:-7870}"
 export STUDIO_COMFY_STATE="${STUDIO_COMFY_STATE:-$STUDIO_HOME/comfy}"
 export STUDIO_GPU_LOCK="${STUDIO_GPU_LOCK:-$STUDIO_HOME/studio-gpu.lock.d}"
 export STUDIO_STAGED_NODES="${STUDIO_STAGED_NODES:-/opt/studio/staged-nodes}"
+# Leave this much free on the data filesystem before a job is queued. 1 GiB.
+export STUDIO_DISK_RESERVE_BYTES="${STUDIO_DISK_RESERVE_BYTES:-1073741824}"
 unset STUDIO_UPDATE_SESSION || true
 
 mkdir -p "$STUDIO_HOME/projects" "$STUDIO_HOME/uploads" "$STUDIO_HOME/renders" \
