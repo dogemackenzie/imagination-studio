@@ -10,6 +10,8 @@ services:
       dockerfile: Dockerfile.studio
       args:
         SOURCE_REV: ${SOURCE_REV:-unknown}
+        UPSTREAM_REV: ${UPSTREAM_REV:-unknown}
+        UPSTREAM_REPO: ${UPSTREAM_REPO:-drowzeys/Imagination-Studio-by-keys-Wasserman}
     image: imagination-studio-app:${SOURCE_REV:-local}
     ports:
       # This machine, as requested: 192.168.50.22:7870. 127.0.0.1 stays for this computer.

@@ -474,19 +474,42 @@ def _host_name(host: str) -> str:
     return name.rstrip(".")
 
 
+# Private addresses the published container may be opened by. Not Tailscale (100.64.0.0/10), not a public address,
+# and not a hostname: a .ts.net name still asks for the key. A native install does not use this list.
+_PUBLISHED_NETS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
+
+
+def _published_private_host(name: str) -> bool:
+    """Whether ``name`` is a numeric private address of the kind this container publishes."""
+
+    try:
+        ip = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return any(ip in net for net in _PUBLISHED_NETS)
+
+
 def this_computer(client: str | None, host: str) -> bool:
     """access.local with this computer's own network addresses and names: its own browser opening the studio by the
     machine's network address (HOST=0.0.0.0) or its .local name needs no key either.
 
-    A published container sees the host's browser as the docker bridge peer. A Host of localhost,
-    127.0.0.1 or ::1 is still this computer. The published LAN address is not: that browser sends
-    the LAN name and is asked for the key.
+    A published container has no login on the addresses it publishes. The host's browser at 127.0.0.1 arrives as
+    the docker bridge peer, and a browser that names a private address (the LAN bind) is this computer too, whichever
+    machine on that network opened it. A Tailscale name, a public address, and any other hostname still need the key.
+    A native install is unchanged, and this does not open Updates, Brains, or Agents.
     """
 
     if client and client.startswith("::ffff:") and "." in client:
         client = client[7:]
-    if os.environ.get("STUDIO_CONTAINER") == "1" and _host_name(host) in access.LOOPBACK_HOSTS:
-        return True
+    if os.environ.get("STUDIO_CONTAINER") == "1":
+        name = _host_name(host)
+        if name in access.LOOPBACK_HOSTS or _published_private_host(name):
+            return True
     if access.local(client, host):
         return True
     if client not in access.LOOPBACK_CLIENTS and not on_network():
@@ -2151,6 +2174,13 @@ def image_revision() -> str:
     return os.environ.get("STUDIO_REVISION", "").strip()
 
 
+def upstream_revision() -> str:
+    """The origin/main commit baked into this image, or "" when the image has none. No fetch."""
+
+    value = os.environ.get("STUDIO_UPSTREAM_REV", "").strip().lower()
+    return value if re.fullmatch(r"[0-9a-f]{40}", value) else ""
+
+
 def in_container() -> bool:
     return os.environ.get("STUDIO_CONTAINER") == "1"
 
@@ -2178,7 +2208,8 @@ def health() -> dict:
         version = (PACK / "VERSION").read_text().strip()
     except OSError:
         version = ""
-    return {"ok": True, "version": version, "revision": image_revision(), "container": in_container()}
+    return {"ok": True, "version": version, "revision": image_revision(), "upstream": upstream_revision(),
+            "container": in_container()}
 
 
 @app.get("/api/state")

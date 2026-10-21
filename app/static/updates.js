@@ -49,13 +49,13 @@ function viewUpdates() {
         UPD.back ? el("button", { class: "primary", onclick: () => location.reload() }, "Reload Studio") :
           el("div", { class: "chips" },
             el("button", { onclick: () => updAct("check"), disabled: UPD.acting || d.checking || d.updating || UPD.waiting }, d.checking ? "Checking…" : "Check for updates"),
-            el("button", { class: "primary", onclick: () => updAct("install"), disabled: UPD.acting || !d.available || !d.managed || d.updating || d.checking || UPD.waiting }, "Update and restart")),
-        d.container ? el("div", { class: "note", style: "margin:0" }, "This Studio is a container image. Rebuild the image and recreate the container to update.") : d.managed === false ? el("div", { class: "note", style: "margin:0" }, "Start this installation with scripts/app.sh to install updates. Worker Sparks update through the Sparks tab.") : null),
+            d.container ? null : el("button", { class: "primary", onclick: () => updAct("install"), disabled: UPD.acting || !d.available || !d.managed || d.updating || d.checking || UPD.waiting }, "Update and restart")),
+        d.container ? el("div", { class: "note", style: "margin:0" }, "This Studio is a container image. On the host, run scripts/update-studio.sh to merge the source, run the tests, rebuild the image, and recreate the container.") : d.managed === false ? el("div", { class: "note", style: "margin:0" }, "Start this installation with scripts/app.sh to install updates. Worker Sparks update through the Sparks tab.") : null),
       el("div", { class: "stack" },
         el("div", { class: "panel stack" },
           el("label", { class: "switch" }, el("input", { type: "checkbox", checked: !!d.automatic, disabled: UPD.acting || d.updating || d.container || (d.managed === false && !d.automatic), onchange: e => updAct("settings", { automatic: e.target.checked }) }),
             el("span", {}, "Automatic updates", el("small", {}, "Check every six hours while Studio is open. Install when idle."))),
           d.last_result ? el("div", { class: "note", style: "margin:0" }, el("b", {}, "Last result: "), d.last_result.message) : null),
         el("details", { class: "fold" }, el("summary", {}, "How updates work"),
-          el("div", { class: "note", style: "margin:0" }, "Studio fast-forwards the branch it follows on GitHub; a release is shown for information and never installed by itself. Off by default. Local code changes pause updates. If an updated app cannot start, Studio restores the previous code and turns automatic updates off.")))));
+          el("div", { class: "note", style: "margin:0" }, "Studio fast-forwards the branch it follows on GitHub; a release is shown for information and never installed by itself. Off by default. Local code changes pause updates. If an updated app cannot start, Studio restores the previous code and turns automatic updates off. A container compares the upstream commit in the image with the source. On the host, scripts/update-studio.sh merges when this checkout has its own commits, runs the tests, rebuilds the image, and recreates the container.")))));
 }

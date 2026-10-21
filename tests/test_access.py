@@ -133,17 +133,26 @@ def test_this_computer_itself_needs_no_key_but_tailscale_and_the_network_do(keye
 
 def test_a_published_container_treats_a_localhost_host_as_this_computer(keyed, monkeypatch):
     """The host's browser at 127.0.0.1:7870 arrives as the docker bridge peer. A localhost Host is this
-    computer. The published LAN address still asks for the key, and a native install does not treat the
-    bridge peer as local."""
+    computer, and so is a private address: the published app has no login. A Tailscale name and a public
+    address still ask. A native install does not treat the bridge peer or another computer as local.
+    Updates, Brains, and Agents stay closed on the published address."""
 
     monkeypatch.setenv("STUDIO_CONTAINER", "1")
     bridge = TestClient(server.app, client=("172.17.0.1", 50000))
-    for host in ("127.0.0.1:7870", "localhost:7870", "[::1]:7870"):
+    for host in ("127.0.0.1:7870", "localhost:7870", "[::1]:7870", "192.168.50.22:7870", "10.0.10.5:7870", "[fd00::1]:7870"):
         assert bridge.get("/api/state", headers={"host": host}).status_code == 200, host
-    assert bridge.get("/api/key", headers={"host": "127.0.0.1:7870"}).json()["local"] is True
-    assert bridge.get("/api/state", headers={"host": "192.168.50.22:7870"}).status_code == 401
+    assert bridge.get("/api/key", headers={"host": "192.168.50.22:7870"}).json()["local"] is True
+    phone = TestClient(server.app, client=("192.168.50.52", 50000))
+    assert phone.get("/api/state", headers={"host": "192.168.50.22:7870"}).status_code == 200
+    assert phone.get("/api/key", headers={"host": "192.168.50.22:7870"}).json() == {"needed": False, "signed_in": True, "local": True}
+    for host in ("studio.tail1234.ts.net", "8.8.8.8:7870", "100.64.1.2:7870", "169.254.1.1:7870"):
+        said = phone.get("/api/state", headers={"host": host})
+        assert said.status_code == 401 and said.json()["access"] == "key", host
+    for path in ("/api/updates", "/api/brains", "/api/agent/tools"):
+        assert phone.get(path, headers={"host": "192.168.50.22:7870"}).status_code == 403, path
     monkeypatch.delenv("STUDIO_CONTAINER", raising=False)
     assert bridge.get("/api/state", headers={"host": "127.0.0.1:7870"}).status_code == 401
+    assert phone.get("/api/state", headers={"host": "192.168.50.22:7870"}).status_code == 401
 
 
 def test_this_computer_by_its_network_address_or_name_needs_no_key(keyed, monkeypatch):

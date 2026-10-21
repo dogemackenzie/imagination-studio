@@ -17,23 +17,33 @@ not the start command here.
 From this repository:
 
 ```bash
-SOURCE_REV=<git short> docker compose build studio
-SOURCE_REV=<git short> docker compose up -d --force-recreate --no-deps studio
+SOURCE_REV=<git short> UPSTREAM_REV=<origin/main> docker compose build studio
+SOURCE_REV=<git short> UPSTREAM_REV=<origin/main> docker compose up -d --force-recreate --no-deps studio
 docker compose logs --tail=200 studio
 curl -sS http://127.0.0.1:7870/api/health
 docker compose stop studio
 ```
 
-`SOURCE_REV` is the image tag and the revision reported by `/api/health`. Keep the previous tag.
-`docker compose stop studio` sends SIGTERM. The stop grace period is 20 seconds. That stop is this
-service only.
+`SOURCE_REV` is the image tag and the revision reported by `/api/health`. `UPSTREAM_REV` is the full
+`origin/main` commit recorded in the image. Keep the previous tag. `docker compose stop studio` sends
+SIGTERM. The stop grace period is 20 seconds. That stop is this service only.
 
-A healthy body is JSON with `ok` true, `version`, `revision`, and `container` true. The check inside
-the image is `scripts/container-healthcheck.py`, which GETs `/api/health` and does not scan disks or
-load a model.
+A healthy body is JSON with `ok` true, `version`, `revision`, `upstream`, and `container` true. The
+check inside the image is `scripts/container-healthcheck.py`, which GETs `/api/health` and does not
+scan disks or load a model.
 
-The in-app updater in a container answers that the image has to be rebuilt and the container
-recreated. It does not fetch git.
+Updates from the source run on the host:
+
+```bash
+bash scripts/update-studio.sh
+```
+
+That fetches `origin`, merges `origin/main` when this checkout has its own commits, runs the tests,
+and on success rebuilds and recreates only this app container. It pushes `fork` and does not push
+`origin`. A failed merge or a failed test leaves the running container as it is. The container has
+no git and no Docker socket. Its Updates page compares `upstream` with the source's main and names
+that script. It does not install the update itself. A native Mac or Spark install still
+fast-forwards with `scripts/app.sh`.
 
 ## Optional controller
 

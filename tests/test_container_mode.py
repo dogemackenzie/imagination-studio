@@ -75,11 +75,16 @@ def test_health_does_not_scan_query_or_fetch(monkeypatch):
     monkeypatch.setattr(discover, "schedule", boom)
     monkeypatch.setattr(updates, "git", boom)
     monkeypatch.setenv("STUDIO_REVISION", "rev-health")
+    monkeypatch.delenv("STUDIO_UPSTREAM_REV", raising=False)
     response = TestClient(server.app).get("/api/health")
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True and body["version"] and body["revision"] == "rev-health"
-    assert "gpu" not in body
+    assert body["upstream"] == "" and "gpu" not in body
+    monkeypatch.setenv("STUDIO_UPSTREAM_REV", "ab" * 20)
+    assert TestClient(server.app).get("/api/health").json()["upstream"] == "ab" * 20
+    monkeypatch.setenv("STUDIO_UPSTREAM_REV", "unknown")
+    assert TestClient(server.app).get("/api/health").json()["upstream"] == ""
 
 
 def test_state_shows_the_image_revision(monkeypatch):
@@ -95,20 +100,59 @@ def test_a_container_update_does_not_fetch_or_install(monkeypatch):
 
     monkeypatch.setenv("STUDIO_CONTAINER", "1")
     monkeypatch.setenv("STUDIO_REVISION", "abc1234")
+    monkeypatch.delenv("STUDIO_UPSTREAM_REV", raising=False)
     monkeypatch.setattr(updates, "git", boom)
     monkeypatch.setattr(updates, "inspect", boom)
+    monkeypatch.setattr(updates, "github_api", boom)
     saved = dict(server.updater.info)
     try:
         status = server.updater.check()
         assert status["container"] is True and status["managed"] is False
         assert status["available"] is False and status["installed_commit"] == "abc1234"
-        assert "recreate the container" in status["message"]
+        assert "scripts/update-studio.sh" in status["message"] and "recreate the container" in status["message"]
         with pytest.raises(updates.UpdateError, match="recreate the container"):
             server.updater.apply()
         with pytest.raises(updates.UpdateError, match="recreate the container"):
             server.updater.set_automatic(True)
         server.updater.tick()
     finally:
+        server.updater.info = saved
+
+
+def test_a_container_compares_the_baked_upstream_commit(monkeypatch):
+    """The image names the source commit it contains. A newer main is reported and is not installed here."""
+
+    baked = "a" * 40
+    newer = "b" * 40
+    asked = []
+
+    def lookup(path):
+        asked.append(path)
+        return {"sha": newer}
+
+    monkeypatch.setenv("STUDIO_CONTAINER", "1")
+    monkeypatch.setenv("STUDIO_UPSTREAM_REV", baked)
+    monkeypatch.setattr(updates, "git", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("git was called")))
+    monkeypatch.setattr(updates, "github_api", lookup)
+    updates.upstream_answers.clear()
+    saved = dict(server.updater.info)
+    try:
+        status = server.updater.check()
+        assert status["available"] is True and status["target"] == newer and status["current"] == baked
+        assert status["source"] == updates.DEFAULT_UPSTREAM and "An update is on the source." in status["message"]
+        assert asked == [updates.DEFAULT_UPSTREAM + "/commits/main"]
+        with pytest.raises(updates.UpdateError, match="recreate the container"):
+            server.updater.apply()
+        updates.upstream_answers.clear()
+        monkeypatch.setattr(updates, "github_api", lambda _path: {"sha": baked})
+        current = server.updater.check()
+        assert current["available"] is False and current["message"] == "Studio is up to date."
+        monkeypatch.setattr(updates, "github_api", lambda _path: (_ for _ in ()).throw(OSError("offline")))
+        updates.upstream_answers.clear()
+        missed = server.updater.check()
+        assert missed["available"] is False and missed["message"].startswith("The source could not be read.")
+    finally:
+        updates.upstream_answers.clear()
         server.updater.info = saved
 
 
@@ -248,8 +292,9 @@ def test_scout_sheet_uses_the_named_interpreter(tmp_path):
 def test_the_page_keeps_the_native_update_sentence():
     page = (ROOT / "app" / "static" / "updates.js").read_text()
     native = "Start this installation with scripts/app.sh to install updates. Worker Sparks update through the Sparks tab."
-    container = "This Studio is a container image. Rebuild the image and recreate the container to update."
-    assert native in page and container in page
+    container = ("This Studio is a container image. On the host, run scripts/update-studio.sh to merge the source, "
+                 "run the tests, rebuild the image, and recreate the container.")
+    assert native in page and container in page and container == updates.CONTAINER_UPDATE
     assert page.index("d.container") < page.index("d.managed === false")
     html = (ROOT / "app" / "static" / "index.html").read_text()
     assert 'S.revision ? " · " + S.revision' in html

@@ -21,7 +21,13 @@ from fastapi import APIRouter, HTTPException, Request
 
 INTERVAL = 6 * 60 * 60
 GIT_TIMEOUT = 45
-CONTAINER_UPDATE = "This Studio is a container image. Rebuild the image and recreate the container to update."
+CONTAINER_UPDATE = ("This Studio is a container image. On the host, run scripts/update-studio.sh to merge the source, "
+                    "run the tests, rebuild the image, and recreate the container.")
+DEFAULT_UPSTREAM = "drowzeys/Imagination-Studio-by-keys-Wasserman"
+_UPSTREAM_NAME = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_COMMIT = re.compile(r"[0-9a-f]{40}")
+upstream_answers: dict = {}  # repo -> (time.monotonic() when read, full commit)
+upstream_lock = threading.Lock()
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "testserver"}
 _LOOPBACK_PEERS = {"127.0.0.1", "::1", "testclient"}
 
@@ -271,6 +277,60 @@ def latest_release(source: str) -> dict | None:
     return release_lookup(source)[0]
 
 
+def baked_upstream() -> str:
+    """The origin commit recorded in this image. Empty unless it is a full commit."""
+
+    value = os.environ.get("STUDIO_UPSTREAM_REV", "").strip().lower()
+    return value if _COMMIT.fullmatch(value) else ""
+
+
+def upstream_name() -> str:
+    name = os.environ.get("STUDIO_UPSTREAM", DEFAULT_UPSTREAM).strip()
+    if not _UPSTREAM_NAME.fullmatch(name):
+        raise UpdateError("The source repository is not a GitHub name.")
+    return name
+
+
+def upstream_commit(repo: str) -> str:
+    """The source's main commit, from GitHub. No git and no clone. A good answer is kept for an hour."""
+
+    if not _UPSTREAM_NAME.fullmatch(repo):
+        raise UpdateError("The source repository is not a GitHub name.")
+    with upstream_lock:
+        kept = upstream_answers.get(repo)
+        if kept and time.monotonic() - kept[0] < RELEASE_CACHE_S:
+            return kept[1]
+    found = github_api(quote(repo, safe="/") + "/commits/main")
+    sha = found.get("sha") if isinstance(found, dict) else ""
+    if not isinstance(sha, str) or not _COMMIT.fullmatch(sha):
+        raise UpdateError("GitHub did not name the source commit.")
+    with upstream_lock:
+        upstream_answers[repo] = (time.monotonic(), sha)
+    return sha
+
+
+def container_report() -> dict:
+    """Whether the source's main is newer than the commit baked into this image.
+
+    Reads one GitHub commit when the image recorded one. Does not run git and does not change the image.
+    """
+
+    base = {"available": False, "target": None, "following": "main", "branch": "main", "current": baked_upstream() or None}
+    try:
+        base["source"] = upstream_name()
+    except UpdateError as error:
+        return {**base, "source": None, "message": str(error)}
+    if not base["current"]:
+        return {**base, "message": CONTAINER_UPDATE}
+    try:
+        target = upstream_commit(base["source"])
+    except (UpdateError, OSError, ValueError, TypeError):
+        return {**base, "message": "The source could not be read. " + CONTAINER_UPDATE}
+    if target == base["current"]:
+        return {**base, "target": target, "message": "Studio is up to date."}
+    return {**base, "target": target, "available": True, "message": "An update is on the source. " + CONTAINER_UPDATE}
+
+
 class Manager:
     def __init__(self, pack: Path, home: Path, queue_lock, busy, restart=None):
         self.pack, self.queue_lock, self.busy, self.restart = pack.resolve(), queue_lock, busy, restart
@@ -334,13 +394,20 @@ class Manager:
         with self.mutex:
             if self.info["checking"] or self.maintenance.is_set():
                 return self.status()
-            if self.in_container():
-                self.info.update(checking=False, available=False, message=CONTAINER_UPDATE, checked_at=time.time())
-                self.checked_monotonic = time.monotonic()
+            if not self.in_container():
+                self.info.update(checking=True, available=False, message="Checking GitHub…")
+                threading.Thread(target=self._check, daemon=True).start()
                 return self.status()
-            self.info.update(checking=True, available=False, message="Checking GitHub…")
-        threading.Thread(target=self._check, daemon=True).start()
-        return self.status()
+            self.info.update(checking=True, message="Checking the source…")
+        try:
+            found = container_report()
+        except Exception:  # noqa: BLE001 - a check answers; it does not take the updater down
+            found = {"available": False, "message": "The source could not be read. " + CONTAINER_UPDATE}
+        with self.mutex:
+            self.info = found
+            self.info.update(checking=False, checked_at=time.time())
+            self.checked_monotonic = time.monotonic()
+            return self.status()
 
     def _check(self):
         try:

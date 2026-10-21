@@ -72,7 +72,11 @@ RUN chmod -R a-w /opt/studio/staged-nodes /opt/studio/app /opt/studio/scripts /o
     && rm -rf /tmp/studio-import-check
 
 ARG SOURCE_REV=unknown
-ENV STUDIO_REVISION=${SOURCE_REV}
+ARG UPSTREAM_REV=unknown
+ARG UPSTREAM_REPO=drowzeys/Imagination-Studio-by-keys-Wasserman
+ENV STUDIO_REVISION=${SOURCE_REV} \
+    STUDIO_UPSTREAM_REV=${UPSTREAM_REV} \
+    STUDIO_UPSTREAM=${UPSTREAM_REPO}
 LABEL org.opencontainers.image.revision=${SOURCE_REV} \
       org.opencontainers.image.description="Wasserman Slate AI Studio app-only container. No model weights."
 
