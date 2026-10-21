@@ -3,5 +3,52 @@ outputs/
 __pycache__/
 *.pyc
 .DS_Store
+
+# This machine. .env.example is the committed stand-in.
 .env
+.env.*
+!.env.example
 compose.nvml.yaml
+compose.override.yaml
+docker-compose.override.yml
+
+# Weights, engines, and renders made in this checkout. Files already tracked stay tracked.
+scouts/
+zig-engine/
+tf-h3-dit
+*.tf-int8
+*.safetensors
+*.ckpt
+*.gguf
+*.pt
+*.onnx
+*.bin
+/*.mp4
+/*.mov
+/*.wav
+/*.flac
+
+# Keys do not belong in the repository.
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+*.pem
+
+# Tool caches and local environments.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+node_modules/
+.playwright-mcp/
+.idea/
+.vscode/
+*.log
+*.swp
+*~
+studio-gpu.lock.d/
