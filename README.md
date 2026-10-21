@@ -9,10 +9,10 @@
 
 **An AI film studio on your own machine: plan a film the way a crew does in the Wasserman Slate AI Studio, and render
 it here. Pictures from Qwen-Image-2.1-Turbo, FLUX3-K (Black Forest Labs' FLUX 3 Image Klein) or MOSS-Image, MiniMax H3 / FastH3
-video with sound and Fish Audio Drama 3 voices, on TensorFold. Apple-silicon Macs (Metal) and the NVIDIA DGX Spark
-(CUDA) are where those engines were measured. The same app runs on other computers.**
+video with sound and Fish Audio Drama 3 voices, on TensorFold. The system runs on a Mac, a DGX Spark, and Linux.
+The hardware does not decide whether it runs.**
 
-![Imagination Studio by keys+Wasserman, powered by TensorFold: a local creative all-in-one studio on your own machine](docs/screenshots/imagination-studio.webp)
+![Imagination Studio by keys+Wasserman, powered by TensorFold: a local studio that runs on Mac, DGX Spark, and Linux](docs/screenshots/imagination-studio.webp)
 
 *Named at the request of the TensorFold project: this is an app built on TensorFold, not a TensorFold product.*
 
@@ -22,7 +22,7 @@ video with sound and Fish Audio Drama 3 voices, on TensorFold. Apple-silicon Mac
 design and build the studio in collaboration with Keys, made Wasserman's Filmmaker Suite, and shaped the production side (Slate, the Sharp Spec, Motion Previs). See
 [Big credit: Sam Wasserman and Wasserman Productions](#big-credit-sam-wasserman-and-wasserman-productions-wassermanproductionscom), below the release notes, and [CREDITS.md](CREDITS.md).*
 
-**3.0.1** · your own machine · Apple-silicon Macs (measured on a Mac Studio M5 Ultra 256 GB), the NVIDIA DGX Spark, and other computers ·
+**3.0.1** · Mac, DGX Spark, and Linux · Apple-silicon Macs measured on a Mac Studio M5 Ultra 256 GB ·
 [TensorFold](https://github.com/ashhart/TensorFold) **0.6.5** + two families, and TensorFold **1.0**'s native Zig
 runtime for FastH3 on Metal and on CUDA:
 **Qwen 2.1 Turbo**, **Qwen 2.1 Full**, **FLUX3-K Fast** and **FLUX3-K Full** (text to image, and Edit a picture) · **MOSS-Image** (text to image, DGX Spark) · **MiniMax H3**
@@ -104,7 +104,7 @@ cores · a 2x video decoder for 2K finals on the Mac
 
 ## Using it on your phone
 
-The studio runs on the computer. The phone is only the screen and the remote. Everything works from it:
+The studio runs on a Mac, a DGX Spark, or Linux. The phone is only the screen and the remote. Everything works from it:
 write a prompt, roll a clip, watch the queue, play takes from the Library, plan in Story, talk to your agent.
 
 1. **Put the computer and the phone on the same [Tailscale](https://tailscale.com) network** (free for personal use):

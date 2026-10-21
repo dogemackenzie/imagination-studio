@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use Imagination Studio in your work, please cite it and credit Keys (github.com/drowzeys) and Sam Wasserman / Wasserman Productions (wassermanproductions.com), per the project's NOTICE and Section 4(d) of the Apache License 2.0."
 title: "Imagination Studio by keys+Wasserman"
-abstract: "A local, all-in-one AI film studio on your own machine, powered by TensorFold. Apple silicon and NVIDIA DGX Spark run the measured engines, and the same app runs on other computers. Pictures, clips with sound, voices, songs, sound effects and foley, previs and your own agents, with Wasserman's Filmmaker Suite built in."
+abstract: "A local, all-in-one AI film studio that runs on a Mac, a DGX Spark, and Linux, powered by TensorFold. The hardware does not decide whether the system runs. Pictures, clips with sound, voices, songs, sound effects and foley, previs and your own agents, with Wasserman's Filmmaker Suite built in."
 type: software
 authors:
   - alias: "Keys (drowzeys)"

@@ -161,7 +161,7 @@ function viewHome() {
         el("h1", { class: "display" }, hello), el("p", { class: "tagline" }, "Local Creative ", el("em", {}, "All in One"), " Studio"),
         el("p", { class: "creator" }, el("span", { class: "by" }, "by"), el("img", { src: "brand/keys-wasserman-neon.svg", alt: "Keys + Wasserman", width: 320, height: 37 })),
         el("p", { class: "home-links" }, HOME_LINKS.map(([label, url]) => el("a", { href: url, target: "_blank", rel: "noopener noreferrer" }, label))),
-        el("p", { class: "sub", style: "margin:0" }, line + " Pictures, clips with sound, voices and score, made on your own machine.")),
+        el("p", { class: "sub", style: "margin:0" }, line + " Pictures, clips with sound, voices and score, on Mac, Spark, and Linux.")),
       el("div", { class: "acts" }, el("button", { onclick: () => go("Production") }, "Plan a film"), el("button", { class: "ghost", onclick: palOpen }, "Search ", el("kbd", {}, "⌘K")))));
   put(wrap, hero, typeof connectNudge === "function" ? connectNudge("home") : null, homeComposer());
   const starts = STARTS().filter(s => startShown(look, s.id));

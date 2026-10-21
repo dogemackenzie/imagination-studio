@@ -236,9 +236,12 @@ def machine() -> tuple[str, str]:
         return "linux", "MANAGED RTX (UNMEASURED)"
     if where == "controller":
         return "linux", "CONTROLLER"
-    # App-only uses the cached observation. It does not ask nvidia-smi again, and it does not say DGX SPARK or Apple.
-    name = ((hardware.observe().get("gpu") or {}).get("name") or "NO GPU").upper()
-    return "linux", f"LINUX · {name} · APP-ONLY"
+    # Linux is a place the system runs. The label names this machine when a GPU is visible.
+    # It does not say DGX SPARK or Apple, and it does not say the system cannot run.
+    name = ((hardware.observe().get("gpu") or {}).get("name") or "").strip()
+    if name:
+        return "linux", f"LINUX · {name.upper()}"
+    return "linux", "LINUX"
 
 
 app = FastAPI(title="Imagination Studio by keys+Wasserman, powered by TensorFold, built with Fish Audio Drama 3")

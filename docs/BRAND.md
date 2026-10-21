@@ -58,14 +58,14 @@ the TensorFold project and the model makers.
 - **Plan:** Sam Wasserman's Slate gives you scenes, shots, a bible and a cast.
 - **Render:** pictures from FLUX3-K and Qwen-Image, video with sound from MiniMax H3, and voices from Fish Audio
   Drama 3.
-- **Where:** on your own machine. Apple-silicon Macs and NVIDIA DGX Sparks run the measured engines. Other computers run the same app.
+- **Where:** Mac, DGX Spark, and Linux. The hardware does not decide whether the system runs.
 - **No cloud.**
 
 **Three pillars:**
 1. **The crew's workflow, not a prompt box.** Slate's scenes, shots and bible, Motion Previs, and the Sharp Spec QA
    gate.
-2. **Your hardware.** Metal on a Mac, CUDA on DGX Spark, a renderer you already run on another machine, and one pass
-   split across several Sparks. Nothing leaves the machine.
+2. **Your hardware.** A Mac, a DGX Spark, or Linux. Metal on a Mac, CUDA on a DGX Spark, and one pass split across
+   several Sparks. Nothing leaves the machine.
 3. **Measured, not promised.** Every claim has a receipt: times, memory, and a test anyone can rerun.
 
 **Proof points** (from the README; quote them with the machine and the size):

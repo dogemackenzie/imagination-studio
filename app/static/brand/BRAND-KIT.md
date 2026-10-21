@@ -59,7 +59,7 @@ Text on the amber primary is `#140c03` (10:1).
 | `module-vault.svg` | Library (inline in `shell.js`) |
 | `module-machine.svg` | Machine (inline in `shell.js`) |
 | `grid-texture.svg` | Behind the main area only, at a line opacity under 5% |
-| `tensorfold-symbol.webp`, `tensorfold-wordmark.webp` | Sidebar footer beside POWERED BY, then "for your own machine" as text |
+| `tensorfold-symbol.webp`, `tensorfold-wordmark.webp` | Sidebar footer beside POWERED BY, then "for Mac, Spark, and Linux" as text |
 
 **Exception, at Sam's request:** the creator credit sits in the 260px sidebar at its usable width, 230px, under the
 kit's 320px minimum. It keeps its faint green glow and is shown at 320px on Home and About.
