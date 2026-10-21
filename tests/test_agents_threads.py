@@ -72,6 +72,24 @@ def test_a_thread_is_stored_with_its_turns_and_read_back(fake):
     assert (agents.HOME / "agent" / thread["id"] / "render.png").is_file()
 
 
+def test_a_file_that_vanishes_during_the_scan_is_left_out(tmp_path, monkeypatch):
+    """write_json renames its temporary file after the folder is listed. The scan does not fail on that name."""
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "kept.txt").write_text("ok")
+    (work / "mcp.json.deadbeef.tmp").write_text("temp")
+    real = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self.name.endswith(".tmp"):
+            raise FileNotFoundError(self)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    assert list(agents.snapshot(work)) == ["kept.txt"]
+
+
 def test_claude_code_names_its_session_then_resumes_it(fake):
     thread = start("Build a set", "claude")["thread"]
     settled(thread["id"])

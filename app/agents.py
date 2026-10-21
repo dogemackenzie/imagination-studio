@@ -43,6 +43,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import socket
 import subprocess
 import sys
@@ -1291,12 +1292,23 @@ def changed_files(task: dict) -> list[str]:
 
 
 def snapshot(here: Path) -> dict:
+    """The work folder's files.
+
+    write_json renames a temporary file into place. The name can be listed and then gone
+    before it is stated. That name is left out.
+    """
+
     out = {}
     for path in sorted(here.rglob("*")) if here.is_dir() else []:
         name = str(path.relative_to(here))
-        if path.is_file() and not any(part.startswith(".") for part in Path(name).parts):
-            stat = path.stat()
-            out[name] = [stat.st_size, stat.st_mtime_ns]
+        if any(part.startswith(".") for part in Path(name).parts):
+            continue
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            out[name] = [info.st_size, info.st_mtime_ns]
     return out
 
 
