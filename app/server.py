@@ -3399,6 +3399,23 @@ def claim_instance() -> None:
         raise SystemExit(1)
 
 
+def stop_session_comfy() -> None:
+    """ComfyUI runs in its own session so the models stay loaded between clips. This process is the session:
+    quitting it stops that server. PREFIX and SPARK_COMFY_PORT are already this install's, on a Spark and on a card."""
+
+    script = PACK / ("mac/comfy.sh" if sys.platform == "darwin" else "spark/comfy.sh")
+    if not script.is_file():
+        return
+    try:
+        # The governor's stop waits up to about 25 s for its reservation to end, then the script waits 25 s more.
+        done = subprocess.run(["bash", str(script), "stop"], check=False, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        print("[studio] ComfyUI did not stop within 60 s", flush=True)
+        return
+    if "stopped" in done.stdout:
+        print("[studio] ComfyUI stopped", flush=True)
+
+
 if __name__ == "__main__":
     claim_instance()
     housekeeping.sweep(HOME)
@@ -3445,23 +3462,6 @@ def catch_exit(handle_exit):
     finally:
         for sig, handler in original.items():
             signal.signal(sig, handler)
-
-
-def stop_session_comfy() -> None:
-    """ComfyUI runs in its own session so the models stay loaded between clips. This process is the session:
-    quitting it stops that server. PREFIX and SPARK_COMFY_PORT are already this install's, on a Spark and on a card."""
-
-    script = PACK / ("mac/comfy.sh" if sys.platform == "darwin" else "spark/comfy.sh")
-    if not script.is_file():
-        return
-    try:
-        # The governor's stop waits up to about 25 s for its reservation to end, then the script waits 25 s more.
-        done = subprocess.run(["bash", str(script), "stop"], check=False, capture_output=True, text=True, timeout=60)
-    except subprocess.TimeoutExpired:
-        print("[studio] ComfyUI did not stop within 60 s", flush=True)
-        return
-    if "stopped" in done.stdout:
-        print("[studio] ComfyUI stopped", flush=True)
 
 
 if __name__ == "__main__":

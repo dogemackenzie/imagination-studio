@@ -44,6 +44,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1424,12 +1425,14 @@ def snapshot(here: Path) -> dict:
     out = {}
     for path in sorted(here.rglob("*")) if here.is_dir() else []:
         name = str(path.relative_to(here))
-        if path.is_file() and not any(part.startswith(".") for part in Path(name).parts):
-            try:
-                stat = path.stat()
-            except OSError:  # gone since the walk: a write_json temp renamed into place, a file the agent removed
-                continue
-            out[name] = [stat.st_size, stat.st_mtime_ns]
+        if any(part.startswith(".") for part in Path(name).parts):
+            continue
+        try:
+            info = path.stat()
+        except OSError:  # gone since the walk: a write_json temp renamed into place, a file the agent removed
+            continue
+        if stat.S_ISREG(info.st_mode):
+            out[name] = [info.st_size, info.st_mtime_ns]
     return out
 
 
