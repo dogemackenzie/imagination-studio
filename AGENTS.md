@@ -1,7 +1,7 @@
-# Agent one-shot — Wasserman Slate AI Studio, powered by TensorFold: Qwen-Image-2.1 + MiniMax H3 (MLX, Apple Silicon)
+# Agent one-shot — Imagination Studio by keys+Wasserman, powered by TensorFold (Mac + DGX Spark)
 
 **Repo:** https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman  
-**Carrier image:** `ghcr.io/drowzeys/keys-tensorfold-studio:2.9.1` (one for both builds, not a runtime; for a Mac the TensorFold wheel + lock + render scripts + the native FastH3 engine, for a DGX Spark the prebuilt CUDA engines: H3, and MiniMax Music 3's `music3-generate`)  
+**Carrier image:** `ghcr.io/drowzeys/keys-tensorfold-studio:3.2.0` (one for both builds, not a runtime; for a Mac the TensorFold wheel + lock + render scripts + the native FastH3 engine, for a DGX Spark the prebuilt CUDA engines: H3, MiniMax Music 3, Fish Audio Drama 3 and Nemotron 3.5 Bolt). The Mac's native engine and Bolt on Metal also come from the v3.2.0 release (the same engine builds as 3.1.0)  
 **Engine:** TensorFold 0.6.5 + H3 and Qwen-Image families @ `drowzeys/TensorFold` `a2b592fe`, own venv, int8 tensor-unit kernels
 
 ```bash
@@ -18,9 +18,10 @@ REF_IMAGES="face.jpg" bash scripts/video.sh "Use <Picture 1> as the person. The 
 ```
 
 On a **DGX Spark** (Linux, CUDA) the same `bash oneshot-setup.sh` installs the CUDA build (it hands over to
-`oneshot-setup-spark.sh`): needs `git`, `ffmpeg` and the CUDA toolkit's `nvcc` (12.9 or newer), 99 GB of models, about
-100 GB of memory for video. Its options are `--image-only`, `--no-render` and `--verify`; there is no `--turbo` and no
-2x decoder there. `bash spark/comfy.sh stop` frees the models' memory after rendering.
+`oneshot-setup-spark.sh`): needs `git`, `ffmpeg` and Docker (for the prebuilt engines; without it the CUDA toolkit's
+`nvcc`, 12.9 or newer, builds them), 125 GB of free disk for the core install (about 400 GB with `--all`). It takes
+the same flags as on a Mac (README, *Install flags*) plus `--train`; there is no `--turbo`, no `--app` and no 2x
+decoder there. Upgrade an install with `git pull && bash oneshot-setup.sh --upgrade`, then restart the app. `bash spark/comfy.sh stop` frees the models' memory after rendering.
 
 ## Install for a person and build the one-click app
 
@@ -32,13 +33,21 @@ Do these in order on the person's Mac, and report each result plainly.
 2. `brew install python@3.11 uv ffmpeg` (install Homebrew first only with the person's agreement).
 3. Tell the person the download sizes and licenses before starting: Qwen-Image-2.1 33 GB (Qwen Research License,
    non-commercial), MiniMax H3 text encoder and decoders 72 GB (MiniMax H3 Community License, territory limits; 134 GB with `--turbo`), FastH3 65 GB (same license).
-4. `bash oneshot-setup.sh --app` (add `--turbo` only if they ask for MiniMax H3 Turbo and have 128 GB; `--app` does step 5 with a Desktop shortcut). It resumes if interrupted. It ends by
+   The install also adds motion graphics (HyperFrames, Apache-2.0, about 400 MB) and Finish (about 150 MB: Tesseract is
+   free under Mirage's own terms, not open source, and leaves out commercial use by a business with 1 M USD or more a
+   year without Mirage's agreement; its converter is MIT). `--no-finish` or `--no-graphics` leaves one out if the person
+   asks. `--all` adds the big optional models; training a LoRA is DGX Spark only.
+4. `bash oneshot-setup.sh --yes --app` (in a terminal with no other flag the install first shows a checklist of parts,
+   everything ticked; `--yes` or any flag leaves it out, and so does a run that is not in a terminal. The list lives in
+   `scripts/install-checklist.sh`; `STUDIO_CHECKLIST_INPUT` and `STUDIO_CHECKLIST_DRY=1` drive it in tests. Add `--turbo` only if they ask for MiniMax H3 Turbo and have 128 GB; `--app` does step 5 with a Desktop shortcut). It resumes if interrupted. It ends by
    rendering `outputs/test.mp4`; confirm that file exists and plays.
 5. `bash scripts/make-app.sh` builds `~/Applications/Wasserman Slate AI Studio.app`. If the models are not in the default
    folders, export `QWEN_MODEL_DIR`, `H3_MODEL_DIR`, `FASTH3_DIR` first: the app records them. Do not set
-   `HOST=0.0.0.0` unless the person asks to reach it from other machines; every request carries the studio's access key
-   (`app/access.py`; `bash scripts/studio-key.sh` prints it and the address that opens the page with it).
-6. `open "$HOME/Applications/Wasserman Slate AI Studio.app"`, then check `curl -s -H "X-Studio-Key: $(bash scripts/studio-key.sh --key)" http://127.0.0.1:7870/api/state` answers (every request to the app carries its access key, `app/access.py`).
+   `HOST=0.0.0.0` unless the person asks to reach it from other machines; this computer needs no key, and a phone or
+   another computer signs in with the studio's access key (`app/access.py`; `bash scripts/studio-key.sh` prints it and
+   the address that opens the page with it).
+6. `open "$HOME/Applications/Wasserman Slate AI Studio.app"` (the app bundle keeps that name), then check
+   `curl -s http://127.0.0.1:7870/api/state` answers (no key is asked on this computer, `app/access.py`).
 7. Tell the person: double-click Wasserman Slate AI Studio in Applications; renders land in `~/ImaginationStudio`; the log is
    `~/Library/Logs/TensorFoldStudio.log`; to stop it run the app's executable with `stop`.
 

@@ -1219,7 +1219,7 @@ class Hub:
         if not self.schedules() or job["kind"] not in ("video", "studio", "long") or not job.get("outputs"):
             return
         params = job["params"]
-        line = {"path": job["outputs"][0], "job": job["id"], "title": job.get("title"), "kind": job["kind"], "seed": params.get("seed"),
+        line = {"path": job["outputs"][0], "job": job["id"], "title": job.get("title"), "prompt": str(params.get("prompt") or "")[:500] or None, "kind": job["kind"], "seed": params.get("seed"),
                 "settings": {key: params[key] for key in ("preset", "quality", "frames", "seconds", "width", "height", "steps", "loras", "total_seconds")
                              if params.get(key) not in (None, "", [])},
                 "spark": job.get("spark") or self.name, "address": job.get("remote"), "sparks": self.asked(job),

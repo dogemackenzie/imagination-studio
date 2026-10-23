@@ -136,7 +136,7 @@ function viewMachine() {
 }
 
 /* ---------- Brains & tools: the user's own subscriptions and the MCP tools an agent may use ---------- */
-const BR = { data: null, tools: null, testing: {}, said: {}, checking: {}, checked: {}, status: {}, sign: {}, signOpen: null, signTimer: null, signSig: "", codeDraft: {} };
+const BR = { data: null, tools: null, testing: {}, said: {}, checking: {}, checked: {}, status: {}, sign: {}, signOpen: null, signTimers: {}, signSig: {}, codeDraft: {} };
 // each brain shows its own mark (brand/, THIRD-PARTY-MARKS.md); a local model server and the tools show a plain sign
 const BRAIN_MARK = { claude: "claude", codex: "codex", gemini: "gemini", grok: "grok", hermes: "hermes", openai: "openai", chatgpt: "openai" };
 // the local brain wears NVIDIA's mark when it is the Studio's own Nemotron 3.5 Bolt engine
@@ -154,10 +154,11 @@ const signRedraw = () => { if (typeof CN !== "undefined" && CN.sheet) return cnS
 const typing = () => typeof document !== "undefined" && document.activeElement && document.activeElement.matches && document.activeElement.matches("input,textarea,select");
 async function brainStatus(id, fresh) { if (!fresh && BR.status[id]) return; BR.status[id] = { state: "asking" };
   try { BR.status[id] = await api("/api/brains/" + id + "/status"); } catch (e) { BR.status[id] = { state: "unknown", detail: e.message }; } signRedraw(); }
-function signFollow(id) { clearInterval(BR.signTimer); BR.signTimer = setInterval(async () => { let now;
+function signFollow(id) { clearInterval(BR.signTimers[id]); BR.signTimers[id] = setInterval(async () => { let now;
   try { now = await api("/api/brains/" + id + "/signin"); } catch (e) { now = { state: "failed", reason: e.message, lines: [] }; }
-  const sig = JSON.stringify(now), was = BR.signSig; BR.signSig = sig; BR.sign[id] = now;
-  if (!SIGN_RUNNING.includes(now.state)) { clearInterval(BR.signTimer); BR.signTimer = null;
+  // one timer and one last-seen signature per brain: a second sign-in must not orphan the first's polling
+  const sig = JSON.stringify(now), was = BR.signSig[id]; BR.signSig[id] = sig; BR.sign[id] = now;
+  if (!SIGN_RUNNING.includes(now.state)) { clearInterval(BR.signTimers[id]); delete BR.signTimers[id];
     if (now.state === "done") { toast("Signed in"); BR.status = {}; BR.data = null; brainsLoad().then(signRedraw); } }
   if (sig !== was && !(typing() && now.state === "needs_code")) signRedraw(); }, 1000); }
 async function signStart(b, extra) { BR.signOpen = b.id; BR.codeDraft[b.id] = "";
@@ -167,7 +168,7 @@ async function signStart(b, extra) { BR.signOpen = b.id; BR.codeDraft[b.id] = ""
 async function signCode(id) { const code = (BR.codeDraft[id] || "").trim(); if (!code) return toast("Paste the code from the sign-in page first");
   try { BR.sign[id] = await api("/api/brains/" + id + "/signin/code", { code }); BR.codeDraft[id] = ""; } catch (e) { toast(e.message); } signRedraw(); }
 async function signCancel(id) { try { BR.sign[id] = await api("/api/brains/" + id + "/signin/cancel", {}); } catch (e) { toast(e.message); }
-  clearInterval(BR.signTimer); BR.signTimer = null; signRedraw(); }
+  clearInterval(BR.signTimers[id]); delete BR.signTimers[id]; signRedraw(); }
 async function signOut(b) { if (typeof confirm === "function" && !confirm("Sign " + b.label + " out" + (b.where && b.where !== "here" ? " on " + b.where.replace(/^ssh:/, "") : "") + "? This runs its own sign-out; you can sign in again here.")) return;
   try { const r = await api("/api/brains/" + b.id + "/signout", {}); BR.status[b.id] = r; toast(r.ok ? "Signed out" : "The CLI did not say it signed out"); } catch (e) { toast(e.message); } signRedraw(); }
 const copyText = async (value, what) => { try { await navigator.clipboard.writeText(value); toast(what + " copied"); } catch { toast("Select it and copy: " + value); } };
@@ -513,20 +514,20 @@ function connectNudge(where) { if (typeof BR === "undefined") return null;
   if (clis.some(b => b.found && (!BR.status[b.id] || BR.status[b.id].state === "asking"))) return null;  // not yet known: nothing flashes up
   if (clis.some(b => BR.status[b.id] && BR.status[b.id].state === "signed_in")) return null;
   const order = CN_ORDER.map(id => clis.find(b => b.id === id)).filter(Boolean), pick = order.find(b => b.found) || order[0];
-  const localB = (BR.data.backends || []).find(b => b.id === "local" && b.found && !b.error);
+  const locals = (BR.data.backends || []).filter(b => (b.id === "local" || b.local_agent) && b.found && !b.error);  // the local brain and each local agent added
   if (!pick) return null;
   return el("section", { class: "panel cn-nudge", "data-card": "connect", "data-where": where },
     el("div", { class: "cn-nudge-h" }, el("div", { class: "m-min" }, el("span", { class: "eyebrow" }, "One click"), el("h2", {}, "Connect your agent"),
       el("p", { class: "note m-flat" }, "Claude Code, Codex, Hermes, Gemini or Grok, with the subscription you already have. The studio finds it (or installs it), signs you in, checks it answers and makes it your default.")),
       where === "home" ? el("button", { type: "button", class: "small ghost", "aria-label": "Hide this card", onclick: () => { try { localStorage.setItem(CN_DISMISS, "1"); } catch {} render(); } }, "Not now") : null),
     el("div", { class: "chips" }, el("button", { type: "button", class: "primary", onclick: () => connectGo(pick) }, brainLogo(pick.id), "Connect " + pick.label),
-      order.length > 1 || localB ? el("span", { class: "cn-or" }, "or") : null,
+      order.length > 1 || locals.length ? el("span", { class: "cn-or" }, "or") : null,
       order.filter(b => b !== pick).map(b => el("button", { type: "button", class: "small cn-alt", onclick: () => connectGo(b) }, brainMarkOf(b.id, b) ? mark(brainMarkOf(b.id, b), "") : null, b.label)),
-      localB ? el("button", { type: "button", class: "small cn-alt" + (BR.data.default === "local" ? " on" : ""), "aria-pressed": BR.data.default === "local" ? "true" : "false", onclick: () => cnUseLocal(localB) },
-        brainMarkOf("local", localB) ? mark(brainMarkOf("local", localB), "") : null, localName(localB) + (BR.data.default === "local" ? " · in use" : "")) : null)); }
+      locals.map(b => el("button", { type: "button", class: "small cn-alt" + (BR.data.default === b.id ? " on" : ""), "aria-pressed": BR.data.default === b.id ? "true" : "false", onclick: () => cnUseLocal(b) },
+        brainMarkOf(b.id, b) ? mark(brainMarkOf(b.id, b), "") : null, localName(b) + (BR.data.default === b.id ? " · in use" : ""))))); }
 // the local brain needs no sign-in: choosing it makes it the default brain (and the Agent room's, when it drives the Studio)
 const localName = b => (b.label || "Local model").replace(/ \(Studio engine\)$/, "") + " (local)";
-async function cnUseLocal(b) { try { const r = await api("/api/brains/local/default", {});
+async function cnUseLocal(b) { try { const r = await api("/api/brains/" + encodeURIComponent(b.id) + "/default", {});
     if (BR.data) { BR.data.default = r.settings.default; BR.data.settings = r.settings; }
     toast(localName(b) + " is your default brain" + (b.harness ? ", and the Agent room's" : ""));
   } catch (e) { toast(e.message); } cnRedraw(); }
@@ -555,11 +556,11 @@ function viewBrains() {
   const d = BR.data, set = d.settings || {}, remote = set.remote || {};
   const host = el("input", { value: remote.host || "", placeholder: "you@your-mac" }), studioHost = el("input", { value: remote.studio_host || "", placeholder: "you@this-machine (optional)" });
   const save = async patch => { try { await api("/api/brains/settings", { ...set, ...patch }); toast("Saved"); BR.data = null; brainsLoad(); } catch (e) { toast(e.message); } };
-  put(wrap, head(), typeof localModelsCard === "function" ? localModelsCard() : null,
+  put(wrap, head(), typeof localModelsCard === "function" ? localModelsCard() : null, typeof localAgentsCard === "function" ? localAgentsCard() : null,
     el("p", { class: "note m-flat m-setlink" }, "Sign-in help, the Hermes profile and every connection in one place: ", el("a", { href: "#Settings", onclick: e => { e.preventDefault(); typeof goSettings === "function" ? goSettings("connections") : go("Settings"); } }, "Settings → Connections"), "."),
     el("details", { class: "fold m-fold" }, el("summary", {}, "What is kept, and who pays"),
     el("div", { class: "note m-flat" }, "Studio uses the AI subscriptions you already pay for. Nothing is stored but which one you prefer: each answer is billed to your own sign-in, and a local model never leaves your network.")));
-  const clis = (d.backends || []).filter(b => b.kind !== "http" && b.id !== "local").map(b => ({ kind: "cli", ...b })), localB = (d.backends || []).find(b => b.kind === "http" || b.id === "local");
+  const clis = (d.backends || []).filter(b => b.kind !== "http" && b.id !== "local").map(b => ({ kind: "cli", ...b })), localB = (d.backends || []).find(b => b.id === "local");
   put(wrap, el("div", { class: "sectionhead" }, el("h2", {}, "Your agents"), el("span", { class: "note" }, "Connect one: the studio installs it, signs you in and checks it.")),
     el("div", { class: "tri" }, clis.map(b => connectCard(b)),
       localB ? el("div", { class: "brain" + (d.default === "local" ? " on" : ""), "data-brain": "local" }, el("div", { class: "head" }, brainLogo("local", localB), el("div", { class: "m-min" }, el("b", {}, localB.label),

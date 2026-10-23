@@ -267,7 +267,7 @@ def test_settings_are_saved_privately_and_checked(fake):
                                                                         "studio_host": "user@studio-box"},
                                          "local_endpoint": "http://127.0.0.1:11434", "local_model": "qwen3:8b"}).json()["settings"]
     assert good == {"default": "gemini", "remote": {"host": "user@workstation.local:2222", "backends": ["claude"], "studio_host": "user@studio-box"},
-                    "local_endpoint": "http://127.0.0.1:11434", "local_model": "qwen3:8b", "agent": ""}
+                    "local_endpoint": "http://127.0.0.1:11434", "local_model": "qwen3:8b", "agent": "", "local_agents": []}
     file = agents.HOME / ".studio-agents/settings.json"
     assert json.loads(file.read_text()) == good and (file.stat().st_mode & 0o777) == 0o600
     assert post("/api/brains/settings", {"default": "gpt"}).status_code == 400
@@ -448,10 +448,11 @@ def test_the_studio_mcp_server_shakes_hands():
     tool = {"id": "studio", "label": "Studio", "command": [PY, str(ROOT / "mcp/studio-mcp.py")], "env": {"STUDIO_URL": "http://127.0.0.1:9"},
             "via": "here", "host": "", "enabled": True}
     check = agents.check_tool(tool)
-    assert check["ok"] and check["tools"] == ["studio_state", "list_library", "queue_still", "queue_clip", "queue_voice", "queue_song", "queue_edit",
-                                             "queue_long", "queue_sound", "queue_soundtrack", "check_clip", "motion_previs", "cancel_job", "list_projects",
-                                             "add_to_timeline", "export_timeline", "job_status", "wait_for_jobs", "list_jobs", "slate_films",
-                                             "slate_film", "slate_new_film", "slate_add_scene", "slate_add_shot", "slate_render_shot", "upload_file"]
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("studio_mcp_names", str(Path(__file__).resolve().parents[1] / "mcp/studio-mcp.py"))
+    names = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(names)
+    assert check["ok"] and check["tools"] == [tool_["name"] for tool_ in names.TOOLS]  # every tool the Studio's own MCP server offers, in its order
 
 
 def test_blender_is_started_when_its_socket_is_closed(fake):
@@ -640,3 +641,22 @@ def test_the_studios_prefix_never_reaches_npm_or_the_clis(monkeypatch):
 
     monkeypatch.setenv("PREFIX", "/opt/studio-runtime")
     assert "PREFIX" not in agents.child_env() and agents.child_env({"PREFIX": "/x"})["PREFIX"] == "/x"
+
+
+def test_no_credential_of_the_person_reaches_a_third_party_child(monkeypatch):
+    """The harness CLIs and MCP tool servers are other people's code (blender-mcp is fetched from PyPI at run
+    time): what the person exported for the studio's own downloads must not ride along into all of them."""
+
+    for name, value in (("HF_TOKEN", "hf_secret"), ("HUGGING_FACE_HUB_TOKEN", "hf2"), ("MY_SERVICE_API_KEY", "k"),
+                        ("DB_PASSWORD", "p"), ("AWS_SECRET_ACCESS_KEY", "s"), ("CLAUDECODE", "1")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("OFFICIAL_TOKEN", "kept")  # by name it looks like a credential...
+    monkeypatch.setenv("AGENTS_CHILD_ENV_KEEP", "OFFICIAL_TOKEN")  # ...and this is the person's word that it is needed
+    env = agents.child_env({"TOKEN": "vouched"})
+    for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "MY_SERVICE_API_KEY", "DB_PASSWORD", "AWS_SECRET_ACCESS_KEY",
+                 "CLAUDECODE"):
+        assert name not in env, name
+    assert env.get("OFFICIAL_TOKEN") == "kept"
+    assert env.get("TOKEN") == "vouched" and env.get("HOME") and env.get("PATH")  # ordinary variables ride on
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-the-persons-own")  # a brain's own sign-in still reaches its CLI
+    assert agents.child_env().get("ANTHROPIC_API_KEY") == "sk-the-persons-own"

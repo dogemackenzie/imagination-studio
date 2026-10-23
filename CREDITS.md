@@ -45,6 +45,12 @@ Wasserman's own art covers the engines, the start, action and vault cards and th
 action's card was rendered with the studio's own FLUX3-K and Qwen 2.1 models, and the home key art was generated with the
 image tool of Sam Wasserman's ChatGPT desktop app (OpenAI). Every picture's source is in `app/static/art/ART-SOURCES.md`.
 
+He also wrote **More local agents** (#114): every OpenAI-compatible model server you run, on this computer, the LAN
+or the tailnet, is an agent of its own beside Bolt and the subscriptions, with Find servers on this computer, a card
+in the Agent room and a place in Slate's brain picker. And the **memory guard's cold-load fix** (#117): a cold start's
+model load, which stalls on the page cache with half the machine free, is no longer stopped (a 2-minute clip was
+stopped so with 62 GB available).
+
 ## The film workflow in Production: Sam Wasserman's Slate
 
 **Sam Wasserman (wassermanproductions.com)** created **Slate**, the prompt studio for AI filmmaking: projects, scenes
@@ -79,7 +85,8 @@ its author's page; each keeps its author's model card and licence beside it.
 - **Character Editing:** Character Swap and Person Remover by Akatz Labs (akatz-ai); Natural Face Speech by vpakarinen.
 - **Motion & Action:** Motion Continuity Repair, Combat Base V2 and Weapon Combat by JOKER141; Spatial Physics by
   Jojocodex.
-- **Art Style:** Anime Slider by adf99; Lineart Anime by DiffSynth-Studio; 3D Animation Style by SOLRICKS.
+- **Art Style:** Anime Slider by adf99; Lineart Anime by DiffSynth-Studio; Realism People
+  by fal (huggingface.co/fal/MiniMax-H3-Realism-People-LoRA, MiniMax H3 Community License).
 - **Support & Finishing:** Video Upscaler LoRA by dntpi (with the latent upscaler by LBH-123-AI it builds on).
 - **Fun:** VH5 Tape (VHS) by KennethFal; Wushu Action by Jojocodex; Multiple Angles, for Qwen-Image-2.1, by akhaliq.
 
@@ -208,6 +215,31 @@ safetensors copies of MMAudio's weights. The studio clones it at a pinned commit
 (`spark/studio_mmaudio`) calls kijai's loaders' models and generate. On a Spark a sound effect runs on **ComfyUI**'s
 own Stable Audio nodes.
 
+## Motion graphics: HeyGen's HyperFrames and GreenSock's GSAP
+
+**HeyGen** and the HyperFrames contributors made **HyperFrames** (Apache-2.0), which renders the Graphics tab's
+titles, captions, slideshows and music videos: a web page seeked frame by frame in a headless Chromium and encoded
+with FFmpeg. The motion in each template is written with **GSAP** by GreenSock (now part of Webflow), under its
+standard no-charge licence. Both are installed from npm at pinned versions by `scripts/setup-graphics.sh`; the pack
+ships neither. The browser is a Chromium already on the machine, else HyperFrames' own, and on a DGX Spark **Playwright**'s Chromium for arm64 (Microsoft, Apache-2.0).
+
+## Training your own LoRA: kohya-ss's musubi-tuner and ostris
+
+**kohya-ss** wrote **musubi-tuner** (Apache-2.0), the trainer behind Looks → Train a LoRA; the studio installs it at a
+pinned commit into its own environment (`spark/setup-train.sh`) and ships none of its code. **ostris** made the
+de-distillation training adapter for MiniMax H3 (`ostris/minimax_h3_training_adapter`), merged under a LoRA while it
+trains and not used when it renders. MiniMax H3's own files stay under the MiniMax H3 Community License, and the adapter
+is made from MiniMax H3.
+
+## The final cut and mix: Mirage's Tesseract and Tesseract Converter
+
+**Mirage** made **Tesseract**, which renders Finish's cut and mix on your own computer, and **Tesseract Converter**,
+which turns that cut into a Premiere Pro or After Effects project. Tesseract is free to download and use but is not open
+source: it comes under Mirage's own terms (`TERMS.md` beside it), and may send basic usage counts, which
+`tsrct telemetry disable` turns off; the studio never changes that setting. Tesseract Converter is MIT. The studio
+downloads both from their GitHub releases at pinned versions, checked against their published SHA-256
+(`scripts/setup-finish.sh`); the pack ships neither. The title uses Instrument Serif and Geist (SIL Open Font License).
+
 ## The first native Mac engine: Salvatore Sanfilippo (antirez)
 
 **antirez** wrote **h3.c**, MiniMax H3 in C and Metal. It is the reference for what is possible on Apple
@@ -310,8 +342,8 @@ machine; none of their code ships in this pack.
 - **Google** — **Gemini CLI**.
 - **xAI** — **Grok CLI**.
 - **Nous Research** — **Hermes Agent**.
-- **Ollama**, **LM Studio**, **vLLM** and **llama.cpp** (Georgi Gerganov and the ggml contributors) — the local model
-  servers a brain may be.
+- **Ollama**, **LM Studio**, **vLLM**, **SGLang** (the SGLang team and LMSYS) and **llama.cpp** (Georgi Gerganov and
+  the ggml contributors) — the local model servers a brain or a local agent may be.
 - **Siddharth Ahuja** — **blender-mcp**, the Blender bridge an agent works through; the **Blender Foundation** —
   **Blender**.
 - The **LobeHub** icon set — the agents' marks on the page (unofficial, MIT; `app/static/brand/THIRD-PARTY-MARKS.md`).
@@ -321,7 +353,15 @@ machine; none of their code ships in this pack.
 **August Sturm (@auguststurm)** ran the Studio's core install on an RTX Pro 6000 Blackwell, the first run on the card
 itself, and made the CUDA install pick the card by its `nvidia-smi` index (`STUDIO_GPU`): one install shared by the
 DGX Spark and RTX Pro 6000 entries (`oneshot-setup-cuda.sh`), a compute card used beside a display card, and a second
-studio on a second card.
+studio on a second card. He also made **quitting the app stop that install's ComfyUI** (#119), so Ctrl-C frees the
+card on a DGX Spark and an RTX Pro 6000 alike, and the quit no longer ends in a traceback.
+
+## Bug reports from a film made in Slate: BTankut
+
+**BTankut (@BTankut)** made a 2-minute, continuity-first film entirely in Slate and reported what got in the way, each
+report with its cause and a fix (#51 to #60). Four are fixed from those reports (#121): the export keeps a clip's In
+point when Out is 0, the export size survives a redraw, the shot check's "+ timeline, trimmed to it" button shows, and
+Regenerate no longer sends the app's own "Regenerated at seed N" label to the brain as feedback.
 
 ## Platform and tools
 
@@ -345,6 +385,8 @@ studio on a second card.
 What the studio's installers fetch, its engines bundle and its code imports, beyond the models above. Each is its
 authors' work under its own licence; none of it is this pack's.
 
+- The **web-push-libs** contributors — **pywebpush** (MPL-2.0), and the **Python Cryptographic Authority**
+  — **cryptography**: the Night shift's notifications to a phone (Web Push), installed by the setup when they can be.
 - **Mobius Labs** — **faster-whisper-large-v3-turbo**, the CTranslate2 conversion the QA gate hears speech with (MIT).
 - **Lihe Yang et al.** (HKU, TikTok) — **Depth Anything** (Apache-2.0), and **Xenova** (Joshua Lochner) — its ONNX
   conversion the Motion Previs tab's depth pass runs; **Google** — **MediaPipe** and its Pose Landmarker models
@@ -363,6 +405,12 @@ authors' work under its own licence; none of it is this pack's.
   **accelerate** (Hugging Face), **mlx-lm**, **mlx-whisper** and **mlx-audio** (ml-explore, Prince Canuma), **aiohttp**,
   **Pydantic**, **python-multipart**, **llguidance**, **sounddevice**, **miniaudio**, **Matplotlib**; and for
   ComfyUI-MMAudio, **open_clip**, **timm**, **librosa**, **torchdiffeq** and **OmegaConf**.
+- **Tim Dettmers** and the **bitsandbytes Foundation** contributors — **bitsandbytes** (MIT), the 8-bit optimizer the
+  LoRA trainer uses.
+- **Bitstream** and the **DejaVu** authors — the **DejaVu** fonts (Bitstream Vera licence) the dailies reel's and
+  Finish's title cards draw with when they are on the machine. Licence texts and links for HyperFrames, GSAP,
+  Playwright, Node.js, Geist, Instrument Serif, Tesseract, musubi-tuner and the rest of this section's tools are in
+  `THIRD_PARTY_NOTICES.md`.
 - **Astral** — **uv**; **Homebrew**; **Node.js** and **npm**; **Docker**.
 - **kohya-ss** — the LoRA file layout `scripts/convert-lora.py` reads; **OpenTimelineIO** (Academy Software
   Foundation), Apple's **FCPXML** and the CMX **EDL** — the timeline formats the Suite writes with its own code.

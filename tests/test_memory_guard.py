@@ -135,8 +135,13 @@ def test_when_the_floor_stops_the_server():
     # int8 engine's 13 GB in half a second came at 81 GB available
     assert G.verdict([(0.0, 61800), (0.25, 60000)], floor) == ""
     assert G.verdict([(0.0, 81000), (0.25, 73600)], floor) == ""
-    assert "waiting on memory" in G.verdict([(0.0, 50000), (0.25, 50000)], floor, stalled=0.7)
-    assert G.verdict([(0.0, 50000), (0.25, 50000)], floor, stalled=0.2) == ""
+    assert "waiting on memory" in G.verdict([(0.0, 20000), (0.25, 20000)], floor, stalled=0.7)
+    assert G.verdict([(0.0, 20000), (0.25, 20000)], floor, stalled=0.2) == ""
+    # a cold start's model load stalls on the page cache with half the machine available: not a machine running out
+    assert G.verdict([(0.0, 62000), (0.25, 61900)], floor, stalled=0.52) == ""
+    assert G.verdict([(0.0, 2 * floor), (0.25, 2 * floor)], floor, stalled=0.9) == ""
+    assert "waiting on memory" in G.verdict([(0.0, 2 * floor - 1), (0.25, 2 * floor - 1)], floor, stalled=0.5)
+    assert "under the floor" in G.verdict([(0.0, 13000), (0.05, floor - 1)], floor, stalled=0.7)
 
 
 def test_the_watch_stops_a_process_under_the_floor_and_leaves_one_above_it():
@@ -234,9 +239,10 @@ def test_the_app_refuses_before_the_job_is_queued():
         try:
             job = {"kind": "video", "params": {"prompt": "a walk", "preset": "sharp", "quality": "fh8", "seconds": 5, "qa": False,
                                                "loras": [{"id": "camera-motion", "strength": 0.9}]}}
+            before = set(server.jobs)  # other tests' finished jobs stay in the queue's history
             refused = client.post("/api/jobs", json=job)
             assert refused.status_code == 400 and "refused" in refused.json()["error"] and "LoRA" in refused.json()["error"], refused.text
-            assert not server.jobs  # nothing was queued
+            assert set(server.jobs) == before  # nothing was queued
         finally:
             server.lora_resolve = was
     finally:

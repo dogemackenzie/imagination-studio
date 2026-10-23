@@ -109,3 +109,35 @@ def test_a_still_is_one_picture_unless_more_are_asked_for(studio):
     assert studio[-1][2]["params"] == {"prompt": "a neon street in the rain", "count": 1}
     tool("queue_still", prompt="poster options", count=4)
     assert studio[-1][2]["params"]["count"] == 4
+
+
+def test_a_cut_is_finished_and_exported_for_premiere_or_after_effects(studio):
+    tool("finish_cut", clips=["renders/a.mp4", "renders/b.mp4"], song="none", title="Night Drive", mix="music", fps=30)
+    assert studio[-1] == ("POST", "/api/jobs", {"kind": "finish", "title": "Finish: 2 clips", "params": {
+        "mix": "music", "fps": 30, "clips": [{"path": "renders/a.mp4"}, {"path": "renders/b.mp4"}], "song": None,
+        "title": {"text": "Night Drive", "subtitle": ""}}})
+    assert "is empty" in refused("finish_cut", project="p1")
+    tool("export_cut", id="0101-abc", to="aftereffects")
+    assert studio[-1] == ("POST", "/api/finish/0101-abc/convert", {"to": "aftereffects"})
+    assert "premiere or aftereffects" in refused("export_cut", id="0101-abc", to="resolve")
+
+
+def test_upload_file_publishes_only_a_file_of_the_studio_folder(tmp_path, monkeypatch, studio):
+    """The upload is listed in the Library and downloadable from every device of the studio: the agent -- whose
+    judgement is steerable by whatever a web page or a tool server tells it -- must not be able to post the
+    person's private files through it. Only a real file of the studio folder, never a hidden one, goes up."""
+
+    home = tmp_path / "ImaginationStudio"
+    (home / "agent" / "thread1").mkdir(parents=True)
+    (home / "agent" / "thread1" / "blend.png").write_bytes(b"png made by blender")
+    (home / ".secrets").mkdir()
+    (home / ".secrets" / "id_ed25519").write_bytes(b"a key in the studio folder")
+    private = tmp_path / "id_ed25519"
+    private.write_bytes(b"a key outside it")
+    sneaky = home / "sneaky.png"
+    sneaky.symlink_to(private)  # a path inside the folder that resolves out of it
+    monkeypatch.setenv("STUDIO_HOME", str(home))
+    assert tool("upload_file", path=str(home / "agent" / "thread1" / "blend.png"))["kind"] == "job"  # the ordinary case
+    assert "not a file of the studio folder" in refused("upload_file", path=str(private))
+    assert "hidden" in refused("upload_file", path=str(home / ".secrets" / "id_ed25519"))
+    assert "not a file of the studio folder" in refused("upload_file", path=str(sneaky))

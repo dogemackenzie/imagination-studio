@@ -5,11 +5,12 @@
 const SET_DEFAULTS = {
   appearance: { type_size: "comfortable", glow: true, poster: true, accent: "amber", motion: "system", start_cards: ["clip", "scout", "still", "sharp", "long", "voice"], start_off: [] },
   layout: { hidden: [], order: [] },
-  presets: { recipe: "quick", image_model: "qwen", seconds: 5, qa_gate: true, audio_rate: "keep", seed: "fixed", mode: "clip" },
+  presets: { recipe: "quick", image_model: "qwen", seconds: 5, qa_gate: true, audio_rate: "keep", seed: "fixed", mode: "clip", captions_auto: true },
   hermes_profile: "", hermes_command: "" };
-const SET = { data: null, loaded: false, section: "appearance", saving: false, local: { endpoint: null, found: null, finding: false, said: null, testing: false }, about: null };
+const SET = { data: null, loaded: false, section: "appearance", saving: false, local: { endpoint: null, found: null, finding: false, said: null, testing: false },
+  agents: { name: "", endpoint: "", model: "", nearby: null, finding: false, adding: false, said: {}, testing: {} }, about: null };
 const SET_SECTIONS = [["appearance", "Appearance", "type, glow, poster, accent"], ["layout", "Studio layout", "what the sidebar shows"],
-  ["presets", "Presets & preferences", "what a new take starts from"], ["connections", "Connections", "subscriptions, local models, tools"], ["access", "Access key", "sign in your phone, a new key"],
+  ["presets", "Presets & preferences", "what a new take starts from"], ["connections", "Connections", "subscriptions, local models, tools"], ["access", "Access key", "sign in your phone, a new key"], ["notify", "Notifications", "a night shift done, on your phone"],
   ["models", "Models & weights", "what the studio needs, found and linked"], ["sparks", "Sparks", "one to five DGX Sparks for a job"],
   ["brains", "Brains & tools", "your agents, another computer, MCP tools"], ["updates", "Updates", "the version and the branch it follows"], ["about", "About", "version, credits, licences"]];
 // Machine's own pages, opened here too: each is the same view, and its data is drawn again when it arrives
@@ -106,6 +107,7 @@ function setPresets() { const p = prefs().presets, put1 = patch => settingsSave(
     setRow("Clip length", "A clip's seconds; the exact frames are shown before it is queued", secs),
     setRow("Home starts on", "The composer's first chip", setSeg(p.mode, { clip: "Clip", picture: "Picture", voice: "Voice", song: "Song" }, v => put1({ mode: v }), "Home starts on")),
     setRow("QA gate on each clip", "The transcript and contact-sheet check after a Sharp Spec clip", setSwitch(p.qa_gate, v => put1({ qa_gate: v }), "QA gate")),
+    setRow("Describe new clips automatically", "When nothing is rendering, the local model looks at new clips and pictures so the Library can search by what is in them", setSwitch(p.captions_auto !== false, v => put1({ captions_auto: v }), "Describe new clips automatically")),
     setRow("Delivery sound", "On a DGX Spark a clip's sound is 32 kHz; 48 kHz stereo re-encodes only the sound", setSeg(p.audio_rate, { keep: "Keep 32 kHz", "48000": "48 kHz stereo" }, v => put1({ audio_rate: v }), "Delivery sound")),
     setRow("Seed", "Fixed repeats a take; random gives each a new one", setSeg(p.seed, { fixed: "Fixed", random: "Random" }, v => put1({ seed: v }), "Seed")),
     setRow("Renders go to", "The studio folder, set when the studio starts (STUDIO_HOME)", el("code", { class: "st-path" }, (S && S.home) || "the studio folder")))]; }
@@ -141,6 +143,40 @@ function localModelsCard() {
     b && b.set_missing && b.endpoint === (found && found.endpoint) ? el("div", { class: "note m-flat" }, "Set to " + b.set_model + ", which this server no longer runs: the studio uses " + b.model + ". ",
       el("button", { type: "button", class: "small", onclick: () => save1({ local_model: "" }) }, "Follow what the server runs")) : null,
     L.said ? el("div", { class: "note m-flat " + (L.said.ok ? "vt-ok" : "vt-bad") }, L.said.ok ? "Answered “" + String(L.said.text || "").slice(0, 40) + "”" : L.said.error) : null); }
+// More local agents: every other model server (a GLM, a DeepSeek, an Ollama) as a brain of its own, beside Bolt
+function localAgentsCard() {
+  const d = typeof BR !== "undefined" && BR.data || {}, A = SET.agents, mine = (d.backends || []).filter(b => b.local_agent);
+  const reload = () => { if (typeof BR !== "undefined") { BR.data = null; brainsLoad().then(() => render()); } else render(); };
+  const name = el("input", { value: A.name, placeholder: "Name, like GLM or DeepSeek", "aria-label": "Local agent name", oninput: e => { A.name = e.target.value; } });
+  const addr = el("input", { value: A.endpoint, placeholder: "http://127.0.0.1:8000/v1", "aria-label": "Local agent address", oninput: e => { A.endpoint = e.target.value; } });
+  const model = el("input", { value: A.model, placeholder: "model (optional: the server's first)", "aria-label": "Local agent model", oninput: e => { A.model = e.target.value; } });
+  const add = async () => { A.adding = true; render();
+    try { await api("/api/brains/local-agents", { name: A.name.trim(), endpoint: A.endpoint.trim(), model: A.model.trim() }); toast("Added " + A.name.trim()); Object.assign(A, { name: "", endpoint: "", model: "", nearby: null }); reload(); }
+    catch (e) { toast(e.message); } A.adding = false; render(); };
+  const look = async () => { A.finding = true; render(); try { A.nearby = (await api("/api/brains/local-agents/nearby")).nearby || []; } catch (e) { A.nearby = []; toast(e.message); } A.finding = false; render(); };
+  const test = async id => { A.testing[id] = true; render(); try { A.said[id] = await api("/api/brains/test", { backend: id }); } catch (e) { A.said[id] = { ok: false, error: e.message }; } A.testing[id] = false; render(); };
+  const row = b => { const said = A.said[b.id], on = d.default === b.id;
+    return el("div", { class: "brain" + (on ? " on" : ""), "data-brain": b.id }, el("div", { class: "head" }, typeof brainLogo === "function" ? brainLogo(b.id, b) : null, el("div", { class: "m-min" }, el("b", {}, b.label),
+        el("span", { class: "cn-word " + (b.found ? "ok" : "bad") }, b.found ? "Ready" : "Not answering", b.found && (b.model || b.set_model) ? " · " + (b.model || b.set_model) : ""),
+        el("span", { class: "note m-flat" }, b.endpoint))),
+      said ? el("div", { class: "note m-flat " + (said.ok ? "vt-ok" : "vt-bad") }, said.ok ? "Answered “" + String(said.text || "").slice(0, 40) + "”" : said.error) : null,
+      el("div", { class: "m-acts" },
+        el("button", { type: "button", class: "small", disabled: A.testing[b.id] || !b.found, onclick: () => test(b.id) }, A.testing[b.id] ? "Asking…" : "Test"),
+        on ? el("span", { class: "tag2 t" }, "default") : el("button", { type: "button", class: "small", disabled: !b.found, onclick: async () => { try { await api("/api/brains/settings", { default: b.id }); toast(b.label + " is the default"); reload(); } catch (e) { toast(e.message); } } }, "Make default"),
+        el("button", { type: "button", class: "small", onclick: async () => { if (!confirm("Remove " + b.label + "? The server itself is left as it is.")) return;
+          try { await api("/api/brains/local-agents/" + encodeURIComponent(b.id), {}, "DELETE"); reload(); } catch (e) { toast(e.message); } } }, "Remove"))); };
+  return el("section", { class: "panel st-local", "data-card": "local-agents" },
+    el("div", { class: "st-lh" }, el("span", { class: "logo" }, icon("machine")), el("div", { class: "m-min" }, el("h2", {}, "More local agents"),
+      el("p", { class: "st-line" }, "Each model server you run is an agent of its own, beside Bolt and your subscriptions.")),
+      el("span", { class: "tag2" + (mine.some(b => b.found) ? " ok" : "") }, mine.length ? mine.length + " added" : "none yet")),
+    mine.length ? el("div", { class: "tri" }, mine.map(row)) : null,
+    el("div", { class: "st-lrow" }, name, addr, model, el("button", { type: "button", class: "primary small", disabled: A.adding || !A.name.trim() || !A.endpoint.trim(), onclick: add }, A.adding ? "Adding…" : "Add")),
+    el("div", { class: "st-lrow" }, el("button", { type: "button", class: "small", disabled: A.finding, onclick: look }, A.finding ? "Looking…" : "Find servers on this computer"),
+      A.nearby && !A.nearby.length ? el("span", { class: "note m-flat" }, "Nothing new answered on 11434, 1234, 8000, 8080, 8001, 8888, 5000 or 30000. A server on another computer: type its address.") : null,
+      (A.nearby || []).map(n => el("button", { type: "button", class: "toggle", title: (n.models || []).join(", "),
+        onclick: () => { A.endpoint = n.endpoint; A.model = (n.models || [])[0] || ""; if (!A.name) A.name = String((n.models || [])[0] || "Local").split("/").pop().slice(0, 40); render(); } },
+        n.endpoint.replace(/^https?:\/\//, "").replace(/\/v1$/, "") + ((n.models || [])[0] ? " · " + n.models[0].split("/").pop() : "")))),
+    el("div", { class: "note m-flat" }, "Any OpenAI-compatible server works: vLLM, SGLang, Ollama, LM Studio, llama.cpp. Each can be the default brain, run in the Agent room and answer Slate.")); }
 const setWhere = b => b.found ? (b.where && b.where !== "here" ? "on " + b.where.replace(/^ssh:/, "") : "found here") + (b.version ? " · " + b.version : "") : b.error || (b.where && b.where !== "here" ? "not found on " + b.where.replace(/^ssh:/, "") : "not found");
 function setBrainCard(b) { return typeof connectCard === "function" ? connectCard(b, b.id === "hermes" ? [setHermes()] : []) : el("div", { class: "brain", "data-brain": b.id }, b.label); }
 function setHermes() { const p = prefs();
@@ -152,7 +188,7 @@ function setConnections() {
   if (BR.data.error) return [localModelsCard(), setPanel("Your subscriptions", "Brains are not offered here: " + BR.data.error)];
   const clis = (BR.data.backends || []).filter(b => b.kind === "cli"), remote = (BR.data.settings || {}).remote || {};
   const tools = BR.tools ? (BR.tools.tools || BR.tools) : [];
-  return [localModelsCard(),
+  return [localModelsCard(), localAgentsCard(),
     setPanel("Your agents", "Press Connect: the studio finds the agent (or installs it), runs its own sign-in, checks it answers and makes it your default. It keeps nothing of the sign-in; each answer is billed to your own subscription.",
       el("div", { class: "tri" }, clis.map(setBrainCard)),
       el("div", { class: "note m-flat" }, remote.host ? "On another computer: " + remote.host + " runs " + ((remote.backends || []).join(", ") || "nothing yet") + " over SSH." : "A DGX Spark can use the agents signed in on your Mac: link it below.")),
@@ -238,7 +274,9 @@ function setAbout() { if (!SET.about && typeof updRequest === "function") { SET.
     el("div", {}, el("button", { type: "button", onclick: () => go("Updates") }, u.available ? "An update is ready: Machine → Updates" : "Check for updates"))),
   setPanel("Credits", "The authors whose work the studio runs.",
     el("ul", { class: "st-credits" }, ["Keys (drowzeys): the studio itself, its TensorFold families and int8 kernels, and its Mac and DGX Spark engines",
-      "Sam Wasserman and Wasserman Productions: helped design and build the studio in collaboration with Keys; Wasserman's Filmmaker Suite (ScriptBreak, Cork Board, Master Canvas, Storyboard Reference Studio, Blockout, Motion Previs Studio, Slate, Circle Take, Stem Studio, Call Sheet, DaVinci MCP), the Sharp Spec, the 80s Horror LoRA and the studio's art",
+      "Sam Wasserman and Wasserman Productions: helped design and build the studio in collaboration with Keys; Wasserman's Filmmaker Suite (ScriptBreak, Cork Board, Master Canvas, Storyboard Reference Studio, Blockout, Motion Previs Studio, Slate, Circle Take, Stem Studio, Call Sheet, DaVinci MCP), the Sharp Spec, the 80s Horror LoRA and the studio's art; More local agents and the memory guard's cold-load fix",
+      "August Sturm: the RTX Pro 6000 build, run on the card; quitting the app stops its ComfyUI",
+      "BTankut: bug reports from a film made in Slate, with causes and fixes (export trims and size, the shot check button, Regenerate)",
       "Qwen team: Qwen-Image-2.1", "Black Forest Labs: FLUX 3 Image Klein (FLUX3-K)", "OpenMOSS: MOSS-Image", "MiniMax: MiniMax H3 and MiniMax-Music3", "Built with Fish Audio: Fish Audio Drama 3",
       "Stability AI: Stable Audio Open · Ho Kei Cheng et al.: MMAudio · kijai: ComfyUI-MMAudio (sound effects and foley)",
       "Ash Hart: TensorFold",
@@ -249,8 +287,9 @@ function setAbout() { if (!SET.about && typeof updRequest === "function") { SET.
       "The Library's actions: MATLOWAI (H3 Contact Sheet) · dntpi / Sandpies (H3 Video Upsampler) · LBH-123-AI · bbaudio-2025 · Alissonerdx · Akatz Labs (H3 Relay, Person Remover) · Meta: SAM 3.1",
       "Motion Previs: Sam Wasserman's Motion Previs Studio · Google: MediaPipe · Lihe Yang et al.: Depth Anything (Xenova's ONNX conversion) · OpenCV · Microsoft: ONNX Runtime",
       "MMAudio's models: Apple DFN5B CLIP · Synchformer (Iashin et al.) · NVIDIA BigVGAN v2 · Google: T5 · the SGLang-Omni team and Descript: Fish's codec on a Spark",
-      "The agents you connect: Claude Code (Anthropic), Codex (OpenAI), Gemini CLI (Google), Grok CLI (xAI), Hermes Agent (Nous Research); Ollama, LM Studio, vLLM, llama.cpp (Georgi Gerganov and the ggml contributors); Blender (Blender Foundation) and blender-mcp (Siddharth Ahuja)",
+      "The agents you connect: Claude Code (Anthropic), Codex (OpenAI), Gemini CLI (Google), Grok CLI (xAI), Hermes Agent (Nous Research); Ollama, LM Studio, vLLM, SGLang (the SGLang team and LMSYS), llama.cpp (Georgi Gerganov and the ggml contributors); Blender (Blender Foundation) and blender-mcp (Siddharth Ahuja)",
       "OpenAI Whisper, faster-whisper (SYSTRAN, Mobius Labs), yt-dlp, FFmpeg, PyTorch, Hugging Face diffusers, transformers and huggingface_hub, torchsde, FastAPI, Starlette and Uvicorn (Encode), xgrammar (MLC-AI), Zig, BusyBox, uv, NumPy, Pillow, PyAV",
+      "Motion graphics, training and finishing: HeyGen (HyperFrames) · GreenSock (GSAP) · Microsoft (Playwright) · Node.js · kohya-ss (musubi-tuner) · ostris · bitsandbytes (Tim Dettmers) · Mirage (Tesseract, Tesseract Converter) · DejaVu fonts",
       "Geist and Instrument Serif · LobeHub and Simple Icons: the agents' marks · @itxabdullaa: the Black Mirror test prompt",
       "The community LoRA authors, by name on each card in Looks and in CREDITS.md · every one of them, with what was used and its licence, under Every credit below"].map(t => el("li", {}, t)))),
   setFullCredits(),
@@ -260,6 +299,7 @@ function setAbout() { if (!SET.about && typeof updRequest === "function") { SET.
       "FLUX3-K: FLUX Kommunity License", "MOSS-Image: Apache 2.0 (commercial use allowed)", "Fish Audio Drama 3: Fish Audio Community License v1.0; a hosted voice service needs Fish's own licence",
       "NVIDIA Nemotron 3.5 Bolt: OpenMDW License 1.1 (commercial use allowed; a copy keeps the licence and NVIDIA's notices) · its DGX Spark engine: MiaAI-Lab's recipe, MIT, on TensorFold",
       "Stable Audio Open 1.0: Stability AI Community License (free under US$1 million of yearly revenue)", "MMAudio's weights: CC-BY-NC 4.0, non-commercial",
+      "HyperFrames: Apache 2.0 · GSAP: its no-charge Standard License (not open source) · musubi-tuner: Apache 2.0 · bitsandbytes: MIT · Tesseract: Mirage's own terms (free below US$1 million of yearly revenue, not for redistribution, usage counts on by default) · Tesseract Converter: MIT",
       "Wasserman's Filmmaker Suite: each app under its own licence, Apache-2.0 (Master Canvas: MIT); the studio ships none of their code but the Slate workflow and the Motion Previs port, each with its NOTICE"].map(t => el("li", {}, t))))]; }
 
 function setEmbedded(section) { const [name, data] = SET_VIEWS[section], view = typeof globalThis[name] === "function" ? globalThis[name] : null;
@@ -278,7 +318,7 @@ function viewSettings() {
   const sections = settingsSections();
   if (!sections.some(([id]) => id === SET.section)) SET.section = sections[0][0];
   const draw = { appearance: setAppearance, layout: setLayout, presets: setPresets, connections: setConnections, access: setAccess, about: setAbout,
-    models: () => setEmbedded("models"), sparks: () => setEmbedded("sparks"), brains: () => setEmbedded("brains"), updates: () => setEmbedded("updates") }[SET.section] || setAppearance;
+    models: () => setEmbedded("models"), sparks: () => setEmbedded("sparks"), brains: () => setEmbedded("brains"), updates: () => setEmbedded("updates"), notify: () => typeof nightNotify === "function" ? nightNotify() : [setPanel("Notifications", "Not in this build.")] }[SET.section] || setAppearance;
   return el("div", { class: "settings" },
     typeof pageHead === "function" ? pageHead("Studio Vault", "Settings", "How the studio looks, what it shows, and what it connects to.") : el("h1", { class: "display" }, "Settings"),
     el("div", { class: "st-wrap" },

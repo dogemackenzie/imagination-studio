@@ -60,6 +60,8 @@ SUGGESTED = {"camera-only": ["ai-depth", "depth", "reference"], "actor-motion": 
 PACK_FILES = ({name for name in worker.BUNDLE_FILES.values() if name}
               | {"bundle_manifest.json", "analysis_manifest.json", "preview.jpg", "pose_high_contrast.webm", "openpose_pose.webm", "ai_depth.webm"})
 ZIP_LIMIT = 2 * 1024 ** 3
+# the analysis queue for other parts of the studio (revise.py: Restyle and Fix), filled by attach: submit, job, pack, able
+API: dict = {}
 
 
 def inside(path: str | Path) -> Path:
@@ -718,8 +720,13 @@ def attach(home: Path, pack: Path, spark: bool) -> APIRouter:
                     raise HTTPException(400, "this pack's bundle_manifest.json is not in the production pack layout")
                 folder.mkdir(parents=True)
                 for name, item in wanted.items():
+                    written = 0
                     with bundle.open(item) as source, open(folder / name, "wb") as target:
-                        shutil.copyfileobj(source, target)
+                        while chunk := source.read(1 << 20):  # count the bytes that actually arrive: a header can lie about its size
+                            written += len(chunk)
+                            if written > item.file_size + 1024:
+                                raise HTTPException(400, "a ZIP entry grew past the size it declared")
+                            target.write(chunk)
         except (zipfile.BadZipFile, ValueError, KeyError) as error:
             shutil.rmtree(folder, ignore_errors=True)
             archive.unlink(missing_ok=True)
@@ -756,4 +763,5 @@ def attach(home: Path, pack: Path, spark: bool) -> APIRouter:
         (root / "handoff.json").unlink(missing_ok=True)
         return {"reference": None}
 
+    API.update(submit=submit, job=get_job, pack=get_pack, able=able)
     return router

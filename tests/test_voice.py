@@ -3,8 +3,10 @@ command line is stood in for by a small script that writes a WAV and its stats."
 import json
 import os
 import struct
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import wave
 from pathlib import Path
@@ -369,7 +371,7 @@ def test_a_cast_voice_goes_into_a_shot_on_cast_stills_as_reference_audio():
     (home / "voice").mkdir(exist_ok=True)
     (home / "voice" / "tom.wav").write_bytes(b"wav")
     (home / "voice" / "long.wav").write_bytes(b"wav")
-    project = {"id": "p-v", "name": "V", "defaults": {"durationSec": 8}, "tf": {"res": "480p", "quality": "fh8"},
+    project = {"id": "p-v", "name": "V", "defaults": {"durationSec": 8}, "tf": {"res": "480p", "quality": "fh8", "dialogue": "drama3"},
                "characters": [{"id": "c1", "name": "Leo", "images": ["uploads/leo.png"]}, {"id": "c2", "name": "Mia", "images": ["uploads/mia.png"]}],
                "voices": [{"id": "v1", "name": "Leo voice", "characterId": "c1", "ageGender": "a young man", "timbre": "warm",
                            "drama": {"path": "voice/tom.wav", "seconds": 6.2, "use": True}},
@@ -386,9 +388,18 @@ def test_a_cast_voice_goes_into_a_shot_on_cast_stills_as_reference_audio():
         assert "references the delivery from <Audio 1>" in made["prompt"]
         project["voices"][0]["drama"]["use"] = False  # unticked: no reference audio
         assert "reference_audios" not in slate.compile_shot(project, "sh")["plan"]
-        project["scenes"][0]["shots"][0]["tf"]["start"] = "text"  # not on cast stills: never audio alone
+        project["scenes"][0]["shots"][0]["tf"]["start"] = "text"  # not on reference pictures (the bible off): never audio alone
+        project["tf"]["bible"] = "off"
         project["voices"][0]["drama"]["use"] = True
         assert "reference_audios" not in slate.compile_shot(project, "sh")["plan"]
+        project["tf"]["bible"] = "auto"  # from text, the bible's pictures are references: the cast voice goes in
+        assert slate.compile_shot(project, "sh")["plan"]["reference_audios"] == ["voice/tom.wav"]
+        project["tf"]["dialogue"] = "h3"  # dialogue spoken by the video model: no voice reference
+        assert "reference_audios" not in slate.compile_shot(project, "sh")["plan"]
+        # a film made before the settings: shots on cast stills take the cast voices, as they did
+        del project["tf"]["dialogue"], project["tf"]["bible"]
+        project["scenes"][0]["shots"][0]["tf"]["start"] = "cast"
+        assert slate.compile_shot(project, "sh")["plan"]["reference_audios"] == ["voice/tom.wav"]
     finally:
         slate.ready = had
 
@@ -647,3 +658,39 @@ def test_a_voice_take_waits_for_memory_a_stopped_server_is_giving_back(monkeypat
         raise AssertionError("refused expected")
     except RuntimeError as error:
         assert "needs about 50 GB" in str(error)
+
+
+def test_an_engine_the_kernel_wont_release_still_gives_the_gpu_lock_back(monkeypatch, tmp_path):
+    """A SIGKILL to a process stuck in the kernel (the way a wedged GPU leaves it) is not always waitable. That must
+    not hold stop()'s actual promise hostage -- the lock back and ownership cleared -- or every later take waits on
+    the GPU lock of an owner that is gone until the app itself restarts."""
+
+    voice = server.voice
+    monkeypatch.setattr(voice, "LOCK", tmp_path / "studio-gpu.lock.d")
+    monkeypatch.setattr(voice, "settle", lambda: None)
+    monkeypatch.setattr(voice, "mem_available_gb", lambda: 80.0)
+    one = voice.Served.__new__(voice.Served)
+    one.mutex = threading.RLock()
+    one.note = lambda *args, **more: None
+    one.owner = "drama3@studio"
+    voice.LOCK.mkdir(parents=True)
+    (voice.LOCK / "owner").write_text("drama3@studio")
+
+    class Corpse:  # poll() alive, and no wait that ever returns: kill-guard territory
+        class stdin:
+            @staticmethod
+            def close():
+                pass
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout: float = 0):
+            raise subprocess.TimeoutExpired("drama3-server", timeout)
+
+    one.process = Corpse()
+    one.stop("the engine hung")  # must not raise out of the wedged wait
+    assert one.process is None and one.owner == "" and not voice.LOCK.exists()

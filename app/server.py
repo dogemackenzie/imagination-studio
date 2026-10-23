@@ -11,6 +11,7 @@ Projects, uploads and renders live under $STUDIO_HOME (default ~/ImaginationStud
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fcntl
 import ipaddress
 import json
@@ -1010,7 +1011,7 @@ def compose_references(fields: dict, count: int) -> str:
         voices.append(f"<Audio {sounds}>")
     scene = (fields.get("scene") or "").strip()
     shot = joined(scene, fields.get("camera", ""), fields.get("action", ""), *follow)
-    spoken = []
+    spoken, away = [], 0
     for index, line in enumerate(fields.get("dialogue") or [], start=1):
         text = (line.get("text") or "").strip()
         if not text:
@@ -1018,13 +1019,24 @@ def compose_references(fields: dict, count: int) -> str:
         voice = (line.get("voice") or "a natural voice").strip()
         verb = "sings" if line.get("sung") else "speaks"
         language = (line.get("language") or "English").strip()
-        spoken.append(f"<Subject {int(line.get('subject') or 1)}> (S{index}), in {voice}, {verb}: <d>[{language}] {text}</d>")
+        if line.get("offscreen"):  # a speaker who is not pictured (slate.py): a voice from outside the frame
+            away += 1
+            who = (line.get("speaker") or "").strip()
+            spoken.append(f"An off-screen voice{', ' + who + ',' if who else ''} (S{index}), heard from outside the frame in {voice}, {verb}: <d>[{language}] {text}</d>")
+        else:
+            spoken.append(f"<Subject {int(line.get('subject') or 1)}> (S{index}), in {voice}, {verb}: <d>[{language}] {text}</d>")
     if spoken:
         if voices:
             shot += " The speaker's voice timbre references the delivery from " + " and ".join(voices) + "."
-        # a clip longer than its lines: without this the model may keep the mouth moving and invent words
-        shot += (" " + " ".join(spoken) + " Mouth movements follow the words. After the last word the speaker stops"
-                 " talking, closes the mouth and stays silent until the end of the clip.")
+        shot += " " + " ".join(spoken)
+        if away == len(spoken):  # only voices from outside the frame: the people pictured listen
+            shot += " The people in the frame listen with their mouths closed while the off-screen voice speaks."
+        else:
+            # a clip longer than its lines: without this the model may keep the mouth moving and invent words
+            shot += (" Mouth movements follow the words. After the last word the speaker stops"
+                     " talking, closes the mouth and stays silent until the end of the clip.")
+            if away:
+                shot += " During the off-screen lines the mouths in the frame stay closed."
     elif tracks:  # a video's own sound is a reference: it may hold speech, so nothing here says that nobody speaks
         shot += " The sound of " + " and ".join(tracks) + " plays through the clip."
     else:
@@ -1692,6 +1704,12 @@ def build(kind: str, params: dict, job_id: str, room: bool = True) -> tuple[list
         return built
     if kind in sound.KINDS:  # a sound effect or a clip's foley (sound.py)
         return sound_build(kind, params, job_id)
+    if kind in train.KINDS:  # a LoRA trained on this Spark (train.py: spark/train_lora.py)
+        return train_build(params, job_id)
+    if kind in finish.KINDS:  # the final cut and mix through Tesseract (finish.py)
+        return finish.build(params, job_id)
+    if kind in graphics.KINDS:  # a title, captions, a slideshow or a music video, rendered with HyperFrames (graphics.py)
+        return graphics_build(params, job_id)
     seed = str(int(params.get("seed", 0)))
     if kind == "scout":
         folder = HOME / "scouts" / job_id
@@ -1847,9 +1865,10 @@ def export(job: dict) -> None:
         start = max(0.0, float(clip.get("in", 0.0)))
         end = float(clip.get("out", 0.0))
         inputs += ["-i", str(source)]
-        span = f"trim=start={start}:end={end},setpts=PTS-STARTPTS," if end > start else ""
-        aspan = f"atrim=start={start}:end={end},asetpts=PTS-STARTPTS," if end > start else ""
-        length = (end - start) if end > start else float(clip.get("duration", 5.0))
+        cut = f"start={start}" + (f":end={end}" if end > start else "")  # Out 0 (or before In) plays to the clip's end
+        span = f"trim={cut},setpts=PTS-STARTPTS," if start > 0 or end > start else ""
+        aspan = f"atrim={cut},asetpts=PTS-STARTPTS," if start > 0 or end > start else ""
+        length = (end - start) if end > start else max(float(clip.get("duration", 5.0)) - start, 0.1)
         fade = min(0.08, length / 4)
         filters.append(f"[{index}:v]{span}scale={width}:{height}:force_original_aspect_ratio=decrease,"
                        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS}[v{index}]")
@@ -1876,8 +1895,8 @@ def export(job: dict) -> None:
         job["progress"] = None
 
 
-STEP = re.compile(r"\[tensorfold\] (step|voice|ar|dit) (\d+)/(\d+)")
-STEP_WORDS = {"step": "picture", "voice": "sound", "ar": "the model writes the song", "dit": "the sound"}  # MiniMax Music 3: ar, dit
+STEP = re.compile(r"\[tensorfold\] (step|voice|ar|dit|train) (\d+)/(\d+)")
+STEP_WORDS = {"step": "picture", "voice": "sound", "ar": "the model writes the song", "dit": "the sound", "train": "training step"}  # MiniMax Music 3: ar, dit
 RAN_ON = re.compile(r"\[tensorfold\] engine: (\w+)")
 
 
@@ -1887,17 +1906,24 @@ def run(job: dict, command: list[str], env: dict, label: str = "") -> bool:
     process = subprocess.Popen(command, cwd=PACK, env=environment(env), stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, start_new_session=True)
     running.update(process=process, id=job["id"])
-    for line in process.stdout:
-        job["log"] = (job["log"] + line)[-20000:]
-        engine = RAN_ON.search(line)
-        if engine:
-            job["engine"] = engine.group(1)
-        found = STEP.search(line)
-        if found:
-            kind, at, total = found.group(1), int(found.group(2)), int(found.group(3))
-            job["progress"] = {"stage": label + STEP_WORDS[kind], "at": at, "of": total}
-    code = process.wait()
-    running.update(process=None, id=None)
+    try:
+        for line in process.stdout:
+            job["log"] = (job["log"] + line)[-20000:]
+            engine = RAN_ON.search(line)
+            if engine:
+                job["engine"] = engine.group(1)
+            found = STEP.search(line)
+            if found:
+                kind, at, total = found.group(1), int(found.group(2)), int(found.group(3))
+                job["progress"] = {"stage": label + STEP_WORDS[kind], "at": at, "of": total}
+        code = process.wait()
+    finally:  # a reader that died mid-render must not leave the detached group owning the GPU
+        if process.poll() is None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                os.killpg(process.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+            process.wait(10)
+        running.update(process=None, id=None)
     if job["status"] == "cancelled":
         return False
     if code:
@@ -2087,16 +2113,18 @@ def perform(job: dict, worker: dict | None = None) -> None:
     try:
         # a Drama 3 server kept loaded after a voice take (voice.py) never stands beside a render here, nor MiniMax Music 3
         # kept loaded after a song (music.py): each is unloaded before any other job of this machine's queue
-        if job["kind"] not in ("voice", "export", "soundtrack") and worker is None and not job.get("remote"):
+        if job["kind"] not in ("voice", "export", "soundtrack", "finish", "graphics") and worker is None and not job.get("remote"):
             if voice.release(f"a {job['kind']} job needs the GPU"):
                 job["log"] += "[tensorfold] Drama 3 was unloaded to give this job its memory\n"
-        if job["kind"] not in ("music", "export", "soundtrack") and worker is None and not job.get("remote"):
+        if job["kind"] not in ("music", "export", "soundtrack", "finish", "graphics") and worker is None and not job.get("remote"):
             if music.release(f"a {job['kind']} job needs the GPU"):
                 job["log"] += "[tensorfold] MiniMax Music 3 was unloaded to give this job its memory\n"
         # NVIDIA Nemotron 3.5 Bolt (bolt.py), the Studio's brain engine: unloaded before this job when the job's measured
         # peak does not fit beside it (bolt_need), after the answers in flight; held until the queue is empty
-        if job["kind"] not in ("export", "soundtrack") and worker is None and not job.get("remote"):
+        if job["kind"] not in ("export", "soundtrack", "finish", "graphics") and worker is None and not job.get("remote"):
             job["log"] += bolt.admit(job, lambda resident: bolt_need(job, resident))
+        if job["kind"] in train.KINDS and worker is None:  # a LoRA run holds about 55 GB for hours: ComfyUI's models go first
+            job["log"] += train_free(job)
         if params.get("first_frame_from"):  # continuity: open on the last frame of an earlier clip
             source = inside(params["first_frame_from"])
             if not source.is_file():
@@ -2148,6 +2176,8 @@ def perform(job: dict, worker: dict | None = None) -> None:
                 except Exception as error:  # noqa: BLE001
                     job["pace"] = {"verdict": "not measured", "note": str(error)[-200:]}
         hub.record(job)  # the clip, its seed and settings, and the Spark that rendered it (sparks/takes.jsonl)
+        if params.get("then") and job["status"] != "cancelled":  # the next step of Extend or Fix (revise.py)
+            revise_then(job)
         if job["status"] != "cancelled":
             job["status"] = "done"
     except sparks.Moved:  # the Spark it was on refused it, failed it or stopped answering: it is in the queue again
@@ -2353,7 +2383,8 @@ def estimate_time(body: dict) -> dict:
         try:
             chosen, _ = custom(body)
             sized = {**(PRESETS[body["preset"]][2] if body.get("preset") in PRESETS else {}), **chosen}
-            count = int(body.get("references") or 0)
+            count = min(int(body.get("references") or 0), REFERENCE_TOTAL)  # the app itself attaches no more than this,
+            # and a bigger number here only costs this process memory to hold a list it cannot answer for
             room = memory_of(body, sized, lengths.of({"frames": body.get("frames"), "seconds": body.get("seconds") or 5}), bool(body.get("loras") or body.get("with_lora")),
                              {"pictures": [None] * count, "videos": []} if body.get("referenced") else None)
             room = {key: room.get(key) for key in ("fits", "reason", "need_mb", "error_mb", "left_mb", "floor_mb", "available_mb", "nearest")}
@@ -2397,6 +2428,8 @@ def export_clips(params: dict) -> None:
 @app.post("/api/jobs")
 def submit(body: dict) -> dict:
     try:
+        if body.get("kind") in revise.KINDS:  # Restyle, Extend, Fix (revise.py): a clip's job and what follows it
+            return revise_queue(body)
         return queue_job(body)
     except (TypeError, ValueError, AttributeError, KeyError) as error:
         # a setting sent as the wrong type (text for a number, a list for an object): said plainly, not a 500
@@ -2411,7 +2444,7 @@ def queue_job(body: dict) -> dict:
     if body.get("title") is not None and not isinstance(body.get("title"), str):
         raise HTTPException(400, "title is text")
     params = dict(body.get("params") or {})
-    if kind not in ("scout", "video", "studio", "export", "long", "edit") + actions.KINDS + sound.KINDS:
+    if kind not in ("scout", "video", "studio", "export", "long", "edit") + actions.KINDS + sound.KINDS + finish.KINDS + graphics.KINDS:
         raise HTTPException(400, "unknown job kind")
     if kind == "long" and (params.get("last_image") or params.get("last_same") or params.get("last_frame_from")):
         raise HTTPException(400, "a last frame is for single clips: a long video is a chain of clips")
@@ -2435,7 +2468,7 @@ def queue_job(body: dict) -> dict:
         if missing:
             raise HTTPException(400, missing)
         build("video", {**params, "seconds": pieces[0], "output": None}, "check")
-    if kind not in ("export", "edit", "foley") + actions.KINDS and not (params.get("prompt") or "").strip():
+    if kind not in ("export", "edit", "foley") + actions.KINDS + finish.KINDS + graphics.KINDS and not (params.get("prompt") or "").strip():
         raise HTTPException(400, "a prompt is needed")
     if kind != "video" and params.get("references"):
         raise HTTPException(400, "reference pictures are for single clips")
@@ -2475,7 +2508,11 @@ def queue_job(body: dict) -> dict:
         # Reject bad settings now, not when the job's turn comes. A controller clip is checked here for
         # prompt, frames, paths and references; the worker's own memory guard is asked when the clip is sent.
         # A clip other Sparks may take is held to their memory guards, not to this one's.
-        build(kind, params, job_id, room=not remote_clip and not (kind in ("video", "studio") and said["used"] > 1))
+        # Finish and graphics write their folder when built, so that check uses a stand-in id.
+        build(kind, params, "check" if kind in finish.KINDS + graphics.KINDS else job_id,
+              room=not remote_clip and not (kind in ("video", "studio") and said["used"] > 1))
+    if kind in graphics.KINDS and not body.get("title"):
+        body = {**body, "title": graphics_title(params)}
     job = {"id": job_id, "kind": kind, "status": "queued", "title": body.get("title") or (action_title(kind, params) if kind in actions.KINDS else sound_title(kind, params) if kind in sound.KINDS else kind), "params": params,
            "source": action_source(kind, params) if kind in actions.KINDS else sound_source(kind, params) if kind in sound.KINDS else None,
            "outputs": [], "progress": None, "error": None, "log": "", "created": time.time(), "started": None,
@@ -2538,7 +2575,7 @@ def cancel(job_id: str) -> dict:
     return public(job)
 
 
-NOT_ON_COMFY = ("voice", "export", "soundtrack", "qa")  # jobs a Spark runs without its ComfyUI server
+NOT_ON_COMFY = ("voice", "export", "soundtrack", "qa", "train", "finish", "graphics")  # jobs a Spark runs without its ComfyUI server
 
 
 COMFY_PROMPT = re.compile(r"^\[tensorfold\] comfy prompt ([0-9a-f-]{8,64})$", re.M)
@@ -2672,8 +2709,12 @@ def library_sounds() -> list[dict]:
             if path.suffix.lower() in SOUND_FILES and path.is_file() and relative(path) not in seen:
                 seen.add(relative(path))
                 words = str(take.get("text") or take.get("caption") or take.get("title") or "")
+                try:
+                    made, bytes_of = path.stat().st_mtime, path.stat().st_size  # it may be on its way to the trash right now
+                except OSError:
+                    continue
                 out.append({"path": relative(path), "kind": "audio", "sound": which, "folder": which, "title": " ".join(words.split())[:80],
-                            "modified": path.stat().st_mtime, "size": path.stat().st_size})
+                            "modified": made, "size": bytes_of})
     for path in (HOME / "sound").rglob("*") if (HOME / "sound").is_dir() else []:
         if path.suffix.lower() in SOUND_FILES and path.is_file() and not hidden(path.relative_to(HOME)) and relative(path) not in seen:
             try:  # a sound effect's or a foley's words, from its take file (sound.py)
@@ -2681,8 +2722,12 @@ def library_sounds() -> list[dict]:
                 words = str(said.get("prompt") or ("Foley for " + Path(str(said.get("source") or "")).name if said.get("kind") == "foley" else ""))
             except (OSError, ValueError, AttributeError):
                 words = ""
+            try:
+                made, bytes_of = path.stat().st_mtime, path.stat().st_size  # it may be on its way to the trash right now
+            except OSError:
+                continue
             out.append({"path": relative(path), "kind": "audio", "sound": "sfx", "folder": "sound", "title": " ".join(words.split())[:80],
-                        "modified": path.stat().st_mtime, "size": path.stat().st_size})
+                        "modified": made, "size": bytes_of})
     return out
 
 
@@ -2847,12 +2892,19 @@ def projects() -> list[dict]:
 
 @app.post("/api/projects")
 def new_project(body: dict) -> dict:
-    project_id = time.strftime("p%m%d-%H%M%S")
+    stamp, n = time.strftime("p%m%d-%H%M%S"), 1
+    project_id = stamp
+    while True:  # an id no other project has: two made in one second differ (as roughcut.new_project)
+        try:
+            project_file(project_id).parent.mkdir(parents=True)
+            break
+        except FileExistsError:
+            n += 1
+            project_id = f"{stamp}-{n}"
     data = {"id": project_id, "name": body.get("name") or "Untitled", "preset": "small" if SPARK else "draft", "quality": "fh8" if SPARK else "standard",
             "segments": [], "timeline": []}
     file = project_file(project_id)
-    file.parent.mkdir(parents=True, exist_ok=True)
-    fresh = file.with_suffix(".json.new")
+    fresh = file.with_name(f"{file.name}.{uuid.uuid4().hex[:8]}.new")  # every writer its own temp: two saves never share one
     fresh.write_text(json.dumps(data, indent=1))
     fresh.replace(file)
     return data
@@ -2875,10 +2927,14 @@ def save_project(project_id: str, body: dict) -> dict:
     if not file.is_file():
         raise HTTPException(404, "no such project")
     body["id"] = project_id
-    fresh = file.with_suffix(".json.new")  # written beside it and swapped in: a reader never sees half a file
+    fresh = file.with_name(f"{file.name}.{uuid.uuid4().hex[:8]}.new")  # written beside it and swapped in: a reader never sees half a file, a second saver never steals this temp
     fresh.write_text(json.dumps(body, indent=1))
     fresh.replace(file)
     return body
+
+
+_WAITERS = threading.Semaphore(4)  # a page holding /api/wait open is one thread of the small pool; a few at a
+# time is pages waiting on screenshots, more than that is someone holding the app hostage
 
 
 @app.get("/api/wait")
@@ -2886,7 +2942,12 @@ def wait(ms: int = 1000):
     """Holds a response open; a page asked for with ?shot=1 loads an image from here so that a headless
     screenshot is taken after the app has drawn."""
 
-    time.sleep(min(max(ms, 0), 10000) / 1000)
+    if not _WAITERS.acquire(blocking=False):
+        return JSONResponse({"waited": 0})  # the pool is already full of waiters; nobody gets to add to it
+    try:
+        time.sleep(min(max(ms, 0), 10000) / 1000)
+    finally:
+        _WAITERS.release()
     return JSONResponse({"waited": ms})
 
 
@@ -3029,7 +3090,10 @@ def slate_room(plan: dict, lora: bool) -> dict:
 
 
 app.include_router(slate.attach(HOME, DURATIONS, compose, compose_references, REFERENCE_LIMIT,
-                                lambda: {"ref2va": ref2va_ready(), "ref2va_turbo": ref2va_turbo_ready()}, slate_room))
+                                lambda: {"ref2va": ref2va_ready(), "ref2va_turbo": ref2va_turbo_ready()}, slate_room, within=inside))
+import director  # noqa: E402  (the Director: a logline to a checked, cut film, beside this file)
+app.include_router(director.attach(HOME, queue=queue_job, lookup=jobs.get, stop_job=cancel, check=qa_gate, new_project=new_project,
+                                   save_project=save_project, presets={k: v[1] for k, v in PRESETS.items()}, app=app, references=ref2va_ready))
 import agents  # noqa: E402  (Brains and agents: the user's own CLI sign-ins and MCP tools, beside this file)
 app.include_router(agents.attach(HOME))
 
@@ -3068,7 +3132,23 @@ action_router, action_build, action_title, action_source = actions.attach(HOME, 
 import sound  # noqa: E402  (sound effects and foley: Stable Audio Open and MMAudio, run locally, beside this file)
 sound_router, sound_build, sound_title, sound_source = sound.attach(HOME, PACK, SPARK, inside, relative, held_room, media_seconds)
 app.include_router(action_router)
+import revise  # noqa: E402  (Restyle, Extend and Fix: work on a clip you already have, Library actions, beside this file)
+revise_router, revise_queue, revise_then = revise.attach(sys.modules[__name__])
+app.include_router(revise_router)
 app.include_router(sound_router)
+import captions  # noqa: E402  (what is in each clip and picture, described by the local vision model and searched, beside this file)
+caption_router = captions.attach(HOME, library, inside, relative, lambda request, mutation=False: agents.local(request, mutation),
+                                 lambda: running["process"] is None and not any(j["status"] in ("queued", "running") for j in list(jobs.values())),
+                                 lambda: hub.takes(), lambda: settings.load()["presets"].get("captions_auto", True))
+app.include_router(caption_router)
+import train  # noqa: E402  (a LoRA trained from the Library's clips and stills on this Spark, beside this file)
+train_router, train_build, train_free = train.attach(HOME, PACK, SPARK, inside, media_seconds, enqueue, jobs, lock)
+app.include_router(train_router)
+import finish  # noqa: E402  (Finish: the final cut and mix through Tesseract, to Resolve, Premiere or After Effects, beside this file)
+app.include_router(finish.attach(HOME, PACK, inside, relative))
+import graphics  # noqa: E402  (motion graphics: titles, captions, slideshows, music videos, rendered with HyperFrames, beside this file)
+graphics_router, graphics_build, graphics_title = graphics.attach(HOME, PACK, SPARK, inside, relative)
+app.include_router(graphics_router)
 import clear  # noqa: E402  (finished jobs and their files into the trash folder, and back, beside this file)
 app.include_router(clear.attach(HOME, jobs, order, lock)[0])
 import sparks  # noqa: E402  (worker Sparks behind this queue: a job's "sparks" number, beside this file)
@@ -3155,7 +3235,15 @@ def machine_constraints(fresh: int = 0) -> dict:
     return constraints.report(SPARK, image_models(), fresh=bool(fresh))
 import suite  # noqa: E402  (the filmmaker suite's files in and out: imports, timeline, dailies, beside this file)
 app.include_router(suite.attach(HOME, jobs, lock, PRESETS, app))
+import push  # noqa: E402  (notifications on a phone: Web Push with the studio's own keys, beside this file)
+app.include_router(push.attach(HOME, lambda request: agents.local(request, True)))
+import nightshift  # noqa: E402  (the night shift: a batch rendered overnight, dailies in the morning, beside this file)
+app.include_router(nightshift.attach(HOME, jobs, order, lock, queue_job, cancel, PRESETS, suite.probe, suite.dailies_package, lambda: environment({})["PATH"], push.send))
 app.include_router(settings.attach(HOME))
+import beats  # noqa: E402  (a song's tempo, beats and bars, measured with numpy, beside this file)
+app.include_router(beats.attach(HOME, inside))
+import roughcut  # noqa: E402  (a rough cut on the song's beats, exported with its FCPXML, EDL and Resolve zip, beside this file)
+app.include_router(roughcut.attach(HOME, lambda body: queue_job(body), jobs, lock, inside, relative, media_seconds, public))
 try:
     import nodes  # noqa: E402  (Nodes: a canvas of the studio's own jobs, run in order, beside this file)
 except ImportError:  # an install without it keeps the rest of the app
@@ -3333,16 +3421,73 @@ app.mount("/", StaticFiles(directory=HERE / "static", html=True), name="static")
 if not media_tools()["ffmpeg"]:
     print("[studio] " + FFMPEG_NOTE, flush=True)
 
+def begin_shutdown(sig_handler, sig, frame) -> None:
+    """Ctrl-C and an update's restart end the open event streams, then the server closes."""
+
+    telemetry.STOPPING.set()
+    sig_handler(sig, frame)
+
+
+@contextlib.contextmanager
+def catch_exit(handle_exit):
+    """Catch Ctrl-C and SIGTERM for one server run. The hooks finish, and the signal is not raised again:
+    raising it is what prints the traceback after a clean stop."""
+
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    handled = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):  # Windows Ctrl+Break, as Uvicorn handles it
+        handled.append(signal.SIGBREAK)
+    original = {sig: signal.signal(sig, handle_exit) for sig in handled}
+    try:
+        yield
+    finally:
+        for sig, handler in original.items():
+            signal.signal(sig, handler)
+
+
+def stop_session_comfy() -> None:
+    """ComfyUI runs in its own session so the models stay loaded between clips. This process is the session:
+    quitting it stops that server. PREFIX and SPARK_COMFY_PORT are already this install's, on a Spark and on a card."""
+
+    script = PACK / ("mac/comfy.sh" if sys.platform == "darwin" else "spark/comfy.sh")
+    if not script.is_file():
+        return
+    try:
+        # The governor's stop waits up to about 25 s for its reservation to end, then the script waits 25 s more.
+        done = subprocess.run(["bash", str(script), "stop"], check=False, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        print("[studio] ComfyUI did not stop within 60 s", flush=True)
+        return
+    if "stopped" in done.stdout:
+        print("[studio] ComfyUI stopped", flush=True)
+
+
 if __name__ == "__main__":
     import uvicorn
+
+    class StudioServer(uvicorn.Server):
+        def handle_exit(self, sig, frame) -> None:
+            begin_shutdown(super().handle_exit, sig, frame)
+
+        @contextlib.contextmanager
+        def capture_signals(self):
+            with catch_exit(self.handle_exit):
+                yield
 
     if os.environ.get("STUDIO_PIDFILE"):  # a worker Spark's app, started by another Spark's Studio: how that one finds it again
         Path(os.environ["STUDIO_PIDFILE"]).write_text(str(os.getpid()))
     hub.start()
+    nightshift.start()  # the night shift's scheduler: planned shifts start at their time or when the queue is idle
+    if not os.environ.get("STUDIO_PIDFILE"):  # the captioner describes this studio's Library, not a worker Spark's
+        caption_router.captioner["start"]()
+    director.resume_later()  # the Director's runs a restart cut off
+    app.router.on_shutdown.append(stop_session_comfy)  # the detached ComfyUI belongs to this process, not to one render
 
     # Update authorization needs the actual socket peer. Tailscale Serve forwards the browser's IP,
     # but its authenticated local proxy is the peer allowed to manage this loopback installation.
-    web_server = uvicorn.Server(uvicorn.Config(app, host=listen_host(),
+    web_server = StudioServer(uvicorn.Config(app, host=listen_host(),
                                port=int(os.environ.get("PORT", "7870")), log_level="warning", proxy_headers=False,
                                timeout_graceful_shutdown=10))  # open connections (event streams) never hold a restart
 
@@ -3351,4 +3496,7 @@ if __name__ == "__main__":
         web_server.should_exit = True
 
     updater.restart = restart
-    web_server.run()
+    try:
+        web_server.run()
+    except KeyboardInterrupt:  # Uvicorn re-raises Ctrl-C after the shutdown hooks have run
+        pass
