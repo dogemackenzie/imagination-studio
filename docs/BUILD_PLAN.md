@@ -14,13 +14,13 @@ Updated 2026-11-06. The user approved implementation, integration, deployment, a
 
 Phases 0–3 are implemented: diagnostics, test isolation, hardware/capability boundaries, an unprivileged app container, persistence, health checks, bounded CPU exports and lifecycle management. Job history, an instance lock, backup/restore tooling and bounded logs are implemented. SDXL Turbo and Z-Image Turbo each have one recorded still, but those measurements breached the original reserves and do not constitute completed safety acceptance. Controller-only video has simulated-worker coverage; no real worker is configured.
 
-## Remaining work and evidence
+## Completed work and remaining prerequisites
 
 1. **Documentation and baseline** — reconciled MEMORY, this plan and operations with the 3.2.0 baseline and the approved shared-backend boundary. Complete.
-2. **Upstream integration** — merge upstream `c572890` (4.3.1) in an isolated checkout; resolve 26 conflicting files without losing local capabilities, container behavior, controller routing or upstream Windows/GPU behavior. Run the full non-GPU suite with isolated data and no live model submissions. In progress.
+2. **Upstream integration** — merge upstream `c572890` (4.3.1) in an isolated checkout; resolve 26 conflicting files without losing local capabilities, container behavior, controller routing or upstream Windows/GPU behavior. Run the full non-GPU suite with isolated data and no live model submissions. Complete: merged as `3587a3a`; full container regression passed (2277 passed, 99 skipped).
 3. **Shared-backend admission** — budget measured cold-load host/VRAM demand plus reserves, recheck before each submission, fail closed on missing measurements/telemetry, and prevent overlapping Studio submissions even when its client is cancelled or restarted. Never treat another app's allocations as reclaimable. Implemented, including conservative combined NVML/backend readings and persistent prompt ownership.
 4. **Image verification** — validate both client workflows, busy/refusal paths, timeout/cancellation/restart behavior and output ownership with a disposable mock backend. Live cold/warm rendering is conditional on sufficient measured headroom. If it cannot fit, retain the refusal and record live validation as blocked; do not label it passed. Both clients pass mocked workflow/output tests; cancellation, lost responses, cross-client locks and capacity refusals are covered. Live renders are blocked by headroom. Multi-image scouts remain outside the one-still profiles.
-5. **Release and recovery** — test the container against copied data, check the UI and CPU media flow, rehearse backup/restore and old-image rollback, preserve the current image, build with disk headroom, deploy only Studio, and verify both existing services remain healthy. Copied-data export and old-image rollback passed with identical project/media hashes and no job replay. The browser sweep covered all 34 tabs and 260 buttons with writes blocked. Final regression and production deployment are pending. No shared Docker pruning.
+5. **Release and recovery** — test the container against copied data, check the UI and CPU media flow, rehearse backup/restore and old-image rollback, preserve the current image, build with disk headroom, deploy only Studio, and verify both existing services remain healthy. Copied-data export and old-image rollback passed with identical project/media hashes and no job replay. The browser sweep covered all 34 tabs and 260 buttons with writes blocked. Final regression passed and production now runs 4.3.1 / `3587a3a`; pre/post project/media hashes match and both shared services remained healthy. No shared Docker pruning.
 6. **Optional remote video** — maintain and test controller behavior, lost-worker/cancellation/code mismatch paths. A real end-to-end clip requires a configured capable worker and SSH access; do not invent a worker or mount credentials automatically. Simulated coverage remains part of the regression suite; the real-worker prerequisite is still external.
 
 ## Completion criteria
@@ -34,3 +34,7 @@ Phases 0–3 are implemented: diagnostics, test isolation, hardware/capability b
 ## Deferred scope
 
 Additional models, multi-image scouts, local H3/Ref2VA/Drama/Music engines, GPU hardware upgrades, and changing either shared service are separate milestones. Upstream availability alone does not qualify those features on this RTX 3060 / 16 GB host.
+
+## Release record
+
+The authorized integration and deployment work is complete. Live image and real-worker checks remain explicitly blocked by the prerequisites above. See [release evidence](benchmarks/shared-backend-release-2026-11-06.md).

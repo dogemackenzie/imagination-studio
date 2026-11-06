@@ -188,7 +188,7 @@ python3 scripts/studio-data.py restore --from /tmp/studio-backup --into /tmp/stu
 Restore copies projects, settings and any pending shared-prompt ownership record. It does not run a job. There is no schema migration on the
 live volume in this release. Rehearse on a copy before adding one.
 
-Return the app to a tag that is already on this machine:
+Return the app to a tag that is already on this machine only after Studio is idle and any pending shared prompt is confirmed terminal. The older 3.2.0 client does not understand the new ownership record:
 
 ```bash
 SOURCE_REV=<prior tag> docker compose up -d --force-recreate --no-deps studio

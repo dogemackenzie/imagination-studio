@@ -1,14 +1,20 @@
-# Current work — 2026-11-06
+# Current status — 2026-11-06
 
-The user approved completing the shared-backend integration plan and all additional testing needed. The existing ComfyUI is a **shared backend**: Studio may submit supported image jobs through its API but must not change its installation, service, configuration, models or the other application. No restart, unload, queue clear or interrupt of the shared server.
+The approved shared-backend integration is deployed. Studio runs **4.3.1**, image/code revision `3587a3a`, with upstream `c572890c31dbca321df427f63e4cced3ce77d02c` merged into main. Documentation commits after that revision do not change the running code. Baseline was `fc9d9ec` / 3.2.0, upstream base `6bb1a46`; the merge brought 200 upstream commits and resolved 26 conflicting files.
 
-Baseline: clean main at `fc9d9ec`, running healthy container version 3.2.0, upstream base `6bb1a46`. The published service is app-only with SDXL Turbo and Z-Image Turbo still routes, a persistent data volume, localhost plus a specific LAN binding, and `STUDIO_ACCESS_KEY=off`. Preserve these deliberate deployment settings during integration; remote Updates/Brains/Agents retain separate restrictions.
+**Shared ComfyUI is not owned by Studio.** Never change its checkout, environment, nodes, models, configuration, service or ports. Never restart, stop, unload, clear its queue or interrupt it. The other application is also outside this task. The service retained the same process and zero restarts through deployment; the other container stayed healthy.
 
-Upstream inspected at `c572890` (4.3.1): 200 commits, 361 changed files, 26 merge-conflicting files. Work is on `integration/upstream-4.3.1` in an isolated worktree. The production checkout/container have not yet been replaced. The machine has RTX 3060 12 GB, about 16 GB RAM and only 18 GB free disk at baseline.
+The published service stays app-only, with its existing loopback and specific LAN binding, `STUDIO_ACCESS_KEY=off`, read-only model mounts/NVML telemetry, non-root app process, 1 GiB memory limit and separate data volume. Keep all three existing Compose files when managing it: `compose.yaml`, private `compose.override.yaml`, private `compose.nvml.yaml`. No unmeasured local GPU route was enabled.
 
-Outstanding: finish merge and regression tests; correct measured-peak memory admission and cancellation/restart bookkeeping for shared prompts; container/UI and backup/rollback checks; deploy only Studio; update release evidence. Live GPU validation requires enough capacity without lowering reserves. The existing SDXL run dipped to 6654 MB host available; Z-Image to 2079 MB and 351 MiB GPU free. Both are below required reserves. No real video worker is configured; its optional live verification remains pending.
+Shared still admission now reserves measured cold-load RAM/VRAM demand plus margins and the existing floors. SDXL needs **15525 MB host available**; Z-Image needs **19646 MB**, beyond this roughly 16 GB host. Both refused safely at deployment (about 6.8 GB available). Previous successful benchmark images breached the reserves and are not safety acceptance. **Live cold/warm rendering remains blocked by capacity, not passed.** Do not lower floors or reclaim the other application's allocations.
 
-[Current plan](docs/BUILD_PLAN.md) supersedes the architecture and next-step statements in the historical record below. Do not use the automatic updater while the integration is unfinished.
+`/data/shared-prompt.json` and its client lock preserve an outstanding prompt across cancellation/restart. A lost POST response fails closed. Only a matching terminal history entry releases ownership automatically. Cancellation stops Studio's client, not the remote prompt. Backup/restore preserves this record. Do not roll back to an old client while a shared prompt might still be active.
+
+Validation: **2277 passed, 99 skipped** in the full non-GPU container suite. Both still workflows and their ownership/refusal paths have mocked backend coverage. All 34 browser tabs and 260 buttons were checked with writes blocked; no uncaught page errors or phone overflow. CPU exports with and without audio passed. The copied-data upgrade → 3.2.0 rollback → 4.3.1 re-upgrade preserved project/media hashes and replayed no jobs. The prior image is retained; the full stopped-container backup is under `~/imagination-studio-backups/2026-11-06/prior-data` (private). No shared Docker pruning occurred.
+
+Remaining external prerequisites: sufficient measured headroom for live image validation, and a configured capable worker with SSH access for a real remote video. Controller behavior is covered with simulated workers; no credentials were mounted. Additional models, multi-image scouts and local heavy engines remain separate milestones.
+
+See [the plan](docs/BUILD_PLAN.md), [release evidence](docs/benchmarks/shared-backend-release-2026-11-06.md) and [operations](docs/OPERATIONS.md). The historical record below is context, not current deployment guidance.
 
 ---
 
