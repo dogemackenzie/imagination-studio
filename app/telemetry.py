@@ -44,6 +44,25 @@ FRESH = 1.0                     # a tool's answer is kept this long
 GPU_FRESH, GPU_BUSY = 5.0, 30.0  # nvidia-smi's answer is kept this long; while a job or the render engine runs, longer
 STORAGE_FRESH = 600             # the folder sizes are worked out again after ten minutes
 DISK_FULL, GPU_HOT = 90, 85     # warnings: a disk this full (%), a GPU this hot (°C, the governor's alert line)
+
+
+def low_memory_warning(mem: dict, margin_mb: int) -> str | None:
+    """The line when free memory is under the floor. A card names GPU memory and does not say the
+    render would be stopped: the guard beside ComfyUI still watches system RAM."""
+
+    card_mem = mem.get("card") if isinstance(mem, dict) else None
+    if card_mem is not None:
+        free = card_mem.get("free_mb")
+        if free is not None and free < margin_mb:
+            return (f"GPU memory ({free / 1000:.1f} GB) is below the memory guard's floor "
+                    f"({margin_mb / 1000:.1f} GB).")
+        return None
+    floor = mem.get("floor_mb") if isinstance(mem, dict) else None
+    available = mem.get("available_mb") if isinstance(mem, dict) else None
+    if floor and available is not None and available < floor:
+        return (f"Available memory ({available / 1000:.1f} GB) is below the memory guard's floor "
+                f"({floor / 1000:.1f} GB): a render now would be stopped.")
+    return None
 GPU_FIELDS = "utilization.gpu,temperature.gpu,power.draw,clocks.sm,name"
 # the machine's workload governor (spark/workload.py), read only where SPARK_GOVERNOR (or SPARK_GOVERNOR_DIR) names its folder
 GOVERNOR = Path(os.environ.get("SPARK_GOVERNOR_DIR") or os.environ.get("SPARK_GOVERNOR") or "/nonexistent-governor")
@@ -68,6 +87,59 @@ def parse_gpu(line: str) -> dict | None:
     util, temp, power, clock = (number(part) for part in parts[:4])
     return {"name": ",".join(parts[4:]).strip(), "util_pct": util, "temp_c": temp, "power_w": power,
             "clock_mhz": int(clock) if clock is not None else None}
+
+
+def parse_gpus(text: str, *, with_uuid: bool = False) -> list[dict]:
+    """Every line of `nvidia-smi --query-gpu=index,memory.used,memory.total,<GPU_FIELDS> ...`: one reading a card,
+    each with its nvidia-smi index and its own memory (MB). A line of <GPU_FIELDS> alone still parses, without them."""
+
+    cards = []
+    for line in text.strip().splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if with_uuid:
+            # N1X's NVIDIA driver also returns its DLA/NPU from --query-gpu.
+            if len(parts) < 9 or not parts[0].startswith("GPU-"):
+                continue
+            parts = parts[1:]
+            line = ",".join(parts)
+        if len(parts) < 8 or not parts[0].isdigit():
+            one = parse_gpu(line)
+            if one is not None:
+                cards.append(one)
+            continue
+        one = parse_gpu(",".join(parts[3:]))
+        if one is None:
+            continue
+        used, total = number(parts[1]), number(parts[2])
+        one.update(index=parts[0], used_mb=int(used) if used is not None else None,
+                   total_mb=int(total) if total is not None else None)
+        cards.append(one)
+    return cards
+
+
+def combine_gpus(cards: list[dict]) -> dict | None:
+    """One reading for the cards a Studio renders on together (STUDIO_GPUS): the mean load, the hottest card, the power
+    of all of them, and each card under ``cards``. One card is its own reading, as before."""
+
+    if not cards:
+        return None
+    first = {key: cards[0].get(key) for key in ("name", "util_pct", "temp_c", "power_w", "clock_mhz")}
+    if len(cards) == 1:
+        return first
+
+    def known(key):
+        return [card[key] for card in cards if card.get(key) is not None]
+
+    utils, temps, powers, clocks = known("util_pct"), known("temp_c"), known("power_w"), known("clock_mhz")
+    names = {card.get("name") for card in cards}
+    return {"name": first["name"] if len(names) == 1 else " + ".join(card.get("name") or "?" for card in cards),
+            "util_pct": round(sum(utils) / len(utils), 1) if utils else None,
+            "temp_c": max(temps) if temps else None,
+            "power_w": round(sum(powers), 2) if powers else None,
+            "clock_mhz": max(clocks) if clocks else None,
+            "count": len(cards),
+            "cards": [{key: card.get(key) for key in ("index", "util_pct", "temp_c", "power_w", "clock_mhz",
+                                                       "used_mb", "total_mb")} for card in cards]}
 
 
 def parse_vm_stat(text: str, total_mb: int) -> int | None:
@@ -173,10 +245,42 @@ def disk_of(path: Path) -> dict:
     """The disk holding ``path`` as `df -h` shows it: Use% is used / (used + available to the user), the blocks kept
     for root counted as neither, and "free" is what this user can still write (statvfs f_bavail)."""
 
-    st = os.statvfs(Path(path).resolve())
-    total, used, avail = st.f_blocks * st.f_frsize, (st.f_blocks - st.f_bfree) * st.f_frsize, st.f_bavail * st.f_frsize
+    if sys.platform == "win32":
+        total, used, avail = shutil.disk_usage(path)
+    else:
+        st = os.statvfs(Path(path).resolve())
+        total, used, avail = st.f_blocks * st.f_frsize, (st.f_blocks - st.f_bfree) * st.f_frsize, st.f_bavail * st.f_frsize
     return {"total_gb": round(total / 1e9, 1), "free_gb": round(avail / 1e9, 1),
             "used_pct": round(100 * used / (used + avail), 1) if used + avail else None}
+
+
+def windows_memory() -> tuple[int, int]:
+    from windows_memory import host_memory
+
+    return host_memory()
+
+
+def compact(snap: dict) -> dict:
+    """One machine's own status from its telemetry snapshot, small enough to ride on /api/spark/self: what the head's
+    per-machine panel shows (state of the GPU, the memory it shares or its own, RAM, disk, temperature, the job
+    rolling). A Mac has no GPU line and says so by ``gpu`` being None."""
+
+    gpu, mem, disk = snap.get("gpu"), snap.get("memory") or {}, snap.get("disk") or {}
+    total, free = mem.get("total_mb"), mem.get("available_mb")
+    jobs = snap.get("jobs") or {}
+    now = jobs.get("current")
+    card = mem.get("card")
+    return {"at": snap.get("time"), "host": snap.get("host"), "platform": snap.get("platform"),
+            "gpu": {key: gpu.get(key) for key in ("name", "util_pct", "temp_c", "power_w", "count", "cards")
+                    if key in gpu} if gpu else None,
+            # unified: the GPU and the processor share this memory (a DGX Spark, a Mac); a card has its own, listed apart
+            "memory": {"total_mb": total, "free_mb": free, "used_mb": total - free if total and free is not None else None,
+                       "used_pct": mem.get("used_pct"), "floor_mb": mem.get("floor_mb"), "unified": not card},
+            "card": {key: card.get(key) for key in ("total_mb", "used_mb", "free_mb", "cards") if key in card} if card else None,
+            "disk": {key: disk.get(key) for key in ("total_gb", "free_gb", "used_pct")},
+            "cpu": snap.get("cpu"), "gpu_lock": bool((snap.get("gpu_lock") or {}).get("held")),
+            "job": {key: now.get(key) for key in ("id", "title", "kind", "progress", "elapsed")} if now else None,
+            "queued": jobs.get("queued", 0), "warnings": (snap.get("warnings") or [])[:3]}
 
 
 def attach(home: Path, jobs: dict, order: list, lock: threading.Lock, guard=None, comfy_port: int | None = None,
@@ -201,25 +305,24 @@ def attach(home: Path, jobs: dict, order: list, lock: threading.Lock, guard=None
         return value
 
     def gpu() -> dict | None:
-        if shutil.which("nvidia-smi"):
-            try:
-                argv = guard.nvidia_argv() if guard is not None and hasattr(guard, "nvidia_argv") else ["nvidia-smi"]
-                done = subprocess.run([*argv, f"--query-gpu={GPU_FIELDS}", "--format=csv,noheader,nounits"],
-                                      capture_output=True, text=True, timeout=2)
-                lines = done.stdout.strip().splitlines()
-                parsed = parse_gpu(lines[0]) if done.returncode == 0 and lines else None
-                if parsed:
-                    return parsed
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        # A container has no nvidia-smi. The shared ComfyUI already sees the card. The reading is not a render route.
-        return constraints.gpu_reading()
+        if not shutil.which("nvidia-smi"):
+            return constraints.gpu_reading()
+        try:
+            argv = guard.nvidia_argv() if guard is not None and hasattr(guard, "nvidia_argv") else ["nvidia-smi"]
+            # every card the argv names: the studio's own, or each paired card (STUDIO_GPUS), the head's first
+            done = subprocess.run([*argv, f"--query-gpu=uuid,index,memory.used,memory.total,{GPU_FIELDS}",
+                                   "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=2)
+            return combine_gpus(parse_gpus(done.stdout, with_uuid=True)) if done.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired):
+            return constraints.gpu_reading()
 
     def memory() -> dict:
         info = guard.meminfo() if guard else {}
         total = available = None
         if info.get("MemTotal"):
             total, available = info["MemTotal"], info.get("MemAvailable")
+        elif sys.platform == "win32":
+            total, available = windows_memory()
         elif sys.platform == "darwin":
             try:
                 total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // 2 ** 20
@@ -233,6 +336,10 @@ def attach(home: Path, jobs: dict, order: list, lock: threading.Lock, guard=None
         card = guard.device() if guard and SPARK else None  # a card with its own memory (an RTX Pro 6000): shown beside the RAM
         if card:
             out["card"] = {key: card[key] for key in ("total_mb", "used_mb", "free_mb", "simulated")}
+            if card.get("cards"):  # paired cards: how many, and whether a pass is split over them
+                out["card"].update(split_pass=bool(card.get("split_pass")))
+                if card.get("split_pass"):  # the memory above is all the cards' only then (else the head's card alone)
+                    out["card"]["cards"] = card["cards"]
         return out
 
     def gpu_lock() -> dict:
@@ -318,15 +425,15 @@ def attach(home: Path, jobs: dict, order: list, lock: threading.Lock, guard=None
             drive = {"path": str(home), "total_gb": None, "free_gb": None, "used_pct": None}
         try:
             load = round(os.getloadavg()[0], 2)
-        except OSError:
+        except (OSError, AttributeError):
             load = None
         ruled = cached("governor", governor, 5.0) if GOVERNOR.is_dir() else None
         warnings = []
         if drive["used_pct"] is not None and drive["used_pct"] > DISK_FULL:
             warnings.append(f"The disk holding the studio folder is {drive['used_pct']:.0f}% full ({drive['free_gb']:g} GB free).")
-        if mem["floor_mb"] and mem["available_mb"] is not None and mem["available_mb"] < mem["floor_mb"]:
-            warnings.append(f"Available memory ({mem['available_mb'] / 1000:.1f} GB) is below the memory guard's floor "
-                            f"({mem['floor_mb'] / 1000:.1f} GB): a render now would be stopped.")
+        low = low_memory_warning(mem, guard.VRAM_MARGIN_MB if guard else 0)
+        if low:
+            warnings.append(low)
         if card and card["temp_c"] is not None and card["temp_c"] > GPU_HOT:
             warnings.append(f"The GPU is at {card['temp_c']:.0f} °C, over {GPU_HOT} °C.")
         if ruled and ruled["status"] not in (None, "ok"):
@@ -447,4 +554,5 @@ def attach(home: Path, jobs: dict, order: list, lock: threading.Lock, guard=None
         return storage_answer()
 
     threading.Thread(target=sample, daemon=True, name="telemetry").start()
+    router.snapshot = snapshot  # read in-process by app/server.py's /api/spark/self (compact)
     return router

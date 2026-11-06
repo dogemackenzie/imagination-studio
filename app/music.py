@@ -6,7 +6,7 @@ job in the app's queue, so it never runs beside a MiniMax H3 render or a Drama 3
 app's own process:
 
 - ``metal`` (a Mac with an M5 or later, preferred there when built): TensorFold's Metal port (fork branch
-  ``upstream/music3-metal``, ``$PREFIX/music3/bin/music3-generate --serve 1``, Zig + Metal, no Python), the CUDA
+  ``music3-metal-118`` on TensorFold 1.1.8, ``$PREFIX/music3/bin/music3-generate --serve 1``, Zig + Metal, no Python), the CUDA
   route's binary protocol and lifecycle; int8 weights by default (``MUSIC3_WEIGHTS=bf16``). It does not stream yet.
   Without the binary or the weights, or on an M1 to M4, a Mac falls back to ``mlx``.
 - ``mlx`` (a Mac): TensorFold's MLX port (fork branch ``music3-mlx``, ``python -m tensorfold.music3 --serve`` in its
@@ -17,7 +17,8 @@ app's own process:
   studio's ComfyUI server (spark/comfy.sh, whose memory guard stands beside it). The server keeps the song's models
   loaded after it, which counts as loaded here: the GPU lock is held, and they are freed (ComfyUI's /free) after the
   idle time and before any other job, as for Drama 3. A song starts from a server with nothing else loaded.
-- ``cuda`` (a DGX Spark, preferred there when built): TensorFold's CUDA port (fork branch ``music3-cuda``,
+- ``cuda`` (a DGX Spark, preferred there when built): TensorFold's CUDA port (fork branch ``music3-cuda-118``, the
+  family on TensorFold 1.1.8,
   ``$PREFIX/music3/bin/music3-generate --serve 1``), the Mac engine's protocol and lifecycle (voice.Served), int8
   weights made on the GPU as it loads (``MUSIC3_WEIGHTS=bf16`` for the checkpoint's own). A ComfyUI holding models is
   stopped before it loads. Without the binary or the weights a Spark falls back to ``comfy``; ``MUSIC3_BACKEND``
@@ -35,6 +36,11 @@ appends raw 16-bit stereo PCM to a file as each piece is decoded, and ``/api/mus
 stereo WAV whose sound is held back until enough is made that playing never runs dry (``lead_s``). The kept take is the
 engine's finished WAV, as without streaming. The MLX route alone streams: not the Metal one yet, nor a Spark (its
 CUDA engine and ComfyUI's route alike).
+
+Two engines make songs (``engine`` in a song's settings): ``yue2``, m-a-p's YuE2 (app/music_yue2.py, Linux with an
+NVIDIA GPU, in its own environment), and ``music3``, MiniMax Music 3 on the routes above. YuE2 is the default where it
+is installed; a Mac, or a machine without it, makes songs with MiniMax Music 3. Settings (Presets, "Song engine") and
+STUDIO_MUSIC_ENGINE choose otherwise; each song names its own in the Music tab.
 """
 
 from __future__ import annotations
@@ -58,11 +64,14 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 import voice
+import model_catalog
+import windows_cuda  # the native Windows CUDA tier: False off Windows without a look
 
 router = APIRouter()
 HOME: Path = Path.home() / "ImaginationStudio"
 PACK = Path(__file__).resolve().parent.parent
-SPARK = hardware.is_spark()
+WINCUDA = windows_cuda.native_os()
+SPARK = hardware.is_spark() or WINCUDA
 MAC = sys.platform == "darwin"
 PREFIX = Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-studio")).expanduser()
 
@@ -125,7 +134,7 @@ class Mlx(voice.Served):
     # free memory wanted before it loads: MLX's own peak was 27.6 GB for that song and the machine's memory in use rose
     # by 32.9 GB, and the guard's 8 GB beside it
     NEED_GB = 42.0
-    MEMORY_GB = 64  # a Mac with less does not run it
+    MEMORY_GB = 96  # the Studio's minimum for a Mac (64 up to 4.3.0): a Mac with less does not run it
 
     def __init__(self) -> None:
         super().__init__()
@@ -352,6 +361,8 @@ class Comfy:
     RTF, load_s = 4.4, 30.0
 
     def __init__(self) -> None:
+        if WINCUDA:
+            self.label = "ComfyUI · native Windows (CUDA)"
         self.idle_s = float(os.environ.get("MUSIC3_IDLE_S", 300))
         self.models = Path(os.environ.get("SPARK_MODELS", Path.home() / "spark-studio-models")).expanduser() / "MiniMax-Music3-Comfy"
         self.mutex = threading.RLock()
@@ -401,7 +412,7 @@ class Comfy:
         return int((0 if self.loaded() else self.load_s) + seconds * self.RTF + 5)
 
     def command(self, params: dict, caption: Path, lyrics: Path, wav: Path) -> list[str]:
-        return [str(PREFIX / "venv" / "bin" / "python"), str(PACK / "spark" / "spark_generate.py"), "music",
+        return [windows_cuda.python() if WINCUDA else str(PREFIX / "venv" / "bin" / "python"), str(PACK / "spark" / "spark_generate.py"), "music",
                 "--caption-file", str(caption), "--lyrics-file", str(lyrics), "--seconds", f"{float(params['seconds']):g}",
                 "--seed", str(int(params["seed"])), "--steps", str(int(params["steps"])), "--cfg", f"{params['dit_cfg']:g}",
                 "--ar-cfg", f"{params['ar_cfg']:g}", "--top-k", str(int(params["top_k"])), "-o", str(wav)]
@@ -506,7 +517,7 @@ class Comfy:
 
 class Cuda(voice.Served):
     """TensorFold's CUDA port of MiniMax Music 3 on a DGX Spark (``music3-generate --serve 1``, Zig + CUDA, no Python;
-    fork branch ``music3-cuda``, built by ``spark/build-music3.sh`` into ``$PREFIX/music3``). It speaks the Mac
+    fork branch ``music3-cuda-118`` on TensorFold 1.1.8, built by ``spark/build-music3.sh`` into ``$PREFIX/music3``). It speaks the Mac
     engine's protocol (one JSON request a line on stdin, one answer a line on stderr), so it is a ``voice.Served``
     like the Mac route and Drama 3's CUDA engine: loaded on the first song, holding the GPU lock while loaded,
     unloaded after ``MUSIC3_IDLE_S`` and before any other job (``release``), under the kill-guard
@@ -517,13 +528,15 @@ class Cuda(voice.Served):
 
     name, label = "cuda", "TensorFold CUDA · DGX Spark"
     title, owner_tag, idle_env, guard_env = "MiniMax Music 3", "studio-music music3-cuda", "MUSIC3_IDLE_S", "MUSIC3_GUARD_GB"
-    load_s = 37.0  # measured: 36.6 to 37.4 s to ready, int8 made at load, the files in the page cache
+    # measured to ready, int8 made at load, the files in the page cache: 36.6 to 37.4 s on the TensorFold 1.0 base
+    # (32.6 s in the 2026-10-25 A/B), 12.5 to 16.2 s on the 1.1.5 build in the same A/B on one GB10 (same song bytes)
+    load_s = 16.0
     # seconds of making a second of song, measured on a GB10, int8: 30 s in 60.3 s, 60 s in 123.9 s, 120 s in 252.0 s
     # (bf16: 60 s in 194.3 s)
     RTF_OF = {"int8": 2.1, "bf16": 3.3}
     # free memory wanted before it loads: the song's peak above an idle machine (19.3 GB int8 at 120 s, 26.6 GB bf16)
     # and the guard's 8 GB beside it
-    NEED_OF = {"int8": 30.0, "bf16": 38.0}
+    NEED_OF = {route: model_catalog.required_free_gib("music", route) for route in ("int8", "bf16")}
 
     def __init__(self) -> None:
         super().__init__()
@@ -535,9 +548,15 @@ class Cuda(voice.Served):
         self.weights = weights if weights in self.RTF_OF else "int8"
         self.RTF, self.NEED_GB = self.RTF_OF[self.weights], self.NEED_OF[self.weights]
         self.guard_route = "music-cuda-" + self.weights
+        if WINCUDA:
+            self.label = "TensorFold CUDA · native Windows"
 
     def environment(self) -> dict:
         env = dict(os.environ)
+        if WINCUDA:  # music3-generate.exe opens cublas64_13.dll itself: CUDA's arm64 runtime folder on PATH
+            cuda = windows_cuda.paths()["cuda_bin"]
+            env["PATH"] = os.pathsep.join([str(self.bin.parent), *([str(cuda)] if cuda.is_dir() else []), env.get("PATH", "")])
+            return env
         # the engine opens cuBLAS 13 itself (dlopen): the toolkit's folder, where the loader may not look
         cuda = [one for one in ("/usr/local/cuda/lib64", "/usr/local/cuda/targets/sbsa-linux/lib") if Path(one).is_dir()]
         if cuda:
@@ -563,6 +582,11 @@ class Cuda(voice.Served):
 
         if not SPARK:
             return "The CUDA route runs on a DGX Spark (Linux, CUDA)."
+        if WINCUDA:  # music3-generate.exe (TensorFold studio-1.2.2's Windows build, setup-windows-cuda.ps1 -Music)
+            self.bin = self.bin.with_suffix(".exe")
+            if not self.bin.is_file():
+                return ("MiniMax Music 3's TensorFold engine is not built in this install: songs run on ComfyUI's "
+                        f"MiniMax Music 3 nodes ({windows_cuda.setup_hint('music')} builds it).")
         self.bin = voice.located("music3-binary", self.bin, lambda p: os.access(p, os.X_OK))
         self.model = voice.located("music3-weights", self.model, has_weights)
         if not os.access(self.bin, os.X_OK):
@@ -580,7 +604,8 @@ class Cuda(voice.Served):
             return why
         free = voice.mem_available_gb()
         if 0 <= free < self.NEED_GB and not voice.comfy_up():
-            return (f"MiniMax Music 3 needs about {self.NEED_GB:.0f} GB of free memory and this Spark has {free:.0f} GB available "
+            who = "GPU" if voice.has_card_memory() else "Spark"
+            return (f"MiniMax Music 3 needs about {self.NEED_GB:.0f} GB of free memory and this {who} has {free:.0f} GB available "
                     "now (something outside the studio holds the rest).")
         return ""
 
@@ -608,8 +633,8 @@ class Cuda(voice.Served):
             return ""
 
     def stop_comfy(self) -> None:
-        subprocess.run(["bash", str(PACK / "spark" / "comfy.sh"), "stop"], capture_output=True, text=True, timeout=30,
-                       env={**os.environ, "PREFIX": str(PREFIX)})
+        subprocess.run(windows_cuda.comfy_argv("stop") if WINCUDA else ["bash", str(PACK / "spark" / "comfy.sh"), "stop"],
+                       capture_output=True, text=True, timeout=30, env={**os.environ, "PREFIX": str(PREFIX)})
 
     def estimate(self, seconds: float) -> int:
         return int((0 if self.loaded() else self.load_s) + seconds * self.RTF + 2)
@@ -650,7 +675,7 @@ class Cuda(voice.Served):
 
 class Metal(Cuda):
     """TensorFold's Metal port of MiniMax Music 3 on a Mac (``music3-generate --serve 1``, Zig + Metal, no Python;
-    fork branch ``upstream/music3-metal``, built by ``scripts/build-music3-metal.sh`` into ``$PREFIX/music3``). The
+    fork branch ``music3-metal-118`` on TensorFold 1.1.8, built by ``scripts/build-music3-metal.sh`` into ``$PREFIX/music3``). The
     same binary's protocol and lifecycle as the CUDA route; it needs an M5 or later (the DiT, prompt rows and DAV run on
     its tensor units), so an older Mac stays on ``mlx``. Not streamed. Measured on a Mac Studio M5 Ultra
     (docs/recipes/minimax-music3-metal.md on the engine branch): see ``load_s``, ``RTF`` and ``NEED_GB``."""
@@ -735,45 +760,107 @@ def choose() -> tuple[type, str]:
     return (Comfy, why) if why else (Cuda, "")
 
 
-def engine():
+def engine(name: str | None = None):
+    """A song engine's route: MiniMax Music 3's chosen route for "music3", YuE2's for "yue2", the default (default_engine)
+    for None."""
+
     global _engine, _chosen_why
+    if (name or default_engine()) == "yue2":
+        return yue2().engine()
     if _engine is None:
         route, _chosen_why = choose()
         _engine = route()
     return _engine
 
 
+ENGINES = {"yue2": "YuE2", "music3": "MiniMax Music 3"}  # the song engines, as the Music tab names them
+
+
+def yue2():
+    import music_yue2  # beside this file; it builds on the routes above
+
+    return music_yue2
+
+
+def default_engine() -> str:
+    """The engine of a song that names none: STUDIO_MUSIC_ENGINE, else the setting (presets.music_engine) when it names
+    one, else YuE2 where it is installed (Linux, an NVIDIA GPU, its environment and weights) and MiniMax Music 3
+    elsewhere (a Mac, or no YuE2). YuE2 named where it is not installed is MiniMax Music 3: a setting carried over from
+    another machine, or made before YuE2 was removed, never leaves the Music tab without an engine."""
+
+    told = (os.environ.get("STUDIO_MUSIC_ENGINE") or "").strip().lower()
+    try:
+        import settings
+
+        chosen = settings.load()["presets"].get("music_engine", "auto") if settings.HOME else "auto"
+    except Exception:  # noqa: BLE001 - a settings file that cannot be read leaves the platform's default
+        chosen = "auto"
+    chosen = told if told in ENGINES else chosen
+    if chosen == "music3":
+        return chosen
+    return "yue2" if SPARK and yue2().installed() else "music3"
+
+
+def loaded_engines() -> list:
+    """The song engines that exist in this process (each made on first use)."""
+
+    return [one for one in (_engine, yue2()._engine if "music_yue2" in sys.modules else None) if one is not None]
+
+
+def guard_route(params: dict) -> str:
+    """The memory guard's route for a queued song (memory_guard.music_check)."""
+
+    return getattr(engine(params.get("engine") or "music3"), "guard_route", "music")
+
+
 def room_mb() -> int | None:
     """While the CUDA engine is loaded: the memory this machine had before it loaded (MB), which any other job of the
     queue gets back, since a song's engine is unloaded before that job starts (as voice.room_mb). None otherwise."""
 
-    one = _engine
-    if not isinstance(one, Cuda) or not one.loaded() or one.before_gb < 0:
-        return None
-    return int(one.before_gb * 1024)
+    held = [int(one.before_gb * 1024) for one in loaded_engines() if isinstance(one, Cuda) and one.loaded() and one.before_gb >= 0]
+    return max(held) if held else None
 
 
 def release(why: str) -> bool:
     """Before any other job of this machine's queue (server.py): a loaded MiniMax Music 3 gives back its memory and the
     GPU lock. True when it was loaded."""
 
-    one = _engine
-    return bool(one is not None and one.release(why))
+    return any([one.release(why) for one in loaded_engines()])
 
 
 def state() -> dict:
     import capabilities
-    if not capabilities.renders(SPARK):
+    if not capabilities.renders(SPARK) and not WINCUDA and not MAC and sys.platform != "win32":
         detail = capabilities.refusal("music", SPARK) or {"error": "", "code": "unmeasured_configuration"}
         return {"available": False, "why": detail.get("error") or "", "code": detail.get("code"),
                 "route": None, "label": None, "credit": CREDIT, "licence": LICENCE,
+                "engine": "music3", "engine_names": ENGINES, "engines": {},
                 "seconds": SECONDS, "defaults": {k: v[0] for k, v in SAMPLING.items()},
                 "ranges": {k: v[1:] for k, v in SAMPLING.items()}, "sections": SECTIONS,
                 "caption_limit": CAPTION_LIMIT, "lyrics_limit": LYRICS_LIMIT, "rtf": None,
                 "music_db": MUSIC_DB, "duck_db": DUCK_DB, "server": None, "stream": False,
                 "stream_lead": {"no_stall_s": dict(NO_STALL_S), "margin_s": HOLD_MARGIN_S, "first_audio_s": 7.6},
                 "fallback": None, "weights": None}
-    one = engine()
+    """The default engine's state, as before engines were two, and each engine's under ``engines``."""
+
+    chosen = default_engine()
+    each = {name: engine_state(name) for name in ENGINES}
+    if WINCUDA:
+        from windows_runtime import gate_native_state
+        each = {name: gate_native_state(f"music ({name})", found) for name, found in each.items()}
+    return {**each[chosen], "engine": chosen, "engine_names": ENGINES, "engines": each}
+
+
+def engine_state(name: str) -> dict:
+    if name == "yue2":
+        mod, one = yue2(), yue2().engine()
+        why = one.check()
+        return {"available": not why, "why": why, "route": one.name, "label": one.label, "credit": mod.CREDIT,
+                "licence": mod.LICENCE, "seconds": mod.SECONDS, "defaults": {}, "ranges": {}, "sections": mod.SECTIONS,
+                "caption_limit": CAPTION_LIMIT, "lyrics_limit": LYRICS_LIMIT, "rtf": one.RTF, "music_db": MUSIC_DB,
+                "duck_db": DUCK_DB, "server": one.status(), "stream": False, "stream_lead": None, "fallback": None,
+                "weights": one.weights, "rate": 48000, "installed": not one.present() if SPARK else False}
+    one = engine("music3")
     why = one.check()
     return {"available": not why, "why": why, "route": one.name, "label": one.label, "credit": CREDIT, "licence": LICENCE,
             "seconds": SECONDS, "defaults": {k: v[0] for k, v in SAMPLING.items()}, "ranges": {k: v[1:] for k, v in SAMPLING.items()},
@@ -782,7 +869,7 @@ def state() -> dict:
             # played while it is made: the Mac's MLX engine only (Metal does not stream yet, nor a Spark on either route)
             "stream": bool(not why and hasattr(one, "streaming") and one.streaming()),
             "stream_lead": {"no_stall_s": dict(NO_STALL_S), "margin_s": HOLD_MARGIN_S, "first_audio_s": 7.6},
-            "fallback": _chosen_why or None, "weights": getattr(one, "weights", None)}
+            "fallback": _chosen_why or None, "weights": getattr(one, "weights", None), "rate": RATE}
 
 
 # ---------- text ----------
@@ -834,10 +921,14 @@ def checked(body: dict) -> dict:
     low, high = SECONDS
     if not low <= seconds <= high:
         raise HTTPException(400, f"a song is {low} to {high} seconds long")
-    params = {"caption": caption, "lyrics": lyrics, "seconds": seconds, "title": str(body.get("title") or "").strip()[:120]}
+    chosen = str(body.get("engine") or "").strip().lower() or default_engine()
+    if chosen not in ENGINES:
+        raise HTTPException(400, "engine is " + " or ".join(ENGINES))
+    params = {"caption": caption, "lyrics": lyrics, "seconds": seconds, "title": str(body.get("title") or "").strip()[:120],
+              "engine": chosen}
     try:
         params["seed"] = int(body.get("seed") if body.get("seed") not in (None, "") else random.randrange(1, 100000))
-        for key, (default, low, high) in SAMPLING.items():
+        for key, (default, low, high) in (SAMPLING.items() if chosen == "music3" else ()):
             value = body.get(key)
             value = default if value in (None, "") else (int(value) if key in ("steps", "top_k") else float(value))
             if not low <= value <= high:
@@ -847,18 +938,27 @@ def checked(body: dict) -> dict:
         raise HTTPException(400, "seed, steps, dit_cfg, ar_cfg and top_k are numbers")
     import capabilities
     blocked = capabilities.refusal("music", SPARK)
-    if blocked:
+    if blocked and not WINCUDA and not MAC and sys.platform != "win32":
         raise HTTPException(400, blocked)
-    why = engine().check()
+    if chosen == "yue2":
+        params = yue2().checked(body, params)
+    why = engine(chosen).check()
     if why:
         raise HTTPException(400, why)
     if SPARK:
         import memory_guard
 
-        # a loaded Drama 3 or MiniMax Music 3 server gives its memory back before the song loads (or is the song's)
-        held = [one for one in (voice.room_mb(), room_mb()) if one]
-        room = max([memory_guard.room_mb() or 0] + held) if held else None
-        found = memory_guard.music_check(seconds, available_mb=room, route=getattr(engine(), "guard_route", "music"))
+        # a loaded Drama 3 or MiniMax Music 3 server gives its memory back before the song loads (or is the song's).
+        # On a card that is the card's raw free before the engine loaded. The margin is applied once, and the
+        # check holds it to the RAM (memory_guard.card_pool). Bolt is not in this set. With STUDIO_ROOM_MB the
+        # budget is the RAM and the Spark's arithmetic below is kept.
+        if memory_guard.card_room_applies():
+            have = memory_guard.card_room_for_job([voice.room_mb(), room_mb()])
+            found = memory_guard.music_check(seconds, available_mb=have, route=guard_route(params), card=True)
+        else:
+            held = [one for one in (voice.room_mb(), room_mb()) if one]
+            room = max([memory_guard.room_mb() or 0] + held) if held else None
+            found = memory_guard.music_check(seconds, available_mb=room, route=guard_route(params))
         if not found["fits"]:
             raise HTTPException(400, found["reason"])
     params["asr"] = body.get("asr", True) is not False
@@ -872,19 +972,34 @@ def perform(job: dict) -> bool:
     params, folder = job["params"], HOME / "music"
     folder.mkdir(parents=True, exist_ok=True)
     wav = folder / f"{job['id']}.wav"
-    one = engine()
+    chosen = params.get("engine") or "music3"  # a song queued before engines were two is MiniMax Music 3's
+    one = engine(chosen)
+    for other in loaded_engines():  # the other song engine gives back its memory and the GPU lock first
+        if other is not one:
+            other.release(f"a song on {ENGINES[chosen]} needs the GPU")
     job["engine"] = one.name
-    measured = one.make(job, params, wav)
-    if measured is None:
+    try:
+        measured = one.make(job, params, wav)
+    except BaseException:
+        forget_song(wav)
+        raise
+    if measured is None or job.get("status") == "cancelled":  # cancelled while the engine was finishing: no take
+        forget_song(wav)
         return False
     if not wav.is_file():
-        raise RuntimeError("MiniMax Music 3 finished without writing its song")
+        raise RuntimeError(f"{ENGINES[chosen]} finished without writing its song")
     take = {"id": job["id"], "path": relative(wav), "title": params.get("title") or job.get("title"), "caption": params["caption"],
-            "lyrics": params["lyrics"], "seconds": params["seconds"], "seed": params["seed"], **{k: params[k] for k in SAMPLING},
-            "route": one.name, "created": time.time(), "duration": measured.get("audio_s"), "ended": measured.get("eos"),
+            "lyrics": params["lyrics"], "seconds": params["seconds"], "seed": params["seed"], **{k: params[k] for k in SAMPLING if k in params},
+            "route": one.name, "engine": chosen, "created": time.time(), "duration": measured.get("audio_s"), "ended": measured.get("eos"),
             "ar_s": measured.get("ar_s"), "dit_s": measured.get("dit_s"), "dav_s": measured.get("dav_s"), "load_s": measured.get("load_s"),
             "rtf": measured.get("rtf"), "total_s": measured.get("total_s"), "peak_memory_gb": measured.get("peak_memory_gb"),
-            "credit": CREDIT}
+            "credit": CREDIT if chosen == "music3" else yue2().CREDIT}
+    if chosen == "yue2":  # its score (ABC) and what it was made from, beside the song
+        score = measured.get("score")
+        take.update(plan_s=measured.get("plan_s"), semantic_s=measured.get("semantic_s"), nar_s=measured.get("nar_s"),
+                    vae_s=measured.get("vae_s"), tokens=measured.get("tokens"), cot=measured.get("cot"),
+                    instrumental=bool(measured.get("instrumental")), truncated=measured.get("truncated"),
+                    weights=measured.get("weights"), score=relative(Path(score)) if score and Path(score).is_file() else None)
     if measured.get("stream"):  # played while it was made: when the first sound came and when the player was let start
         take.update(streamed=True, first_audio_s=measured.get("first_audio_s"), play_s=measured.get("play_s"), lead_s=measured.get("lead_s"))
     if params.get("asr") and sung(params["lyrics"]) and qa.ready()["transcript"]:
@@ -896,11 +1011,21 @@ def perform(job: dict) -> bool:
             take["asr"] = {"skipped": str(error)[-200:]}
     elif params.get("asr") and sung(params["lyrics"]):
         take["asr"] = {"skipped": "no speech-to-text tool on this machine (pip install faster-whisper)"}
+    if job.get("status") == "cancelled":  # cancelled while Whisper listened
+        forget_song(wav)
+        return False
     wav.with_suffix(".take.json").write_text(json.dumps(take, indent=1) + "\n")
     job["outputs"] = [take["path"]]
     job["music"] = take
     job["progress"] = None
     return True
+
+
+def forget_song(wav: Path) -> None:
+    """A song that failed or was cancelled: what YuE2 wrote beside it (its score, ``<id>.yue2``) and a half-written wav."""
+
+    shutil.rmtree(wav.with_suffix(".yue2"), ignore_errors=True)
+    wav.unlink(missing_ok=True)
 
 
 def takes() -> list[dict]:
@@ -1038,11 +1163,12 @@ def music_state() -> dict:
 
 @router.post("/api/music/takes")
 def render(body: dict) -> dict:
-    """Queue a song: {caption, lyrics, seconds, seed?, steps?, dit_cfg?, ar_cfg?, top_k?, title?, asr?, live?}."""
+    """Queue a song: {caption, lyrics, seconds, seed?, engine? (yue2|music3), steps?, dit_cfg?, ar_cfg?, top_k?, title?, asr?, live?}
+    (steps, dit_cfg, ar_cfg and top_k are MiniMax Music 3's)."""
 
     params = checked(body)
     title = params["title"] or "Music: " + (sung(params["lyrics"])[:40] or params["caption"][:40])
-    return enqueue("music", title, params, engine().estimate(params["seconds"]) + (20 if params["asr"] else 0))
+    return enqueue("music", title, params, engine(params["engine"]).estimate(params["seconds"]) + (20 if params["asr"] else 0))
 
 
 @router.get("/api/music/takes")
@@ -1061,7 +1187,7 @@ def take_audio(take_id: str):
     target = inside(take["path"])
     if not target.is_file():
         raise HTTPException(404, "the song's file is gone (deleted to the trash folder?)")
-    return FileResponse(target, media_type="audio/wav", filename=f"minimax-music3-{take_id}.wav")
+    return FileResponse(target, media_type="audio/wav", filename=f"{'yue2' if take.get('engine') == 'yue2' else 'minimax-music3'}-{take_id}.wav")
 
 
 @router.get("/api/music/takes/{take_id}/live")
@@ -1098,5 +1224,5 @@ def attach(home: Path, runner, queue, within, short, measure, gate) -> tuple[API
     HOME, run, enqueue, inside, relative, media_seconds, qa = home, runner, queue, within, short, measure, gate
     (HOME / "music").mkdir(parents=True, exist_ok=True)
     if sys.platform == "darwin" and not SPARK:
-        threading.Thread(target=engine().check, daemon=True).start()  # the first look runs a process: not in a request
+        threading.Thread(target=engine("music3").check, daemon=True).start()
     return router, perform, soundtrack

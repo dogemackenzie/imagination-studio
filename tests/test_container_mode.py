@@ -347,3 +347,26 @@ def test_sigterm_stops_the_server(tmp_path):
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait(timeout=5)
         handle.close()
+
+
+@pytest.mark.parametrize("sound", [False, True])
+def test_container_exports_media_with_or_without_audio(tmp_path, monkeypatch, sound):
+    import shutil
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("requires ffmpeg and ffprobe")
+    monkeypatch.setenv("STUDIO_CONTAINER", "1")
+    monkeypatch.setattr(server, "HOME", tmp_path)
+    (tmp_path / "exports").mkdir()
+    source = tmp_path / "clip.mp4"
+    command = ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=320x240:r=24"]
+    if sound:
+        command += ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"]
+    command += ["-t", "1", "-c:v", "libx264", "-threads", "1", "-pix_fmt", "yuv420p", str(source)]
+    subprocess.run(command, check=True, timeout=30)
+    job = {"id": "container-export", "kind": "export", "status": "running", "log": "", "params": {
+        "width": 320, "height": 240, "clips": [{"path": "clip.mp4"}]}}
+    server.export(job)
+    output = tmp_path / job["outputs"][0]
+    duration, has_audio = server.media_seconds(str(output))
+    assert 0.9 <= duration <= 1.2 and has_audio
+    assert server.running["process"] is None

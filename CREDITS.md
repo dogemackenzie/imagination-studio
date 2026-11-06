@@ -63,6 +63,10 @@ H3's prompt form, the queue, and takes with their clips. Slate does much more th
 takes, punch-ups, the tone dial, reference and audio analysis, the stills library, per-model compiles for a dozen
 generators, and its MCP server. (Apache-2.0.)
 
+The Studio's portable Slate ZIP carries that project shape and its referenced media, original screenplay and
+shot lists. Its captioned contact sheets use **Pillow** and follow the Studio's scout/contact-sheet workflow by
+**Keys (drowzeys)**; it is not an export format claimed to be shipped by the original Slate app.
+
 The **Wasserman Sharp Spec** button and the QA gate behind it are his too: the locked recipe (1376x768, FastH3 at 8
 passes, seed 42, one pass with no upscale) and the two gates, a transcript of the spoken line and a three-frame
 contact sheet checked by a vision model, with one retake at the next seed. `app/qa.py` is this pack's writing of them.
@@ -102,12 +106,22 @@ repository at a pinned commit when the Studio is installed; none of their code i
   (H3 Contact Sheet, GPL-3.0). The idea is theirs: five still pictures packed where a five-step video would go, so
   the model's consistency along time becomes consistency between views. On a Mac the MLX engine packs and decodes
   the five views the same way (`h3_generate.py --sheet`), written from their description of it.
+- **keys-HDR LORA (the HDR finish):** the HLG curve of ARIB STD-B67 and ITU-R BT.2100 and the colour matrix of ITU-R BT.2087; **x265** by
+  MulticoreWare (GPL-2.0, through the machine's own FFmpeg, not shipped here) writes the HEVC. Its tone curve and split
+  toning were set against a clip posted on X by hi_personality, measured for brightness and tint only; none of that
+  clip is in the repo.
 - **Upscale:** the Video Upscaler LoRA and the H3 Video Upsampler node by dntpi (Sandpies), MIT; the latent upscaler
   network it enlarges with by LBH-123-AI (weights Apache-2.0); the upscale recipe it follows by bbaudio-2025; the
   guide layout and the training set of the LoRA by Alissonerdx.
 - **Remove a person:** the Person Remover LoRA and H3 Relay (the windowed removal with its green mask and its relay
   of history frames, GPL-3.0) by Akatz Labs (akatz-ai); the person is found and followed by SAM 3.1 from Meta, in
   the build Comfy-Org repackaged for ComfyUI, under the SAM License.
+- **Character Swap:** the idea and the app it comes from are Comfy Org's **Openjutsu** (comfy-openjutsu, MIT), built
+  on **Akatz Labs**' (akatz-ai) H3 Character Swap workflow (MIT) and their **Character Swap LoRA** version 1.5 (MiniMax
+  H3 Community License). It runs with **LightX2V**'s 8-step Turbo LoRA for MiniMax H3 (Apache-2.0), **SAM 3.1** from
+  Meta for the person (SAM License) and **MiniMax H3** Ref2VA. The settings are the ones Akatz Labs published; the
+  code is this pack's own, on ComfyUI's own nodes (no node pack). The first frame is drawn by FLUX3-K (Black Forest
+  Labs) where Openjutsu used a paid picture service.
 
 ## The Motion Previs tab: Sam Wasserman's Motion Previs Studio
 
@@ -125,6 +139,16 @@ stick-figure preview, Send to Blockout, an MCP control server, session restore. 
 move in words and the hand-off of one layer as a motion reference for MiniMax H3.
 
 ## The image model: the Qwen team
+
+**Stability AI** made **SD-Turbo** and its Adversarial Diffusion Distillation method, used for the optional
+512x512 Windows storyboard drafts (Stability AI Community License). **comfyanonymous, Comfy Org and the ComfyUI
+contributors** supply the checkpoint, conditioning, sampler, decoder and image-saving nodes. The contact-sheet
+layout follows the Studio's existing scout script by Keys (drowzeys).
+Stability AI's **SDXL-Turbo** was also evaluated; it is not a qualified Windows render route.
+
+The **Qwen team at Alibaba** also made **Qwen3-4B**, the optional small Windows writing brain (Apache-2.0).
+Its official Q4_K_M GGUF runs in **llama.cpp**, by **Georgi Gerganov and the ggml contributors** (MIT), using their
+pinned native Windows ARM64 CUDA release. The Studio downloads neither model nor runtime into the repository.
 
 The **Qwen team at Alibaba** released **Qwen-Image-2.1**: the 7B single-stream transformer with its causal text
 prefix, the 64-channel VAE and the Qwen3-VL text encoder, with code in diffusers. The image half of this pack is
@@ -181,7 +205,10 @@ that release. The weights are under the MiniMax H3 Community License; this pack 
 (3B active per token) on a Qwen3.5 backbone with a codebook-MTP audio decoder and the Fish S2 codec, with up to 16
 speakers in one text, voice cloning from a short clip, and direction tags. The local ports (TensorFold CUDA on the DGX
 Spark, TensorFold/MLX on the Mac) follow Fish Audio's and the SGLang-Omni team's reference implementation
-(Apache-2.0). Fish Audio Community License v1.0. **Built with Fish Audio.**
+(Apache-2.0). Fish Audio Community License v1.0. **Built with Fish Audio.** A take that goes quiet partway (a Drama 3
+stall: silence or a flat hum after the first sentence or two) is drawn again with the next seed; the check follows the
+opt-in silence guard of TensorFold's Drama serve (`--silence-mid-s`, `--silence-redraws`) by **Ash Hart** and the
+TensorFold contributors.
 
 ## The music model: MiniMax (MiniMax-Music3)
 
@@ -191,10 +218,31 @@ autoregressive model that writes the acoustic tokens, a DiT that renders them, a
 Comfy-Org's repackaging of MiniMax's release (Comfy-Org/MiniMax-Music-3), under the **MiniMax-Music3 Community
 License**: commercial use is allowed, a commercial product shows "MiniMax-Music3" in its interface, a company above
 US$20 million of yearly revenue needs MiniMax's written authorisation, and a hosted service keeps safeguards against
-misuse. On a DGX Spark it runs on **ComfyUI**'s own MiniMax Music 3 nodes and blueprint (Comfy Org, GPL-3.0); on a Mac
+misuse. On a DGX Spark it runs on TensorFold's native CUDA port (`music3-cuda-118` in the drowzeys/TensorFold fork,
+on the **TensorFold 1.1.8** release of Ash Hart and the TensorFold contributors since 4.2.0, 1.1.5 from 3.3.0), else on **ComfyUI**'s own
+MiniMax Music 3 nodes and blueprint (Comfy Org, GPL-3.0); on a Mac
 on TensorFold's native Metal port (Zig and Metal, on an M5 or later) or its MLX port (`music3-mlx` in the
 drowzeys/TensorFold fork), both following ComfyUI's reference code. The
 pack ships no weights. **MiniMax-Music3.**
+
+## The song model YuE2: Multimodal Art Projection (m-a-p) and the YuE2 authors
+
+**Multimodal Art Projection (m-a-p)** and the **YuE2 authors** (Ruibin Yuan, Jiahao Pan, Junyan Jiang and co-authors of
+"YuE2: Unifying Symbolic and Audio Music Generation at Frontier Quality", arXiv:2609.33757) made **YuE2**, the Music
+tab's default song engine on Linux with an NVIDIA GPU: from lyrics and a style it writes an editable score (melody and
+chords in ABC), then the song with vocals and accompaniment, 48 kHz stereo, through one AR-NAR Mixture-of-Transformers
+model (**YuE2-3B**) and its **YuE2-Vae** decoder. Its code, agent skill and documentation
+(github.com/multimodal-art-projection/YuE, run here from commit 1647252d in its own environment) are **Apache 2.0**;
+the skill's instrumental helpers, run from that checkout for an instrumental, are **MIT** (yue2-music contributors).
+The weights (huggingface.co/m-a-p/YuE2-3B and huggingface.co/m-a-p/YuE2-Vae) are **CC BY-NC 4.0 with the authors'
+additional individual creator permission**: personal users, content creators and musicians acting in an individual
+capacity may generate, publish, sell, license or otherwise monetize their outputs free of charge, with no fees or
+royalties; companies need a commercial licence from the authors; no illegal, harmful, deceptive or unethical use.
+YuE2's decoder carries code derived from Stability AI's stable-audio-tools (MIT) and NVIDIA's BigVGAN SnakeBeta (MIT).
+YuE2-3B reads its words with **qwen.tiktoken**, the tokenizer vocabulary of the **Qwen team** (Alibaba Cloud), which
+comes in the YuE2-3B download (the installer requires it); the Qwen team released it with Qwen under their Tongyi
+Qianwen licence, and it reaches this machine as the YuE2 authors distribute it, beside their weights. It is read by
+OpenAI's **tiktoken** (MIT), installed in YuE2's environment. The pack ships no weights and no tokenizer. **YuE2.**
 
 ## Sound effects and foley: Stability AI, and Ho Kei Cheng and the MMAudio authors
 
@@ -215,6 +263,10 @@ safetensors copies of MMAudio's weights. The studio clones it at a pinned commit
 (`spark/studio_mmaudio`) calls kijai's loaders' models and generate. On a Spark a sound effect runs on **ComfyUI**'s
 own Stable Audio nodes.
 
+**KEUM Myungchul** provides **python-soxr** (LGPL-2.1-or-later), the native resampler used by librosa.
+The Windows ARM64 foley setup builds it when a compatible wheel is unavailable, using the Microsoft
+compiler/SDK credited below; it does not replace the installed CUDA packages.
+
 ## Motion graphics: HeyGen's HyperFrames and GreenSock's GSAP
 
 **HeyGen** and the HyperFrames contributors made **HyperFrames** (Apache-2.0), which renders the Graphics tab's
@@ -222,6 +274,11 @@ titles, captions, slideshows and music videos: a web page seeked frame by frame 
 with FFmpeg. The motion in each template is written with **GSAP** by GreenSock (now part of Webflow), under its
 standard no-charge licence. Both are installed from npm at pinned versions by `scripts/setup-graphics.sh`; the pack
 ships neither. The browser is a Chromium already on the machine, else HyperFrames' own, and on a DGX Spark **Playwright**'s Chromium for arm64 (Microsoft, Apache-2.0).
+The bounded Windows graphics route reuses the person's installed **Microsoft Edge**, by **Microsoft**;
+it downloads neither Edge nor a separate browser and does not redistribute either.
+Missing Node.js is installed through **Windows Package Manager (winget)**, by **Microsoft** (MIT).
+Its Windows-only HyperFrames compatibility patch uses **Puppeteer**, by **Google and the Puppeteer contributors**
+(Apache-2.0), to check the browser headlessly in a temporary profile instead of opening the person's browser.
 
 ## Training your own LoRA: kohya-ss's musubi-tuner and ostris
 
@@ -272,7 +329,11 @@ Phosphene publishes. (Apache-2.0.)
 **Ash Hart** (ashhart) and the TensorFold contributors — **TensorFold**: the family and kernel structure this
 lives in, and the practice of reaching the M5 tensor units from `mx.fast.metal_kernel` that the int8 kernels
 are built on (`kernels/qwen/dense/v1/lane_qmm.py`). This pack pins TensorFold 0.6.5 with three commits on top.
-(Apache-2.0.)
+(Apache-2.0.) Since 4.2.0 the DGX Spark's music engine is built on the **TensorFold 1.1.8** release (its Zig + CUDA
+runtime, build and loaders; the music3 family on top is this pack's; 1.1.5 from 3.3.0), and so are the Mac's Metal music engine
+(`music3-metal-118`) and the Mac's Metal Bolt engine (`bolt-metal-118`, `libbolt.dylib` on TensorFold's Bolt lane
+backend; 1.1.5 from 3.3.1). The YuE2 song model's decode engine on the DGX Spark (`libtf_yue2.so`) is built the same way: on
+TensorFold 1.1.5's CUDA runtime and the music3 family's decode GEMVs, with this pack's yue2 family on top.
 
 ## Sol-Engine, Sol-Attn and Sol-H3: NVIDIA Research
 
@@ -327,8 +388,12 @@ notices). No weights are in this pack.
 
 **Mia (MiaAI-Lab)** made **Nemotron-3.5-Bolt-TensorFold-DGX-Spark** (MIT), the recipe that serves Bolt on one DGX Spark
 with TensorFold's native engine: the Bolt lane backend (`libbolt.so`, the packed-weight kernels, the LiLiCorr drafter
-run inside it) and the patches to TensorFold 46a08c18. The studio's CUDA engine is that build, copied out of Mia's
-image or the carrier by `spark/build-bolt.sh`; the trimmed settings it runs with (4 streams, 65,536 tokens, 2 GiB of
+run inside it) and the patches that register it in TensorFold. **ChriZzn** contributed the recipe's speed work (the
+TensorFold 1.1.0 rebase, the routed-expert ring, programmatic dependent launch, one Mamba state copy, the fp4 prompt
+projections). Since 4.2.0 the studio's CUDA engine is that recipe at 89e1c8a rebased onto TensorFold 1.1.8 (drowzeys/TensorFold
+branch `bolt-lilicorr-118`; on 1.1.5 as `bolt-lilicorr-115` from 3.3.3, with its first token sent before the drafter's first proposal and a turn's last cache mark
+kept at the prompt's end), installed by `spark/build-bolt.sh` from the release archive, the carrier or a source build
+with FFmpeg, libjpeg-turbo and **xgrammar**; the trimmed settings it runs with (4 streams, 65,536 tokens, 2 GiB of
 prompt cache) are the studio's. TensorFold is Ash Hart's and the contributors'; **llama.cpp** (Georgi Gerganov and the
 ggml contributors) runs Bolt on a Mac until TensorFold's Metal port of the engine lands.
 
@@ -339,6 +404,7 @@ machine; none of their code ships in this pack.
 
 - **Anthropic** — **Claude Code**.
 - **OpenAI** — **Codex** (the CLI, and the copy the ChatGPT desktop app carries).
+- **GitHub** — **GitHub Copilot CLI**.
 - **Google** — **Gemini CLI**.
 - **xAI** — **Grok CLI**.
 - **Nous Research** — **Hermes Agent**.
@@ -348,6 +414,45 @@ machine; none of their code ships in this pack.
   **Blender**.
 - The **LobeHub** icon set — the agents' marks on the page (unofficial, MIT; `app/static/brand/THIRD-PARTY-MARKS.md`).
 
+## The native Windows CUDA tier (RTX Spark N1X): TensorFold on Windows, NVIDIA, Microsoft, Zig
+
+The notification tray uses **Microsoft**'s **Windows Forms** and **PowerShell**, with Python's standard library for
+private launch control. No model or engine code runs inside the tray.
+
+The native tier runs the DGX Spark's render path on Windows 11 on Arm without WSL. Its engines are **TensorFold
+1.2.2** by **Ash Hart** and the TensorFold contributors (Apache-2.0), whose Windows platform support they build on, at
+the drowzeys/TensorFold branch `studio-1.2.2`: TensorFold's int8 H3 blocks as `tf_h3.dll` (the engine ComfyUI's
+`TensorFoldH3Blocks` node calls) and the Bolt lane, **Mia (MiaAI-Lab)**'s recipe with **ChriZzn**'s speed work, as
+`tensorfold-native.exe` + `bolt.dll` serving **NVIDIA**'s Nemotron 3.5 Bolt and its LiLiCorr drafter. They are built
+from source with **Zig** 0.17 (the Zig Software Foundation and contributors), **NVIDIA**'s **CUDA Toolkit 13.4 for
+Windows on Arm** (its redistributable archives: nvcc, the CUDA runtime, cuBLAS, NVRTC, nvJitLink, CCCL and NVVM, under
+NVIDIA's CUDA EULA, fetched from NVIDIA and never redistributed here) and **Microsoft**'s **Visual Studio 2022 Build
+Tools** (the MSVC ARM64 compiler and the Windows SDK), installed with Microsoft's **winget**. ComfyUI (**Comfy Org**
+and the ComfyUI contributors) runs the graphs on **NVIDIA**'s native Windows ARM64 PyTorch wheels; Microsoft's job
+objects own every process the tier starts, and the memory guard reads Windows' memory signals and **NVIDIA**'s CUDA
+and NVML counters. **Git for Windows** fetches the pinned sources, and **Hugging Face**'s **huggingface_hub** the models.
+
+On the same branch the tier builds TensorFold's **Fish Audio Drama 3** engine (`drama3-generate.exe` +
+`tensorfold_drama3.dll`, the fish_drama3 family) and its **MiniMax Music 3** engine (`music3-generate.exe`, the music3
+family) for Windows. The Library's actions, Character Swap and foley run their authors' own ComfyUI node packs there as
+on a DGX Spark (**MATLOWAI**'s H3 Contact Sheet, **dntpi / Sandpies**' H3 Video Upsampler, **Akatz Labs**' H3 Relay,
+**kijai**'s ComfyUI-MMAudio, with **Meta**'s SAM 3.1), and Looks -> Train a LoRA runs **kohya-ss**'s **musubi-tuner**
+in a venv of its own on Windows on Arm (its own Pillow fallback where opencv-python has no ARM64 wheel; **PyAV**,
+**bitsandbytes** and NVIDIA's PyTorch for Windows on Arm beside it). Finish runs **Mirage**'s **Tesseract** and
+**Tesseract Converter** from their windows-x86_64 releases through **Microsoft**'s x64 emulation in Windows 11 on Arm.
+
+## Windows ARM64 CUDA feasibility checks: NVIDIA and the PyTorch contributors
+
+**NVIDIA** publishes the native Windows ARM64 CUDA builds of **PyTorch, TorchVision and TorchAudio**, made by
+the **PyTorch contributors**. The experimental Windows GPU setup uses those wheels in an isolated environment;
+the small verification operations do not download models or qualify Studio rendering support.
+**Microsoft** provides the Win32 memory-pressure, commitment and job-object APIs used by the Windows diagnostic;
+**NVIDIA** provides NVML's dedicated-memory counters and CUDA's context-budget queries.
+**aio-libs**' **aiohttp** supplies the local progress WebSocket and targeted cancellation client.
+The explicit sound calibration uses **Stability AI**'s Stable Audio Open 1.0 and **Comfy Org / ComfyUI contributors**'
+checkpoint-loading helpers and existing audio nodes. Its GPU-first loader and peak receipt are calibration-only
+Studio additions, not changes to the downloaded ComfyUI source.
+
 ## The RTX Pro 6000 build, run on the card: August Sturm
 
 **August Sturm (@auguststurm)** ran the Studio's core install on an RTX Pro 6000 Blackwell, the first run on the card
@@ -356,12 +461,32 @@ DGX Spark and RTX Pro 6000 entries (`oneshot-setup-cuda.sh`), a compute card use
 studio on a second card. He also made **quitting the app stop that install's ComfyUI** (#119), so Ctrl-C frees the
 card on a DGX Spark and an RTX Pro 6000 alike, and the quit no longer ends in a traceback.
 
+## Two GPUs in one machine: David Low
+
+**David Low (@davidlowjw)** made one render split over two NVIDIA cards in the same machine (#184,
+`docs/two-gpus.md`): each sampler pass of the int8 FastH3 engine shared between the cards by tile, the MiniMax H3
+video decoder's chunks decoded on both from CUDA graphs, and the text encoder and decoders placed on the second card
+with ComfyUI's own Select CLIP / VAE Device nodes (Comfy Org, GPL-3.0, run as a separate program). The exchange
+between the cards lives in his TensorFold fork, **davidlowjw/TensorFold** `studio-two-gpus` (Apache-2.0, on Ash
+Hart's TensorFold), built by hand with `spark/build-engine.sh`. The decode runs ComfyUI's own `decode_temporal`
+unchanged and only does its chunks ahead on the cards: none of ComfyUI's code is copied.
+
 ## Bug reports from a film made in Slate: BTankut
 
 **BTankut (@BTankut)** made a 2-minute, continuity-first film entirely in Slate and reported what got in the way, each
 report with its cause and a fix (#51 to #60). Four are fixed from those reports (#121): the export keeps a clip's In
 point when Out is 0, the export size survives a redraw, the shot check's "+ timeline, trimmed to it" button shows, and
 Regenerate no longer sends the app's own "Regenerated at seed N" label to the brain as feedback.
+BTankut also tracked down why a DGX Spark on a newer NVIDIA driver refused clips with memory to spare (#59): the
+driver keeps a finished process's memory in its system memory pools, which the kernel counts nowhere. The memory
+guard now says so when it refuses, and the README gives the two fixes BTankut found.
+
+## The Qwen-Image-2.1-Turbo text encoder on a fresh Mac install: drgw5b7gzv-ship-it and gsp-agent
+
+**drgw5b7gzv-ship-it (@drgw5b7gzv-ship-it)** reported that a fresh Mac install could not make a picture with
+Qwen-Image-2.1-Turbo (#10). **gsp-agent (@gsp-agent)** found the cause (Hugging Face now ships the Turbo text encoder
+as one file with no index, and mflux's loader opens the index without looking) and wrote the workaround, an index
+built from the file's header, that the studio now makes itself.
 
 ## Platform and tools
 
@@ -370,7 +495,8 @@ Regenerate no longer sends the app's own "Regenerated at seed N" label to the br
 - **Qwen team (Alibaba)** — Qwen3-VL.
 - **Kijai**, **DeepBeepMeep**, **ddalcu** — the ComfyUI conversions, pruned checkpoints and MLX quants that the
   wider H3 ecosystem (and Phosphene's install) relies on.
-- **FFmpeg**.
+- **FFmpeg**; **BtbN and the FFmpeg-Builds contributors**, whose pinned native Windows ARM64 GPL build supplies
+  FFmpeg and ffprobe for the Windows preview. **VideoLAN and the x264 contributors** supply its H.264 encoder.
 - **OpenAI** — **Whisper**, and **SYSTRAN** — **faster-whisper**: the QA gate's and Voice's check of the spoken words.
 - **yt-dlp** contributors — Motion Previs reading a shot from a link.
 - **PyTorch**; **Hugging Face** — **diffusers**, **transformers** and **huggingface_hub**; **Patrick Kidger** and

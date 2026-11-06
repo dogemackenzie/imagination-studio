@@ -20,7 +20,7 @@ LINUX = bool(G.meminfo())
 
 
 def assert_room_matches(alive_server: bool) -> None:
-    """room_mb() against this machine. A Spark's room is its RAM. A discrete card's is the smaller of that and the card."""
+    """room_mb() against this machine. A Spark's room is its RAM. A discrete card's is the card's room."""
 
     info = G.meminfo()
     room = G.room_mb()
@@ -28,7 +28,7 @@ def assert_room_matches(alive_server: bool) -> None:
     ram = info["MemAvailable"]
     if alive_server:
         ram = max(ram, info["MemTotal"] - G.IDLE_MB)
-    expect = ram if card is None else min(ram, card + G.floor_mb(info.get("MemTotal")))
+    expect = card if card is not None else ram
     assert abs(room - expect) < 2000
 
 
@@ -111,7 +111,7 @@ def test_the_estimate_follows_the_measured_points():
 
 def test_another_programs_memory_counts_against_the_clip():
     found = G.check(1376, 768, 243, available_mb=IDLE - 30000, total_mb=SPARK_MB)  # a model server holding 30 GB
-    assert found["fits"] is False and "needs about" in found["reason"]
+    assert found["fits"] is False and "needs about" in found["reason"] and "this machine has" in found["reason"]
     near = found["nearest"]
     assert near["frames"] or near["size"]
     if near["size"]:
@@ -226,8 +226,13 @@ def test_the_app_refuses_before_the_job_is_queued():
     had_spark = server.SPARK
     server.SPARK = True  # admission is the Spark guard, including on a machine that is not one
     client = TestClient(server.app)
-    had = G.room_mb
+    had, had_device, had_held, had_lib = G.room_mb, G.device_room_mb, server.held_room, server.SPARK_ENGINE_LIB
     G.room_mb = lambda: IDLE  # an idle Spark, whatever this machine is doing now
+    G.device_room_mb = lambda: None  # a card reads its own room and would ignore the stand-in above
+    server.held_room = lambda: None
+    # an install without TensorFold's engine: the LoRA goes to ComfyUI's bfloat16 blocks, whatever engine this machine
+    # has built (one that merges LoRAs would fit the clip, and the refusal is what is tested)
+    server.SPARK_ENGINE_LIB = Path(tempfile.mkdtemp()) / "no-engine" / "libtf_h3.so"
     try:
         told = client.post("/api/estimate", json={"preset": "sharp", "quality": "fh8", "seconds": 5, "with_lora": True}).json()
         assert told["memory"]["fits"] is False and "What fits" in told["memory"]["reason"]
@@ -246,8 +251,69 @@ def test_the_app_refuses_before_the_job_is_queued():
         finally:
             server.lora_resolve = was
     finally:
-        G.room_mb = had
         server.SPARK = had_spark
+        G.room_mb, G.device_room_mb, server.held_room, server.SPARK_ENGINE_LIB = had, had_device, had_held, had_lib
+
+
+
+def test_a_refusal_names_memory_the_driver_holds():
+    """Issue #59: drivers from 590 on keep a finished process's memory in their pools, where no counter shows it."""
+
+    idle = "MemTotal: 127600524 kB\nMemFree: 113077964 kB\nBuffers: 485356 kB\nCached: 6624636 kB\nAnonPages: 1066736 kB\nSlab: 1993500 kB\n"
+    pooled = "MemTotal: 127600524 kB\nMemFree: 43077964 kB\nBuffers: 485356 kB\nCached: 6624636 kB\nAnonPages: 1066736 kB\nSlab: 1993500 kB\n"
+    assert G.unexplained_mb(G.meminfo(idle)) < G.UNEXPLAINED_IDLE_MB  # a worker Spark with nothing running
+    held = G.unexplained_mb(G.meminfo(pooled))
+    assert 70_000 < held < 76_000
+    had = G.smi, G.processes_mb
+    try:
+        G.smi, G.processes_mb = (lambda *query: [["NVIDIA GB10"]]), (lambda: {})
+        note = G.held_note(G.meminfo(pooled))
+        assert f"About {held / 1000:.0f} GB" in note and "NVreg_EnableSystemMemoryPools=0" in note and "R580" in note
+        assert G.held_note(G.meminfo(idle)) == ""
+        G.processes_mb = lambda: {1234: 60_000}  # a program on the GPU: its memory is its own, not the driver's
+        assert G.held_note(G.meminfo(pooled)) == ""
+        G.smi, G.processes_mb = (lambda *query: []), (lambda: {})  # no nvidia-smi answer: nothing can be told
+        assert G.held_note(G.meminfo(pooled)) == ""
+    finally:
+        G.smi, G.processes_mb = had
+
+
+def test_studio_room_mb_stands_in_for_the_cards_room_and_never_beyond_the_ram():
+    """A card smaller than the video models: STUDIO_ROOM_MB is the budget, capped by the machine's RAM room."""
+
+    had = G.meminfo, G.server_pid, G.device_room_mb, os.environ.get("STUDIO_ROOM_MB")
+    G.meminfo = lambda text=None: {"MemAvailable": 80_000, "MemTotal": 91_000}
+    G.server_pid = lambda: None
+    try:
+        G.device_room_mb = lambda: 25_000  # a 32 GB card
+        os.environ.pop("STUDIO_ROOM_MB", None)
+        unset = G.room_mb()
+        assert unset == 25_000  # the card's own room (the checks hold it to the RAM: card_pool)
+        assert G.card_room_applies()
+        os.environ["STUDIO_ROOM_MB"] = "70000"
+        assert G.room_mb() == 70_000  # used instead of the card's room
+        assert not G.card_room_applies()  # the checks keep the Spark's arithmetic on that RAM budget
+        os.environ["STUDIO_ROOM_MB"] = "200000"
+        assert G.room_mb() == 80_000  # never more than the RAM has
+        for bad in ("", "  ", "abc", "0", "-5", "7.5"):
+            os.environ["STUDIO_ROOM_MB"] = bad
+            assert G.room_mb() == unset, bad  # ignored
+        G.device_room_mb = lambda: None  # a Spark has no card to stand in for
+        os.environ["STUDIO_ROOM_MB"] = "70000"
+        assert G.room_mb() == 80_000
+    finally:
+        G.meminfo, G.server_pid, G.device_room_mb = had[:3]
+        if had[3] is None:
+            os.environ.pop("STUDIO_ROOM_MB", None)
+        else:
+            os.environ["STUDIO_ROOM_MB"] = had[3]
+
+
+def test_the_installer_has_an_escape_for_a_card_under_90_gb():
+    setup = (ROOT / "oneshot-setup-cuda.sh").read_text()
+    line = next(l for l in setup.splitlines() if 'die "video needs a card of about 96 GB' in l)
+    assert 'STUDIO_ALLOW_SMALL_VRAM:-0}" = 1' in line and "docs/rtx-5090.md" in line
+    assert '[ "$VRAM_GB" -ge 90 ]' in line  # the default is still the 90 GB floor
 
 
 if __name__ == "__main__":
@@ -255,3 +321,29 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             test()
             print("ok", name)
+
+
+def test_turbo_with_references_is_named_in_plain_words():
+    """The 4-pass Turbo speed-up counts as a LoRA to the guard but the person never picked one: a refusal of a reference
+    clip with it says "Turbo 4-pass speed-up", not "a clip with a LoRA"."""
+
+    told = G.check(1280, 736, 124, lora=True, references=True, adapter=True, engine=True, available_mb=20000, total_mb=128000)
+    assert not told["fits"] and "Turbo 4-pass speed-up" in told["reason"] and "with a LoRA" not in told["reason"]
+    plain = G.check(1280, 736, 124, lora=True, references=True, engine=True, available_mb=20000, total_mb=128000)  # a Spark's, on a Mac too
+    assert "a clip with a LoRA" in plain["reason"]
+
+
+def test_the_comfy_server_is_looked_for_on_the_port_set_now(monkeypatch):
+    """SPARK_COMFY_PORT was read once, at import: a studio on :8190 beside the tests was taken for theirs."""
+
+    monkeypatch.setenv("SPARK_COMFY_PORT", "1")
+    assert G.server_pid() is None
+
+
+def test_a_song_refused_on_a_card_says_the_card_to_a_tenth_and_what_lets_it_in(monkeypatch):
+    monkeypatch.setattr(G, "card_name", lambda: "NVIDIA GeForce RTX 5090")
+    monkeypatch.setattr(G, "ram_room_mb", lambda: 120_000)  # a machine with RAM to spare: the card is what runs out
+    said = G.music_check(300, available_mb=29_400, total_mb=64_000, route="music-yue2-int8", card=True)
+    assert not said["fits"]
+    has = f"GPU (NVIDIA GeForce RTX 5090) has {said['available_mb'] / 1000:.1f} GB"
+    assert has in said["reason"] and "24.6 GB at its peak" in said["reason"] and "STUDIO_ROOM_MB" in said["reason"], said["reason"]

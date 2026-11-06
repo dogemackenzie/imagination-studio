@@ -7,7 +7,10 @@ left ``queued`` or ``running`` was an interruption: the next start marks it
 """
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # native Windows; one byte is held for the same critical section
+    fcntl = None
 import json
 import os
 import threading
@@ -53,17 +56,23 @@ def _update(mutator) -> dict:
     file = path()
     file.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
-        fd = os.open(file, os.O_CREAT | os.O_RDWR, 0o644)
+        # Lock a stable sidecar: the JSON is atomically replaced, including on Windows.
+        fd = os.open(file.with_name(file.name + ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        acquired = False
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            else:
+                import msvcrt
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b" ")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            acquired = True
             raw = b""
-            while True:
-                block = os.read(fd, 1024 * 1024)
-                if not block:
-                    break
-                raw += block
-                if len(raw) > 8_000_000:
-                    break
+            if file.exists():
+                with file.open("rb") as source:
+                    raw = source.read(8_000_001)
             try:
                 data = json.loads(raw.decode("utf-8")) if raw.strip() else empty()
             except (UnicodeError, json.JSONDecodeError):
@@ -82,7 +91,12 @@ def _update(mutator) -> dict:
             os.replace(part, file)
             return data
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if acquired:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                else:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
             os.close(fd)
 
 

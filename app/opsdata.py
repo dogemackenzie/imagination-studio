@@ -14,7 +14,7 @@ import shutil
 from pathlib import Path
 
 INCLUDE_DIRS = ("projects", "uploads", "renders", "scouts", "exports", "slate")
-INCLUDE_FILES = ("settings.json", "job-history.json", "schema.json")
+INCLUDE_FILES = ("settings.json", "job-history.json", "schema.json", "shared-prompt.json")
 NOTE = "This copy is project and configuration data. It is not the queue. Restoring it does not run a job."
 
 

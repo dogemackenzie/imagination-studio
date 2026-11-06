@@ -1,7 +1,7 @@
 # Agent one-shot — Imagination Studio by keys+Wasserman, powered by TensorFold (Mac + DGX Spark)
 
 **Repo:** https://github.com/drowzeys/Imagination-Studio-by-keys-Wasserman  
-**Carrier image:** `ghcr.io/drowzeys/keys-tensorfold-studio:3.2.0` (one for both builds, not a runtime; for a Mac the TensorFold wheel + lock + render scripts + the native FastH3 engine, for a DGX Spark the prebuilt CUDA engines: H3, MiniMax Music 3, Fish Audio Drama 3 and Nemotron 3.5 Bolt). The Mac's native engine and Bolt on Metal also come from the v3.2.0 release (the same engine builds as 3.1.0)  
+**Carrier image:** `ghcr.io/drowzeys/keys-tensorfold-studio:4.2.1` (one for both builds, not a runtime; for a Mac the TensorFold wheel + lock + render scripts + the native FastH3 engine, for a DGX Spark the prebuilt CUDA engines: H3, MiniMax Music 3, Fish Audio Drama 3 and Nemotron 3.5 Bolt). The Mac's native engine also comes from the v3.2.0 release (the same engine build as 3.1.0), and Bolt on Metal from the v4.2.1 release (its symbol table stripped of build paths; H3 and Drama 3 come from the 4.2.1 carrier, the other engines are the same as 4.2.0's)  
 **Engine:** TensorFold 0.6.5 + H3 and Qwen-Image families @ `drowzeys/TensorFold` `a2b592fe`, own venv, int8 tensor-unit kernels
 
 ```bash
@@ -20,7 +20,7 @@ REF_IMAGES="face.jpg" bash scripts/video.sh "Use <Picture 1> as the person. The 
 On a **DGX Spark** (Linux, CUDA) the same `bash oneshot-setup.sh` installs the CUDA build (it hands over to
 `oneshot-setup-spark.sh`): needs `git`, `ffmpeg` and Docker (for the prebuilt engines; without it the CUDA toolkit's
 `nvcc`, 12.9 or newer, builds them), 125 GB of free disk for the core install (about 400 GB with `--all`). It takes
-the same flags as on a Mac (README, *Install flags*) plus `--train`; there is no `--turbo`, no `--app` and no 2x
+the same flags as on a Mac ([Install flags](docs/installation.md#install-flags)) plus `--train`; there is no `--turbo`, no `--app` and no 2x
 decoder there. Upgrade an install with `git pull && bash oneshot-setup.sh --upgrade`, then restart the app. `bash spark/comfy.sh stop` frees the models' memory after rendering.
 
 ## Install for a person and build the one-click app
@@ -28,7 +28,7 @@ decoder there. Upgrade an install with `git pull && bash oneshot-setup.sh --upgr
 Do these in order on the person's Mac, and report each result plainly.
 
 1. Check the machine: `uname -m` is `arm64`, `sysctl -n machdep.cpu.brand_string` names an M5-family chip (others run
-   without the int8 kernels, far slower: say so and ask before continuing), memory is 64 GB or more (128 GB if they want `--turbo`; on an M1 to M4 say plainly that video will be much slower than on an M5, and that it is untested there), and
+   without the int8 kernels, far slower: say so and ask before continuing), memory is 96 GB or more (48 GB is enough for `--image-only`, pictures only; 128 GB if they want `--turbo`; on an M1 to M4 say plainly that video will be much slower than on an M5, and that it is untested there), and
    `df -h ~` shows 185 GB free (250 GB with `--turbo`). Stop and report if memory or disk falls short.
 2. `brew install python@3.11 uv ffmpeg` (install Homebrew first only with the person's agreement).
 3. Tell the person the download sizes and licenses before starting: Qwen-Image-2.1 33 GB (Qwen Research License,
@@ -164,6 +164,11 @@ Rules:
   prompts the app writes, for the picture or the sound: a clip without lines is told `QUIET_PICTURE` ("Mouths stay
   closed.", only where the shot has people) and `QUIET_SOUND` in `app/server.py`, a locked camera is "a locked, still
   camera" (`MOVES` in `app/slate.py`). The tests hold a compiled prompt to the app's own check with `OWN` emptied.
+  A text or first-frame prompt handed to `scripts/video.sh` or `spark/video.sh` with no spoken `<d>` line and no
+  `overall_soundscape:` heading is given that same line under the heading (`ensure_ambient` in `app/negation.py`).
+  The user's own sentences are not changed. A leading "For the target video" paragraph stays ahead of the heading.
+  Leave the prompt as written when it has a reference (`REF_IMAGES`, `REF_VIDEOS`, `REF_AUDIOS`, or a `<Picture>`,
+  `<Video>` or `<Audio>` tag), when `REF_PLAIN=1`, or when `REF_VIDEO_SOUND=1` (that sound may hold speech).
 - Slate (`app/slate.py`, `app/static/slate.js`): a shot's `intent` never goes into the prompt. A sheet of the bible is
   changed in place (`SL_BIBLE` and the `update_*` actions): never add a second one with the same name, the id is what
   shots cast. A slot in bars (`tf.bars`, with `tf.song` on the project) sets the clip's frames through
@@ -183,13 +188,14 @@ Rules:
   new measurements. A failed check never fails the job; the retake at the next seed is the user's choice.
 - On a DGX Spark a crop (the 720p preset) is made inside the workflow (`crop_frames` in `spark/spark_generate.py`),
   not with ffmpeg afterwards. What needs ffmpeg is refused when it is queued (`without_ffmpeg` in `app/server.py`).
-- DGX Spark memory (`spark/memory_guard.py`; the README's *The memory guard*): a clip is checked before it is queued
+- DGX Spark memory (`spark/memory_guard.py`; [The memory guard](docs/installation.md#the-memory-guard-dgx-spark)): a clip is checked before it is queued
   (`memory_of` in `app/server.py`) and again in `spark_generate.py` before anything loads, and the guard stands beside
   every server `comfy.sh` starts. Never start ComfyUI another way. With `SPARK_GOVERNOR` (a machine-wide workload
   governor, `spark/workload.py`) `comfy.sh` runs the server through `spark/managed_comfy.py`, which starts the same
   guard (and its plain-loop fallback) beside it inside a reservation, and `start_gate.py` runs before every submission;
   `DRAMA3_MANAGED_GUARD=1` does the same for Drama 3 (`spark/managed_voice.py`). Its limits add to the guard's, never
-  replace or lower them; unset, nothing of it runs. `ESTIMATES`, `MEASURED_ROWS` and `MEASURED_PIXELS`
+  replace or lower them; unset, nothing of it runs. `SPARK_PROGRESS_FILE` (`spark/progress_file.py`, off by default)
+  lets such a governor show what a clip is doing: two lines, passes and engine, then the stage, replaced whole. `ESTIMATES`, `MEASURED_ROWS` and `MEASURED_PIXELS`
   are measurements, one route each. A LoRA on FastH3 is merged into TensorFold's int8 engine (`TensorFoldH3Blocks`
   takes the block projections' patches off ComfyUI and calls `tf_h3_set_weight`; route `int8-lora`, measured to
   1376x768 at 243 frames); on ComfyUI's bfloat16 blocks (an engine without that symbol, `--engine comfy`, Ref2VA,
@@ -197,9 +203,9 @@ Rules:
   there and nobody knows why from its logs. Never merge a LoRA into the saved `.tf-int8` copy. Raise them only by measuring from below on a worker Spark, in small steps,
   under a second watchdog that kills your own server at 25 GB available; never by trying the size that failed, and
   never on a machine with `vm.panic_on_oom=1`. Do not lower the floor to make a job fit.
-- More than one DGX Spark (`app/sparks.py`, `app/static/sparks.js`, `docs/multi-spark.md`): a job's `sparks` (1 to
-  `LIMIT`, 8) is how many machines it may use, this one counted; the app uses what is there and says so. Only single
-  clips (`video` jobs) go to a worker, one per Spark at a time, through the worker's own job API over an ssh tunnel
+- More than one DGX Spark (`app/sparks.py`, `app/static/sparks.js`, `docs/multi-spark.md`): a job's `sparks` counts
+  participants including the head. The remote-only limit is `LIMIT`, 5; local workers can raise the combined chooser
+  to 8. Only single clips (`video` jobs) go to a worker, one per worker at a time, through its own job API over an ssh tunnel
   the app opens and closes itself: a worker's app listens on its own 127.0.0.1 and is never opened to the network, and
   nothing here runs as root, edits `/etc` or shares a folder. A worker renders only with this Spark's code (the files
   of `CODE`, compared by hash; *Update and start* sends them with rsync) and its own memory guard, which is asked
@@ -212,7 +218,102 @@ Rules:
   a Spark the Mac reaches that logs in to the worker with its own key (`Relay`: a socket in `~/.cache/studio-sparks`
   there, ended with the Mac's ssh or its heartbeat). Never add the Mac's key to a worker for it, and never open the
   relay to a network.
-- Voice (`app/voice.py`, `app/static/voice.js`, README *Voice (Fish Audio Drama 3)*): Fish Audio Drama 3 runs on this
+- keys-HDR LORA, the HDR finish (`app/hlg.py`, the Library action `hlg`): processor and ffmpeg only, never under the GPU lock, numpy only (no OpenCV in the Studio's venv). It is a grade of an 8-bit SDR clip into BT.2020 / HLG: do not describe it as recovered detail or as what the model made. `TARGET` and `BANDS` are one look chosen by eye, not a standard. One curve for the whole clip: fit per frame or per shot, it flickers or jumps at cuts. A clip already HLG or PQ is refused.
+- RTX Spark N1X on Windows is native only: there is no WSL version (removed 2026-11-06); never add one back or send a
+  job to WSL. The one-shot (`oneshot-setup-rtx-spark-n1x.ps1`, `docs/rtx-spark-n1x.md`) installs natively (`-Native` is
+  an accepted no-op) and registers only the `native` desktop backend; `scripts/windows-desktop.py` ignores an older
+  install's `wsl` registration and drops it at the next registration. The taskbar pin is Windows 11's taskbar layout
+  policy (append); never claim a pin API. `memory_guard.n1x()` (STUDIO_N1X=1 or the GPU name) is the Linux guard's
+  N1X mode, kept for a Linux install on that card: the carve-out is the pool and `guard_mode()` is "warn"; a DGX Spark
+  stays "strict" (an OOM there can take the machine down); never make warn the default where RAM is the pool.
+- N1X memory on Windows: the firmware splits it (about 98 GB GPU, 30 GB Windows; no BIOS setting). ComfyUI's dynamic VRAM
+  loader streams mapped weights into the GPU, and the read pages stay in ComfyUI's working set: `comfy_win.Relief` trims
+  that working set (`EmptyWorkingSet`) when host pressure appears and stops ComfyUI only if the pressure outlasts
+  `TRIM_GRACE_S`. Never relax commit or GPU floors this way, and do not switch to `--highvram`: the classic loader builds
+  the whole model in Windows' RAM first.
+- Unified native Windows runtime (`app/windows_runtime.py`, `app/windows_cuda.py`, `spark/windows_scripts.py`, `spark/comfy_win.py`,
+  `scripts/setup-windows-cuda.ps1`, `oneshot-setup-rtx-spark-n1x.ps1`, docs/rtx-spark-n1x.md *How the native Studio works*):
+  one Windows experience with per-feature/backend dispatch. `windows_cuda.active` detects the shared GPU Python/ComfyUI
+  core, not an app-wide capability tier; `h3_why_not` alone enforces H3's DLL and `MIN_POOL_MB` measured-pool requirement.
+  Do not make unrelated images, audio or CPU features depend on H3. Standalone native engines select Windows binaries
+  independently of the ComfyUI core. `-Preview` remains a launcher compatibility alias; the environment
+  `STUDIO_WINDOWS_TIER=preview` is only a legacy test/debug backend override. Never run a
+  Linux script there: `windows_cuda.translate` maps `bash scripts/X.sh` to the Python port and refuses the rest, and a
+  kind without a port is refused when queued with its reason (`NOT_NATIVE`), never sent to WSL. Keep
+  `windows_scripts.py` in step with the bash scripts it ports (same checks, same words). ComfyUI is owned by handle
+  (`comfy_win.py`: a job object, private app-session hash, recorded id and creation time, a stop file), never by name or port.
+  Automatic reuse/stop must match the owning session; restart its own backend when the Python environment changes,
+  preserving isolated Foley dependencies and legacy shared environments. Keep ownership keys out of public state,
+  URLs, logs and job parameters. The server stands
+  under `windows_memory.pressure`; it leaves the render's job object (breakaway) so it stays warm. Off Windows nothing
+  of it runs (`active()` is False without a read). Drama 3 is wired only where `drama3-generate.exe` and
+  `tensorfold_drama3.dll` exist, MiniMax Music 3's engine where `music3-generate.exe` does. Every Spark job kind has a
+  port (`NOT_NATIVE` is empty); the installer's parts (`windows-cuda-setup.py`: `CHECKED`, `NODE_PACKS`) carry the
+  Spark scripts' own pins and SHA-256s, which `tests/test_windows_cuda.py` holds in step. Never `os.kill(pid, 0)` on
+  Windows (signal 0 is CTRL_C_EVENT there): `windows_cuda.pid_alive`. Tests isolate physical memory and runtime
+  inventories; `test_windows_runtime.py` simulates 64/80/128 GiB. Never present those simulations as hardware measurements.
+  Setup is component-driven; `setup-windows-cuda.ps1 -Parts image -PlanOnly` performs no install/probe, and image-only
+  setup does not build H3 or obtain its compiler/toolkit. Foley uses its isolated environment.
+- Independent Windows CPU features (`app/windows_features.py`, `scripts/check-windows-features.ps1`): HDR grading
+  and local Tesseract Finish can qualify without H3 or a native CUDA-tier record. Keep their local receipts tied to
+  hardware/runtime/code, ten-second 720p/24 fps scopes, 4 GiB owned-job cap, low-memory supervision and API/UI/queue
+  agreement. Installed files or advertised RAM alone never constitute verification evidence.
+- Windows qualification controls (`windows_runtime.mode`, `/api/feature-checks/mode`): below 128 GiB installed
+  physical RAM gating/badges are on and locked; unknown capacity fails closed. At 128 GiB+ default off, optional.
+  Off disables evidence gating and badges only: diagnostics remain visible and individual implemented checks run.
+  Never bypass prerequisites, recipe bounds, H3 policy or live admission; do not fabricate passed evidence.
+  Feature checks distinguish installation, verification, current contention and capacity, with measured/estimated/
+  unknown requirements. Native image memory is unknown until measured; model download bytes are not RAM needs.
+- GPU telemetry: NVIDIA's N1X driver returns DLA/NPU rows from `--query-gpu`. Filter positive `GPU-` UUIDs before
+  counting or averaging devices; do not turn one RTX Spark plus its NPU into two GPUs. Keep real multi-GPU readings.
+- Manual UI verification uses the user's real running app. Do not start alternate/hidden app instances or rerun
+  expensive model qualifications unless explicitly requested. Keep automated unit fixtures isolated, and target
+  validation to changed behavior rather than repeating already completed feature verification.
+- Qualification update policy (`app/feature_checks.py`, `app/windows_qualification.py`): balanced by default;
+  routine runtime/source/tool updates retain dated evidence with `runtime_updated`, never pretend it is a new test.
+  `STUDIO_QUALIFICATION_STRICT=1` opts into exact provenance matching. Requalify model/recipe/hardware-profile,
+  core Python ABI/Torch/NumPy/CUDA-family or explicit execution-contract breaks. Bump `RUNNER_CONTRACT`,
+  `GPU_CONTRACT` or `WINDOWS_QUALIFICATION_CONTRACT` for incompatible execution/safety changes, not UI/bookkeeping.
+  A model timestamp change calls for cached checksum verification, not another render. Baseline progressive cards
+  (`app/windows_baseline_checks.py`, `scripts/windows-baseline-check.py`) reuse native receipts/checkers; failed or
+  cancelled reruns must not remove them. GPU qualification drains the warm owned backend before execution.
+- Independent Windows Foley (`app/windows_foley.py`, `scripts/setup-windows-foley.ps1`): pinned MMAudio in
+  `foley-gpu-venv`, source/weights shared but baseline GPU/UI packages isolated. Both restore stages use the GPU
+  manifest and its wheel source; repeat setup and read-only verification must work without manual pip repair.
+  Qualification is local 1-5 s / 24 fps, 25 passes / CFG 4.5, 360-row analysis (width at most 660), original video
+  copied. Keep 12/12/16 GiB tensor/process/job caps, two-second freshness, OS signals and 2 GiB dedicated reserve.
+  Bounded warm image/sound and cold Foley use UUID/LUID-bound WDDM adapter usage plus identity-validated owned
+  handles, not busy-model HTTP/NVML polling or another process's CUDA allocator budget. Missing/invalid/stale
+  counters refuse; never sum dedicated, shared and host pools or relax guards to qualify a recipe.
+- Local discrete NVIDIA GPUs (`app/local_gpus.py`, `docs/rtx-pro-6000.md`): at most four per Studio, including its
+  explicitly selected head. Persist worker UUIDs and pin CUDA by UUID, keeping a validated numeric index for guard
+  queries. Refuse a stale index after reordering; never substitute another card for a missing UUID. Display workers
+  need explicit consent. An unticked but running worker still occupies a slot. Never kill a process merely because
+  its port, GPU or PID matches: private launch identity
+  and PID/start identity are required. Local child APIs require their private key even on loopback; never expose it
+  in public state, URLs or logs. Children do not start workers, schedules, discovery, captions or source updates.
+  Core runtime and weights are shared; worker homes and optional LoRA registries remain separate.
+  Start shared-RAM admission only with a running local worker, preserving the single-card queue. Honor
+  `memory_guard.floor_mb` / `SPARK_MEMORY_FLOOR_MB` and measured peak/error budgets. The plain int8 video host envelope
+  is measured separately on a 96 GB card; outside its bounds retain the conservative unified estimate.
+  Credit only identity-validated processes' anonymous PSS with an exact matching `comfy.kind` or private native
+  model/weight-route marker, never file cache or unrelated processes. Recompute each active reservation's outstanding
+  growth; unknown kinds run exclusively with FIFO admission. Fail impossible or stalled admission instead of waiting forever. Default leases/ledger use
+  `~/.cache/studio-gpus` regardless of `XDG_RUNTIME_DIR`; explicit overrides must agree between Studios.
+  Cancel and drain detached owned running work before releasing ownership; keep queued Director takes intact.
+  Shutdown has a deadline and retains leases for undrained work; successful jobs keep model servers warm.
+  Required placement never falls back; saved placement applies only to video, and preflight asks the selected worker.
+  Tests isolate GPU runtime directories and inventory; actual hardware probes require `STUDIO_TEST_HARDWARE=1`.
+  Three/four-card cases are deterministic simulations, not physical throughput measurements.
+- Two GPUs in one machine (`spark/gpus.py`, `spark/tensorfold_h3/decode2.py`, `tp.py`, `spark/studio_split_h3`,
+  `docs/two-gpus.md`): only with `STUDIO_GPUS` (`memory_guard.paired_gpus()`); two visible cards alone never pair, and
+  without it nothing is installed or patched (comfy.sh copies `studio_split_h3` only when paired; decode2 replaces no
+  ComfyUI class method, it gives one decoder instance stand-ins for one decode). Never copy ComfyUI source (GPL-3.0)
+  into this Apache-2.0 repo: call its methods. The guard counts paired cards as cards x the smallest card's free
+  memory only when the engine exports `tf_h3_tp_init` (`memory_guard.tp_engine()`), else the head's card alone;
+  one-card engines (Drama 3, Bolt, Music 3) read `head_free_mb`. `STUDIO_DECODE_SPLIT=self` runs the two-card decode
+  path on one card for a byte check. Our Sparks have one GPU each: the two-card path is the contributor's measurement.
+- Voice (`app/voice.py`, `app/static/voice.js`, [Voice](docs/audio-guide.md#voice-fish-audio-drama-3)): Fish Audio Drama 3 runs on this
   machine only, as a TensorFold process outside the app, never imported into the app's venv. Never call Fish Audio's
   cloud API. `DRAMA3_BACKEND=mlx|cuda` (`mlx` on a Mac, `cuda` on a DGX Spark). Both engines run as a persistent
   server speaking one protocol (`Served`): `python -m tensorfold.drama3 --serve` in `$DRAMA3_VENV` (drama3-mlx
@@ -241,7 +342,9 @@ Rules:
   Mac on flux3-mlx in `$PREFIX/flux3-venv`, never in the Studio's venv. Edit a picture takes `image_model` too
   (`app/picture_edit.py`, `IMAGE_MODEL` to `scripts/edit.sh`): FLUX3-K edits are `flux3_workflow` in `spark/spark_edit.py`
   (ReferenceMultiLatent, upsampler with the i2i prompt) and `flux3_edit.py` on a Mac; LoRAs, angles and `base` are
-  Qwen's and a FLUX3-K edit refuses them. FLUX Kommunity
+  Qwen's and a FLUX3-K edit refuses them. Quick Edit (`app/static/quick.js`, the Image room's third tab) is the same
+  `edit` job with nothing to set but the model (`image`, `prompt`, a new `seed` a turn, `size: "source"`,
+  `image_model`): keep it that way, the settings are the model's own. FLUX Kommunity
   License: say so when asked about commercial use, and do not redistribute the weights.
 - MOSS-Image (`moss-image` in `IMAGE_MODELS`, `oneshot-setup-spark.sh --moss`, `moss_workflow` in
   `spark/spark_generate.py`): OpenMOSS's model, Apache 2.0, inside ComfyUI's workflow (v0.42.0 and
@@ -261,12 +364,12 @@ Rules:
   measured as the reason a run failed or was killed: keep them. The server is stopped after every job
   (`mac_release`, `MAC_COMFY_KEEP=1` keeps it) and holds a kill-guard (`MAC_COMFY_GUARD_GB`, 16). The turnaround sheet
   stays the MLX engine's.
-- Music (`app/music.py`, `app/static/music.js`, README *Music (MiniMax Music 3)*): MiniMax-Music3 makes a song from
+- Music (`app/music.py`, `app/static/music.js`, [Music](docs/audio-guide.md#music-minimax-music-3)): MiniMax-Music3 makes a song from
   lyrics (section tags) and a style caption, on this machine only, never imported into the app's venv. The tab, every
   song and any page that plays one show "MiniMax-Music3" (its licence requires it in a commercial UI): keep it. On a
   Mac it is TensorFold's MLX port (`music3-mlx`, pinned in `scripts/setup-music.sh`, `oneshot-setup.sh --music`) as a
   persistent `--serve` process (`music.Mlx`, voice's `Served`); on a DGX Spark TensorFold's CUDA port
-  (`music3-generate --serve 1`, branch `music3-cuda` 6b714531, `spark/build-music3.sh` into `$PREFIX/music3`, carried
+  (`music3-generate --serve 1`, branch `music3-cuda-118` 8cd08c83, the family on TensorFold 1.1.8 since 4.2.0, `spark/build-music3.sh` into `$PREFIX/music3`, carried
   prebuilt in the carrier's `spark-music3`; `music.Cuda`, the same `Served` protocol; int8 by default, `MUSIC3_WEIGHTS=bf16`;
   `MUSIC3_CUDA_BIN`, `MUSIC3_MODEL`) where its binary and the weights are, else ComfyUI's own nodes through
   `spark_generate.py music` (`music_workflow`, the blueprint's layout), never standalone code; `MUSIC3_BACKEND=cuda|comfy`
@@ -282,7 +385,7 @@ Rules:
   `start_s` (the measured no-stall start, `NO_STALL_S`, and `HOLD_MARGIN_S`) and `lead_s`; those are measurements, change
   them only with new ones. The kept song is the engine's finished WAV. A Spark does not stream, on the CUDA engine or ComfyUI's route.
   Lyric accuracy is Whisper's rough count on sung words.
-- The brain engine (`app/bolt.py`, `app/bolt_leash.py`, README *The brain engine*): NVIDIA Nemotron 3.5 Bolt run by
+- The brain engine (`app/bolt.py`, `app/bolt_leash.py`, [The brain engine](docs/audio-guide.md#the-brain-engine-nvidia-nemotron-35-bolt)): NVIDIA Nemotron 3.5 Bolt run by
   the Studio as the brains' local server, the lifecycle of Voice and Music: loaded on the first brain or agent request
   (`bolt.request`) on a loopback port, under the leash (it ends with the app) and a kill-guard (`BOLT_GUARD_GB`, 8;
   MemAvailable, vm_stat on a Mac), unloaded after `BOLT_IDLE_S` (600, `never` allowed) and **before any other local
@@ -293,9 +396,10 @@ Rules:
   unloaded), and no idle unload runs while a turn is open (`bolt.turn`). Do not make the render wait for the turn: the
   turn waits for its clip in `wait_for_jobs`, so that deadlocks. It never takes `~/studio-gpu.lock.d` (a resident brain
   must not hold the updater or the render scripts). `BOLT_BACKEND=cuda|metal|llamacpp|external`: `cuda` is Mia's
-  recipe (MiaAI-Lab/Nemotron-3.5-Bolt-TensorFold-DGX-Spark, MIT, TensorFold 46a08c18 + patches), installed by
-  `spark/build-bolt.sh` into `$PREFIX/bolt`, never run in Docker; `metal` is TensorFold's Metal port (branch
-  `nemotron-bolt-metal`, same command line) when built into `$PREFIX/bolt-metal`; `llamacpp` only when set (a Mac may
+  recipe (MiaAI-Lab/Nemotron-3.5-Bolt-TensorFold-DGX-Spark 89e1c8a, MIT) rebased onto TensorFold 1.1.8 (drowzeys/TensorFold
+  `bolt-lilicorr-118`, since 4.2.0; `bolt-lilicorr-115` on 1.1.5 from 3.3.3), installed by `spark/build-bolt.sh` into `$PREFIX/bolt` (the previous engine kept in
+  `$PREFIX/bolt.previous`), never run in Docker; `metal` is TensorFold's Metal port (branch
+  `bolt-metal-118` on TensorFold 1.1.8 since 4.2.0, same command line), installed into `$PREFIX/bolt-metal` by `scripts/setup-bolt.sh`; `llamacpp` only when set (a Mac may
   run Bolt in its own llama.cpp service). The engine serves when the brains' address is empty or `studio:bolt`; a
   typed address stays external. Weights: NVIDIA's checkpoint a326822a and LiLiCorr drafter 4c6a5613
   (`scripts/setup-bolt.sh`, `--bolt`), OpenMDW 1.1. `NEED_GB`, `RESIDENT_GB` and `MAC_PEAK_GB` are measurements:

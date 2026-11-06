@@ -13,7 +13,8 @@ timed envelope wherever a clip or the narration has sound (the dialogue) and fad
 scene of its own, made of native Tesseract layers (a card, the title, a line and the subtitle) that fade and rise in.
 Captions are the words a local speech-to-text model (faster-whisper) hears; without one they are left out, never made up.
 
-Tesseract runs on macOS, Windows and Linux x86_64, not on Linux ARM: on a DGX Spark the cut is finished on the computer
+Tesseract runs on macOS, Windows (on Windows on Arm, its x86_64 build through Windows' x64 emulation) and Linux x86_64,
+not on Linux ARM: on a DGX Spark the cut is finished on the computer
 set as the remote host in Settings > Connections (Brains & tools), the Mac beside it, over ssh. The clips are copied to a
 folder of their own there, the project is built and rendered there, and the results come back. The Studio never changes
 Tesseract's usage-count setting, and sends no attribution of its own.
@@ -40,7 +41,10 @@ from pathlib import Path
 KINDS = ("finish",)
 TSRCT_VERSION = "0.4.0"        # the release Tesseract's own skills pin (fxSchemaVersion 77)
 CONVERTER_VERSION = "0.3.0"    # Tesseract Converter built on the same FX schema
-SETUP = "bash scripts/setup-finish.sh"
+# natively on Windows: scripts\setup-windows-finish.ps1 (the windows-x86_64 release; on Windows on Arm it runs through
+# Windows' own x64 emulation)
+SETUP = ("powershell -ExecutionPolicy Bypass -File scripts\\setup-windows-finish.ps1" if sys.platform == "win32"
+         else "bash scripts/setup-finish.sh")
 # the song's level under the cut and how far it dips under the dialogue, in dB, for each mix
 MIXES = {"dialogue": (-18.0, 12.0), "balanced": (-10.0, 12.0), "music": (-5.0, 6.0)}
 SIZES = ("720p", "1080p", "4k")
@@ -56,9 +60,9 @@ REMOTE_PATH = 'PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"; e
 PROBE_TTL = 60
 # the fonts the title card and captions use (setup-finish.sh, SIL Open Font License), then ones the computer has
 FONTS = {"title": ("InstrumentSerif-Regular.ttf", "/System/Library/Fonts/Supplemental/Georgia.ttf",
-                   "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"),
+                   "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf", "C:/Windows/Fonts/georgia.ttf"),
          "text": ("Geist[wght].ttf", "/System/Library/Fonts/Supplemental/Arial.ttf",
-                  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")}
+                  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "C:/Windows/Fonts/arial.ttf")}
 
 HOME: Path | None = None
 PACK = Path(__file__).resolve().parent.parent
@@ -68,29 +72,39 @@ seen_lock = threading.Lock()
 
 
 def prefix() -> Path:
+    if sys.platform == "win32" and not os.environ.get("PREFIX"):
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local") / "ImaginationStudio"
     return Path(os.environ.get("PREFIX") or Path.home() / ".local/opt/tensorfold-studio").expanduser()
 
 
 def runs_here() -> bool:
-    """Whether Tesseract runs on this computer: macOS, or Linux on x86_64 (not Linux ARM, such as a DGX Spark)."""
+    """Whether Tesseract runs on this computer: macOS, Windows (its x86_64 build; on Windows on Arm, such as an RTX
+    Spark N1X, through Windows' x64 emulation), or Linux on x86_64 (not Linux ARM, such as a DGX Spark)."""
 
     import platform
-    if sys.platform == "darwin":
+    if sys.platform in ("darwin", "win32"):
         return True
     return sys.platform.startswith("linux") and platform.machine().lower() in ("x86_64", "amd64")
 
 
+EXE = ".exe" if sys.platform == "win32" else ""
+
+
 def tsrct_places() -> list[Path]:
     data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
-    places = [prefix() / "finish/bin/tsrct", Path.home() / "Library/Application Support/Tesseract/bin/tsrct",
+    places = [prefix() / f"finish/bin/tsrct{EXE}", Path.home() / "Library/Application Support/Tesseract/bin/tsrct",
               data / "Tesseract/bin/tsrct"]
+    if sys.platform == "win32":  # scripts/setup-windows-finish.ps1's bundle, and where Tesseract's own install.ps1 puts it
+        places[1:1] = [prefix() / "finish/tesseract/bin/tsrct.exe",
+                       Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local") / "Tesseract/bin/tsrct.exe"]
     found = shutil.which("tsrct")
     return places + ([Path(found)] if found else [])
 
 
 def converter_places() -> list[Path]:
     found = shutil.which("tsrct-conv")
-    return [prefix() / "finish/bin/tsrct-conv", Path.home() / ".local/bin/tsrct-conv"] + ([Path(found)] if found else [])
+    windows = [prefix() / "finish/converter/tsrct-conv.exe"] if sys.platform == "win32" else []  # setup-windows-finish.ps1
+    return [prefix() / f"finish/bin/tsrct-conv{EXE}", *windows, Path.home() / ".local/bin/tsrct-conv"] + ([Path(found)] if found else [])
 
 
 def version_of(path: Path | str) -> str | None:
@@ -163,11 +177,11 @@ def probe_remote(host: str) -> dict:
     return out
 
 
-def ready(fresh: bool = False) -> dict:
+def ready(fresh: bool = False, local_only: bool = False) -> dict:
     """Where the cut is finished, asked at most once a minute: {ok, where ("here" or "ssh:<host>"), version, why, path,
     machine, converter: {ok, version, path}, setup, pinned}."""
 
-    host = remote_host()
+    host = "" if local_only else remote_host()
     key = (host, str(prefix()))
     with seen_lock:
         last = seen.get(key)
@@ -334,14 +348,20 @@ def plan_of(params: dict) -> dict:
             "size": size, "fps": fps, "canvas": canvas}
 
 
-def build(params: dict, job_id: str) -> tuple[list[str], dict, list[str]]:
+def build(params: dict, job_id: str, local_only: bool = False) -> tuple[list[str], dict, list[str]]:
     """(command, environment, output paths) of a finish job: the plan is written beside the job's other files and this
     file runs it. Refused (400) when Tesseract is not ready here or on the remote computer."""
 
-    state = ready()
+    state = ready(local_only=True) if local_only else ready()
     if not state["ok"]:
         raise bad(state["why"])
     plan = plan_of(params)
+    if local_only:
+        import windows_features
+        try:
+            windows_features.check_finish(plan)
+        except ValueError as error:
+            raise bad(str(error)) from None
     exports = HOME / "exports"
     work = exports / ".finish" / job_id
     host = state["where"][4:] if state["where"].startswith("ssh:") else ""
@@ -967,7 +987,7 @@ def readme(label: str, notes: list[str]) -> str:
 
 # ---------- the routes ----------
 
-def attach(home: Path, pack: Path, within, short):
+def attach(home: Path, pack: Path, within, short, windows=False):
     """The routes, with the server's path helpers. ``build`` is called by server.build for kind "finish"."""
 
     global HOME, PACK, inside, relative, Request  # Request: the routes' annotations are read from this module's names
@@ -980,9 +1000,18 @@ def attach(home: Path, pack: Path, within, short):
 
     @router.get("/api/finish")
     def state(request: Request, fresh: bool = False) -> dict:
-        if remote_host():  # the probe runs ssh with the user's keys: this computer or its Tailscale address, as the brains
+        limited = bool(windows and windows())
+        if not limited and remote_host():  # the probe runs ssh with the user's keys: this computer or its Tailscale address, as the brains
             agents.local(request)
-        out = ready(fresh)
+        out = ready(fresh, local_only=True) if limited else ready(fresh)
+        if limited:
+            import windows_features
+            qualified = windows_features.status("finish")
+            out = {**out, "ok": qualified["available"], "why": qualified["why"],
+                   "converter": {**out["converter"], "ok": False,
+                                 "why": "Editor conversion is not qualified in this Windows profile."}}
+            return {**out, "fonts": {role: bool(path) for role, path in font_files().items()}, "mixes": list(MIXES),
+                    "sizes": ["720p"], "rates": [windows_features.FPS], "max_seconds": windows_features.MAX_SECONDS}
         return {**out, "fonts": {role: bool(path) for role, path in font_files().items()}, "mixes": list(MIXES),
                 "sizes": list(SIZES), "rates": list(RATES)}
 

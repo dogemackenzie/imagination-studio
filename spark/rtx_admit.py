@@ -68,7 +68,7 @@ def container_reserve_mb() -> int:
 
 
 def vram_reserve_mib() -> int:
-    return _int_env("RTX_VRAM_RESERVE_MIB", VRAM_RESERVE_MIB, 64)
+    return _int_env("RTX_VRAM_RESERVE_MIB", VRAM_RESERVE_MIB, VRAM_RESERVE_MIB)
 
 
 def owner_path() -> Path:

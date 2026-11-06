@@ -35,18 +35,67 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import memory_guard  # noqa: E402  (what a clip needs and whether this machine has it, beside this file)
 import rtx_admit  # noqa: E402  (RTX budgets and ownership; a Spark keeps memory_guard)
+import progress_file  # noqa: E402  (SPARK_PROGRESS_FILE: a clip's progress for a governor, off by default)
+import gpus  # noqa: E402  (two or more cards: each stage of a workflow placed on its card)
 PREFIX = Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-studio"))
 # On a Mac the same graphs run on a ComfyUI of their own (mac/comfy.sh, scripts/setup-comfy.sh): the Library actions
 # and MOSS-Image, on PyTorch's Metal device. Its port, its model folder and the names of the H3 files differ (MAC_FILES).
 MAC = sys.platform == "darwin"
+# native Windows (the CUDA tier, app/windows_cuda.py): the same graphs on the Windows ComfyUI, which comfy_win.py (the
+# port of comfy.sh) starts and stops; PREFIX and SPARK_MODELS are the Windows install's (the app sets them)
+WINDOWS = sys.platform == "win32"
 ENGINE = "mps" if MAC else "cuda"
 COMFY_SH = HERE.parent / "mac" / "comfy.sh" if MAC else HERE / "comfy.sh"
+
+
+FFMPEG_HOW = "scripts\\setup-windows-ffmpeg.ps1" if WINDOWS else "sudo apt install ffmpeg"
+
+
+def comfy_control(action: str) -> list[str]:
+    """The command that starts, stops or asks after the studio's ComfyUI: comfy.sh, or its Python port on Windows."""
+
+    if WINDOWS:
+        return [sys.executable, "-X", "utf8", str(HERE / "comfy_win.py"), action]
+    return ["bash", str(COMFY_SH), action]
+
+
+def run_comfy_control(action: str, **kwargs):
+    return subprocess.run(comfy_control(action), creationflags=0x08000000 if WINDOWS else 0, **kwargs)
+
 if MAC:
     URL = os.environ.get("MAC_COMFY_URL", "http://127.0.0.1:" + os.environ.get("MAC_COMFY_PORT", "8191"))
     MODELS = Path(os.environ.get("MAC_COMFY_MODELS") or PREFIX / "comfy-models").expanduser()
 else:
     URL = os.environ.get("SPARK_COMFY_URL", "http://127.0.0.1:" + os.environ.get("SPARK_COMFY_PORT", "8190"))  # the port spark/comfy.sh starts it on
     MODELS = Path(os.environ.get("SPARK_MODELS", Path.home() / "spark-studio-models"))
+
+
+def comfy_pid() -> str:
+    """Which ComfyUI process serves now ("" for none): a server an action's node pack patched is told apart from a new
+    one by it. On Windows spark/comfy_win.py records the process that owns the server; elsewhere pgrep finds it."""
+
+    port = URL.rsplit(":", 1)[-1]
+    if WINDOWS:
+        stem = "comfy" if port == "8190" else f"comfy-{port}"
+        try:
+            return str(json.loads((PREFIX / f"{stem}-win.json").read_text(encoding="utf-8"))["pid"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return ""
+    return subprocess.run(["pgrep", "-f", f"[m]ain.py --listen 127.0.0.1 --port {port}"], capture_output=True, text=True).stdout.split("\n")[0].strip()
+
+
+def link_file(source: Path, link: Path) -> None:
+    """``link`` names ``source``: a symlink, on Windows a hard link (a symlink needs a privilege a person may not have)
+    or a copy across drives. Read right away by the caller: a hard link keeps the file as it is now."""
+
+    link.unlink(missing_ok=True)
+    if WINDOWS:
+        try:
+            os.link(source, link)
+        except OSError:
+            shutil.copyfile(source, link)
+    else:
+        link.symlink_to(source)
 
 
 def side(ext: str) -> Path:
@@ -66,7 +115,8 @@ def side(ext: str) -> Path:
 
 
 
-ENGINE_LIB = PREFIX / "tf-h3" / "libtf_h3.so"
+ENGINE_LIB = (Path(os.environ.get("TF_H3_LIB") or PREFIX / "tf-h3" / "tf_h3.dll") if WINDOWS
+              else PREFIX / "tf-h3" / "libtf_h3.so")
 
 FASTH3 = {"bf16": "fastvideo_fasth3_8step_v2_pruned_bf16.safetensors",
           "int8": "fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors"}
@@ -149,10 +199,14 @@ def ensure_server(kind: str) -> None:
 
     if not up():
         print("[tensorfold] starting ComfyUI (first render after a start loads the models)", flush=True)
-        subprocess.run(["bash", str(COMFY_SH), "start"], check=True)
-        for _ in range(180):
+        run_comfy_control("start", check=True)
+        for tries in range(180):
             if up():
                 break
+            # on Windows the server's guard may have stopped it while it loaded: said at once, not after six minutes
+            if WINDOWS and tries >= 5 and tries % 5 == 0 and "not running" in run_comfy_control(
+                    "status", capture_output=True, text=True).stdout:
+                sys.exit(stopped() or f"ComfyUI stopped while it started: see {side('log')}")
             time.sleep(2)
         else:
             sys.exit(f"ComfyUI did not answer at {URL}: see {side('log')}")
@@ -170,7 +224,7 @@ def fresh_server(why: str) -> None:
     """Stop the ComfyUI server and wait until its memory is back: the next render starts with nothing loaded."""
 
     print(f"[tensorfold] restarting ComfyUI: {why}", flush=True)
-    subprocess.run(["bash", str(COMFY_SH), "stop"], check=False)
+    run_comfy_control("stop", check=False)
     for _ in range(60):
         if not up():
             break
@@ -195,6 +249,8 @@ def fits_or_exit(args, lora: bool = False, references: bool = False, base: bool 
         return
     print(f"[tensorfold] memory: about {found['need_mb'] / 1000:.0f} GB at the peak (give or take {found['error_mb'] / 1000:g}) of "
           f"{found['available_mb'] / 1000:.0f} GB, floor {found['floor_mb'] / 1000:.0f} GB", flush=True)
+    if found.get("warning"):  # STUDIO_MEMORY_GUARD=warn (an N1X's default): flagged, then tried
+        print("[tensorfold] memory warning: " + found["warning"], flush=True)
     if not found["fits"]:
         sys.exit("refused before anything was loaded: " + found["reason"])
 
@@ -237,6 +293,7 @@ async def run(workflow: dict, sampler: str, named: dict | None = None, stages: l
     gate()
     import aiohttp
 
+    workflow = gpus.place(workflow)  # two cards: the text encoders and decoders on the second (spark/gpus.py)
     client = uuid.uuid4().hex
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(URL.replace("http", "ws", 1) + f"/ws?clientId={client}", max_msg_size=0) as ws:
@@ -258,11 +315,14 @@ async def run(workflow: dict, sampler: str, named: dict | None = None, stages: l
                         print(f"[tensorfold] {named[node]} {data['value']}/{data['max']}", flush=True)
                 elif event["type"] == "progress" and str(data.get("node")) == sampler:
                     print(f"[tensorfold] step {data['value']}/{data['max']}", flush=True)
+                    progress_file.step(data["value"], data["max"])
                 elif event["type"] == "executing":
                     # SPARK_TIMING=1: how long each node of the workflow ran
                     if running is not None:
                         stages.append((workflow[running]["class_type"], time.time() - since))
                     running, since = (str(data["node"]) if data.get("node") is not None else None), time.time()
+                    if running is not None and running in workflow:
+                        progress_file.stage(workflow[running]["class_type"])
                     if running is None:
                         break
                 elif event["type"] in ("execution_error", "execution_interrupted", "execution_success"):
@@ -371,7 +431,7 @@ def finish_sound(item, target: Path, frames: int) -> None:
     if shutil.which("ffmpeg") is None:
         # not silently: the track ComfyUI wrote can overshoot full scale (see above)
         print("[tensorfold] sound: left as ComfyUI wrote it, at about 130 kb/s and without the limiter: ffmpeg is not "
-              "installed on this machine (sudo apt install ffmpeg)", flush=True)
+              f"installed on this machine ({FFMPEG_HOW})", flush=True)
         (PREFIX / "ComfyUI" / "output" / sound.get("subfolder", "") / sound["filename"]).unlink(missing_ok=True)
         return
     import numpy as np
@@ -425,7 +485,7 @@ def crop_frames(workflow: dict, crop: str, width: int, height: int) -> bool:
         return True
     if shutil.which("ffmpeg") is None:
         sys.exit(f"the clip is generated at {width}x{height} and cropped to {wide}x{tall}, and this machine can do neither crop: "
-                 "its ComfyUI has no ImageCrop node and ffmpeg is not installed (sudo apt install ffmpeg)")
+                 f"its ComfyUI has no ImageCrop node and ffmpeg is not installed ({FFMPEG_HOW})")
     return False
 
 
@@ -467,7 +527,7 @@ UPLOADED: list[str] = []  # what this run put in ComfyUI's input folder
 def _tool(name: str) -> str:
     path = shutil.which(name)
     if path is None:
-        sys.exit(f"{name} is not on the PATH: reference videos and audio are read with it (sudo apt install ffmpeg)")
+        sys.exit(f"{name} is not on the PATH: reference videos and audio are read with it ({FFMPEG_HOW})")
     return path
 
 
@@ -596,12 +656,32 @@ def hub_loras(specs) -> list[tuple[str, float]]:
         if not source.is_file():
             sys.exit(f"no LoRA at {path}")
         link = MODELS / "loras" / f"hub_{source.name}"
-        if not link.exists() or link.resolve() != source:
+        if WINDOWS:
+            link_lora(source, link)
+        elif not link.exists() or link.resolve() != source:
             link.parent.mkdir(parents=True, exist_ok=True)
             link.unlink(missing_ok=True)
             link.symlink_to(source)
         loras.append((link.name, strength))
     return loras
+
+
+def link_lora(source: Path, link: Path) -> None:
+    """On Windows a LoRA goes into ComfyUI's loras folder as a hard link (a symlink needs a privilege a person may not
+    have), or a copy across drives; one of the same size and time is kept."""
+
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        same = link.stat().st_size == source.stat().st_size and link.stat().st_mtime_ns == source.stat().st_mtime_ns
+    except OSError:
+        same = False
+    if same:
+        return
+    link.unlink(missing_ok=True)
+    try:
+        os.link(source, link)
+    except OSError:
+        shutil.copy2(source, link)
 
 
 def reference(args) -> None:
@@ -734,6 +814,7 @@ def reference(args) -> None:
           f"{count}, {steps} passes, generating {args.width}x{args.height}, {args.frames} frames", flush=True)
     for line in said:
         print(f"[tensorfold] reference {line}", flush=True)
+    progress_file.begin(f"H3 {kind} (ComfyUI) · {args.width}x{args.height} {args.frames}f", steps)
     try:
         item, seconds_taken = render(w, "12")
     finally:
@@ -743,6 +824,7 @@ def reference(args) -> None:
     finish_sound(item, target, args.frames)
     if not cropped:
         crop_file(target, args.crop)
+    progress_file.done(seconds_taken, target.name)
     print("[tensorfold] " + json.dumps({"output": str(target), "engine": "cuda", "model": "ref2va", "mode": mode,
                                         "forwards": steps, "total_s": round(seconds_taken, 1), "frames": args.frames,
                                         "size": [args.width, args.height], "references": len(pictures),
@@ -867,6 +949,9 @@ def video(args) -> None:
     runs = ("TensorFold int8 blocks in ComfyUI" + (", the LoRA merged into them" if loras else "")) if args.engine == "tensorfold" else "ComfyUI, MiniMax H3 bf16" if base else f"ComfyUI, FastH3 {args.weights}"
     print(f"[tensorfold] engine: cuda ({runs}, {attention}), generating "
           f"{args.width}x{args.height}, {args.frames} frames", flush=True)
+    progress_file.begin(f"{runs} · {args.width}x{args.height} {args.frames}f", args.steps)
+    if gpus.split():
+        print(f"[tensorfold] gpus: {gpus.describe()}", flush=True)
     item, seconds = render(w, "12")
     target = Path(args.output)
     fetch(item, target)
@@ -877,6 +962,7 @@ def video(args) -> None:
                                         "total_s": round(seconds, 1), "frames": args.frames,
                                         "size": [args.width, args.height], "sparsity": sparsity,
                                         **({"cropped_to": args.crop} if args.crop else {})}), flush=True)
+    progress_file.done(seconds, target.name)
 
 
 def flux3_system_prompt(task: str = "t2i") -> str:
@@ -999,7 +1085,7 @@ def music_finish(track: Path, target: Path, what: str = "song", channels: int = 
 
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
-        sys.exit(f"a {what} is levelled with ffmpeg, which is not installed on this machine (sudo apt install ffmpeg)")
+        sys.exit(f"a {what} is levelled with ffmpeg, which is not installed on this machine ({FFMPEG_HOW})")
     raw = subprocess.run([ffmpeg, "-v", "error", "-i", str(track), "-ar", str(4 * MUSIC_RATE), "-f", "f32le", "pipe:1"],
                          capture_output=True, timeout=600).stdout
     wave = np.frombuffer(raw, np.float32)
@@ -1029,6 +1115,8 @@ def music(args) -> None:
     if found.get("route") is not None:
         print(f"[tensorfold] memory: about {found['need_mb'] / 1000:.0f} GB at the peak (give or take {found['error_mb'] / 1000:g}) of "
               f"{found['available_mb'] / 1000:.0f} GB, floor {found['floor_mb'] / 1000:.0f} GB", flush=True)
+        if found.get("warning"):  # STUDIO_MEMORY_GUARD=warn (an N1X's default): flagged, then tried
+            print("[tensorfold] memory warning: " + found["warning"], flush=True)
         if not found["fits"]:
             sys.exit("refused before anything was loaded: " + found["reason"])
     last = side("kind").read_text().strip() if side("kind").exists() else ""
@@ -1129,14 +1217,16 @@ def foley_workflow(video: str, prompt: str, negative: str, seconds: float, seed:
     }
 
 
-def prepared_clip(path, seconds: float, folder: Path) -> Path:
+def prepared_clip(path, seconds: float, folder: Path, rows: int = FOLEY_ROWS) -> Path:
     """The clip as ComfyUI is to decode it for foley: FOLEY_ROWS rows, its own frame rate, at most ``seconds``, no
     sound, stored without loss. ComfyUI holds every decoded frame in memory as floats: at the clip's own size a 15 s
     clip at 1376x768 would be 4.6 GB of them, at 384 rows 1.1 GB."""
 
+    if type(rows) is not int or rows <= 0:
+        raise ValueError("the foley analysis height must be a positive integer")
     target = folder / f"foley_{uuid.uuid4().hex[:8]}.mp4"
     done = subprocess.run([_tool("ffmpeg"), "-v", "error", "-y", "-i", str(path), "-map", "0:v:0", "-an", "-t", f"{seconds:.3f}",
-                           "-vf", f"scale=-2:{FOLEY_ROWS}:flags=lanczos,setsar=1", "-c:v", "libx264rgb", "-qp", "0",
+                           "-vf", f"scale=-2:{rows}:flags=lanczos,setsar=1", "-c:v", "libx264rgb", "-qp", "0",
                            "-preset", "veryfast", "-pix_fmt", "rgb24", str(target)], capture_output=True, text=True)
     if done.returncode or not target.is_file():
         sys.exit(f"cannot read frames from {path}: {done.stderr.strip()[-300:]}")
@@ -1173,6 +1263,8 @@ def sound(args) -> None:
         if found.get("need_mb"):
             print(f"[tensorfold] memory: about {found['need_mb'] / 1000:.0f} GB at the peak (give or take {found['error_mb'] / 1000:g}) of "
                   f"{found['available_mb'] / 1000:.0f} GB, floor {found['floor_mb'] / 1000:.0f} GB", flush=True)
+        if found.get("warning"):  # STUDIO_MEMORY_GUARD=warn (an N1X's default): flagged, then tried
+            print("[tensorfold] memory warning: " + found["warning"], flush=True)
         if not found["fits"]:
             sys.exit("refused before anything was loaded: " + found["reason"])
     last = side("kind").read_text().strip() if side("kind").exists() else ""
@@ -1217,6 +1309,36 @@ def sound(args) -> None:
     print("[tensorfold] " + json.dumps({"output": str(target), **made}), flush=True)
 
 
+def qwen_image_workflow(args, text: str, seed: int) -> dict:
+    """The production Qwen graph, shared with recipe qualification."""
+    w = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": QWEN_BASE if args.base else QWEN,
+                                                     "weight_dtype": "default"}},
+        "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": QWEN_TEXT, "type": "qwen_image", "device": "default"}},
+        "4": {"class_type": "VAELoader", "inputs": {"vae_name": QWEN_VAE}},
+        "5": {"class_type": "TextEncodeQwenImage21", "inputs": {"clip": ["3", 0], "prompt": text,
+                                                                "negative_prompt": args.negative, "resolution": 1024}},
+        "6": {"class_type": "EmptyLatentImage", "inputs": {"width": args.width, "height": args.height, "batch_size": 1}},
+        "13": {"class_type": "VAEDecode", "inputs": {"samples": ["12", 0], "vae": ["4", 0]}},
+        "16": {"class_type": "SaveImage", "inputs": {"images": ["13", 0], "filename_prefix": f"studio/image_{uuid.uuid4().hex[:8]}"}},
+    }
+    if args.base:
+        w["12"] = {"class_type": "KSampler",
+                   "inputs": {"model": ["1", 0], "seed": seed, "steps": args.steps or 40, "cfg": args.cfg,
+                              "sampler_name": "euler", "scheduler": "simple", "positive": ["5", 0],
+                              "negative": ["5", 1], "latent_image": ["6", 0], "denoise": 1.0}}
+    else:
+        w["8"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}}
+        w["9"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
+        w["10"] = {"class_type": "ManualSigmas", "inputs": {"sigmas": TURBO_SIGMAS}}
+        w["11"] = {"class_type": "CFGGuider", "inputs": {"model": ["1", 0], "positive": ["5", 0],
+                                                         "negative": ["5", 1], "cfg": 1.0}}
+        w["12"] = {"class_type": "SamplerCustomAdvanced",
+                   "inputs": {"noise": ["8", 0], "guider": ["11", 0], "sampler": ["9", 0], "sigmas": ["10", 0],
+                              "latent_image": ["6", 0]}}
+    return w
+
+
 def image(args) -> None:
     if args.model == "sdxl-turbo":
         import sdxl_turbo
@@ -1255,31 +1377,7 @@ def image(args) -> None:
                                                 "total_s": round(seconds, 1)}), flush=True)
         return
     for seed in seeds:
-        w = {
-            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": QWEN_BASE if args.base else QWEN,
-                                                         "weight_dtype": "default"}},
-            "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": QWEN_TEXT, "type": "qwen_image", "device": "default"}},
-            "4": {"class_type": "VAELoader", "inputs": {"vae_name": QWEN_VAE}},
-            "5": {"class_type": "TextEncodeQwenImage21", "inputs": {"clip": ["3", 0], "prompt": text,
-                                                                    "negative_prompt": args.negative, "resolution": 1024}},
-            "6": {"class_type": "EmptyLatentImage", "inputs": {"width": args.width, "height": args.height, "batch_size": 1}},
-            "13": {"class_type": "VAEDecode", "inputs": {"samples": ["12", 0], "vae": ["4", 0]}},
-            "16": {"class_type": "SaveImage", "inputs": {"images": ["13", 0], "filename_prefix": f"studio/image_{uuid.uuid4().hex[:8]}"}},
-        }
-        if args.base:
-            w["12"] = {"class_type": "KSampler",
-                       "inputs": {"model": ["1", 0], "seed": seed, "steps": args.steps or 40, "cfg": args.cfg,
-                                  "sampler_name": "euler", "scheduler": "simple", "positive": ["5", 0],
-                                  "negative": ["5", 1], "latent_image": ["6", 0], "denoise": 1.0}}
-        else:
-            w["8"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}}
-            w["9"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}}
-            w["10"] = {"class_type": "ManualSigmas", "inputs": {"sigmas": TURBO_SIGMAS}}
-            w["11"] = {"class_type": "CFGGuider", "inputs": {"model": ["1", 0], "positive": ["5", 0],
-                                                             "negative": ["5", 1], "cfg": 1.0}}
-            w["12"] = {"class_type": "SamplerCustomAdvanced",
-                       "inputs": {"noise": ["8", 0], "guider": ["11", 0], "sampler": ["9", 0], "sigmas": ["10", 0],
-                                  "latent_image": ["6", 0]}}
+        w = qwen_image_workflow(args, text, seed)
         item, seconds = render(w, "12")
         out = target.with_name(f"{target.stem}_s{seed}{target.suffix}") if args.seeds else target
         fetch(item, out)
@@ -1405,6 +1503,10 @@ def mac_release() -> None:
     shutil.rmtree(PREFIX / "ComfyUI" / "output" / "__h3_removal_cache", ignore_errors=True)
 
 
+# the workload governor's reasons (workload.reasons): a managed server that ended for one of them was stopped by the limits
+LIMIT_WORDS = ("temperature", "memory pressure", "free memory below", "telemetry")
+
+
 def stopped() -> str:
     """Why the ComfyUI server ended, when its own log says so: the memory guard beside it (memory_guard.py watch)
     stops it when the machine runs low."""
@@ -1420,8 +1522,17 @@ def stopped() -> str:
         if "stopping the managed server:" in line:
             return ("the render was stopped by this machine's workload limits: " + line.split("managed server: ", 1)[-1].strip()
                     + ". Wait for the machine to cool or for other work on it to finish, then try again.")
+        # the same limits met as the server started (managed_comfy.run: its telemetry's first reading): no server came up
+        if "the managed server stopped:" in line and any(word in line for word in LIMIT_WORDS):
+            return ("the render was stopped by this machine's workload limits: " + line.split("managed server stopped: ", 1)[-1].strip()
+                    + ". Wait for the machine to cool or for other work on it to finish, then try again.")
     return ""
 
 
 if __name__ == "__main__":
-    main()
+    progress_file.on_cancel()
+    try:
+        main()
+    except BaseException as error:
+        progress_file.stopped_by(error)  # a governor reading SPARK_PROGRESS_FILE sees why the clip stopped
+        raise

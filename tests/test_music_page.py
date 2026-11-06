@@ -70,6 +70,21 @@ def test_the_tab_shows_the_credit_the_tags_and_the_helper():
     assert "Not available here." in got["off"] and "No MiniMax Music 3 weights" in got["off"]
 
 
+def test_qualified_instrumental_form_uses_only_the_tested_audio_scope():
+    got = run("""
+      S.music={...S.music,route:"cuda",qualified:true,qualification_required:true,
+        verified_recipe:{seconds:10},seconds:[10,10],stream:false};
+      MU.takes=[]; MU.caption="Warm piano"; MU.lyrics=""; MU.seconds=60;
+      out.page=text(viewMusic()); out.seconds=MU.seconds;
+      await muRender(); out.params=calls.find(([path])=>path==="/api/music/takes")[1];
+      S.music.qualification_required=false; MU.seconds=60; MU.asr=true;
+      await muRender(); out.unrestricted=calls.filter(([path])=>path==="/api/music/takes").at(-1)[1];
+    """)
+    assert got["seconds"] == got["params"]["seconds"] == 10
+    assert got["params"]["asr"] is False and got["params"]["live"] is False
+    assert "Verified: 10-second" in got["page"] and "Pop example" not in got["page"]
+    assert got["unrestricted"]["seconds"] == 60 and got["unrestricted"]["asr"] is True
+
 def test_generate_queues_a_song_and_a_take_can_go_under_a_video():
     got = run("""
       Object.assign(MU, { caption: "", lyrics: "" }); await muRender(); out.refused = toasts.slice(-1)[0]; out.calls_before = calls.length;
@@ -100,7 +115,8 @@ def test_generate_queues_a_song_and_a_take_can_go_under_a_video():
 def test_play_while_it_is_made_is_offered_where_the_engine_streams_and_on_by_default():
     got = run("""
       MU.takes = []; Object.assign(MU, { caption: "Lo-fi hip-hop", lyrics: "", seconds: 60, seed: 2 });
-      out.spark = text(viewMusic()); S.music.route = "comfy"; out.comfy = text(viewMusic()); S.music.route = "mlx";
+      out.spark = text(viewMusic()); S.music.route = "comfy"; out.comfy = text(viewMusic());
+      globalThis.cardFace = () => true; out.cardComfy = text(viewMusic()); globalThis.cardFace = () => false; S.music.route = "mlx";
       answers["/api/music/takes"] = { id: "m0", status: "queued" }; await muRender(); out.sent_plain = calls.slice(-1)[0][1];
       Object.assign(S.music, { stream: true, stream_lead: { no_stall_s: { 60: 10.3, 300: 52.7 }, margin_s: 3, first_audio_s: 7.6 } });
       const view = viewMusic(); out.mac = text(view);
@@ -122,6 +138,7 @@ def test_play_while_it_is_made_is_offered_where_the_engine_streams_and_on_by_def
     # no stream from the engine (ComfyUI on a Spark, or an engine before 6844b413): no option, nothing asked
     assert "Play while it's made" not in got["spark"] and "Not played while it is made" in got["spark"]
     assert "ComfyUI's route on a DGX Spark does not stream" in got["comfy"] and "live" not in got["sent_plain"]
+    assert "ComfyUI's route on this GPU does not stream" in got["cardComfy"] and "DGX Spark" not in got["cardComfy"]
     assert "Play while it's made" in got["mac"] and got["checked"] and "first sound comes after about 8 s" in got["mac"] and "plays from about 13 s" in got["mac"]
     assert abs(got["start60"] - 13.3) < 1e-6 and abs(got["start300"] - 55.7) < 1e-6 and 7.9 < got["start30"] < 8.1
     assert got["sent"]["live"] is True and got["src"] == "/api/music/takes/m2/live" and got["autoplay"] is True

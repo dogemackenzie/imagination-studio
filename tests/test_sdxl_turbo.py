@@ -55,7 +55,8 @@ def measured(tmp_path, monkeypatch):
     weight.write_bytes(b"test")
     path = tmp_path / "profile.json"
     path.write_text(json.dumps({"enabled": True, "model": "sdxl-turbo", "recipe": recipe(),
-                                 "checkpoint": {"bytes": 4}}))
+                                 "checkpoint": {"bytes": 4}, "host_available_mb": 14000, "vram_free_mib": 12000,
+                                 "render": {"host_available_mb_min": 13000, "vram_free_mib_min": 11000}}))
     monkeypatch.setenv("SDXL_PROFILE", str(path))
     monkeypatch.setenv("SDXL_CHECKPOINT", str(weight))
     monkeypatch.setattr(S, "BYTES", 4)
@@ -105,7 +106,7 @@ def test_the_shared_address_is_only_port_8188(monkeypatch):
     assert S.shared_origin() == "http://127.0.0.1:8188"
 
 
-def test_a_container_reads_vram_from_the_shared_server(tmp_path, monkeypatch):
+def test_a_container_reads_vram_from_the_shared_server(tmp_path, monkeypatch, measured):
     weight = tmp_path / "w.safetensors"
     weight.write_bytes(b"x")
     monkeypatch.setenv("STUDIO_CONTAINER", "1")
@@ -158,15 +159,17 @@ def test_the_model_stays_unoffered_without_a_matching_profile(tmp_path, monkeypa
     monkeypatch.setattr(S, "BYTES", 4)
     path = tmp_path / "off.json"
     path.write_text(json.dumps({"enabled": False, "model": "sdxl-turbo", "recipe": recipe(),
-                                 "checkpoint": {"bytes": 4}}))
+                                 "checkpoint": {"bytes": 4}, "host_available_mb": 14000, "vram_free_mib": 12000,
+                                 "render": {"host_available_mb_min": 13000, "vram_free_mib_min": 11000}}))
     monkeypatch.setenv("SDXL_PROFILE", str(path))
     assert S.offered() is False
     path.write_text(json.dumps({"enabled": True, "model": "sdxl-turbo", "recipe": recipe(cfg=0.0),
-                                 "checkpoint": {"bytes": 4}}))
+                                 "checkpoint": {"bytes": 4}, "host_available_mb": 14000, "vram_free_mib": 12000,
+                                 "render": {"host_available_mb_min": 13000, "vram_free_mib_min": 11000}}))
     assert S.offered() is False
 
 
-def test_a_clear_budget_does_not_enable_the_model(tmp_path, monkeypatch):
+def test_a_clear_budget_does_not_enable_the_model(tmp_path, monkeypatch, measured):
     weight = tmp_path / "w.safetensors"
     weight.write_bytes(b"x")
     monkeypatch.setattr(S, "BYTES", 1)
@@ -274,6 +277,7 @@ def _png(width: int, height: int) -> bytes:
 
 
 def test_render_images_posts_one_prompt_and_leaves_a_busy_queue_alone(tmp_path, monkeypatch):
+    monkeypatch.setenv("STUDIO_HOME", str(tmp_path))
     monkeypatch.setenv("RTX_SDXL_CALIBRATE", "1")
     monkeypatch.setattr(S, "assess", lambda: {"ok": True, "reason": ""})
     calls = []

@@ -7,6 +7,7 @@ Newline-delimited JSON-RPC 2.0 on stdin and stdout (MCP protocol 2024-11-05). Ev
 own HTTP API, so the Studio must be running; paths are relative to the Studio's folder, as its Library shows them.
 """
 import json
+import copy
 import mimetypes
 import os
 import re
@@ -50,7 +51,7 @@ TOOLS = [
                                               "'a dog chasing a kite'. Returns the best matches with a caption and a path to use in other tools.",
      "inputSchema": text_schema({"query": {"type": "string", "description": "what to look for, in plain words"},
                                  "limit": {"type": "integer", "description": "at most this many (default 10)"}}, ("query",))},
-    {"name": "queue_still", "description": "Queue still pictures from a prompt (a scout job: several candidates and a contact sheet).",
+    {"name": "queue_still", "description": "Queue still pictures from a prompt (a scout job: several candidates and a contact sheet). Honor studio_state.windows_stills limits on Windows: SD-Turbo, 512x512, at most six sequential drafts.",
      "inputSchema": text_schema({"prompt": {"type": "string"}, "count": {"type": "integer", "description": "how many pictures, 1 to 12 (default 1); several only when the filmmaker asks for options or a number"},
                                  "preset": {"type": "string", "description": "a preset from studio_state; sets the picture size (default 2k: 1024x576)"},
                                  "width": {"type": "integer", "description": "with height: a size of its own, multiples of 16, 256 to 2048"},
@@ -76,11 +77,13 @@ TOOLS = [
                                            "a take from a reference recording needs the consent box on the Voice tab.",
      "inputSchema": text_schema({"text": {"type": "string", "description": "the line, with any [direction] in brackets"},
                                  "seed": {"type": "integer"}, "title": {"type": "string"}}, ("text",))},
-    {"name": "queue_song", "description": "Queue a song with MiniMax-Music3: a style caption and lyrics with section tags ([Verse], [Chorus]); "
-                                          "no lyrics makes an instrumental.",
+    {"name": "queue_song", "description": "Queue a song: a style caption and lyrics with section tags ([Verse], [Chorus]); "
+                                          "no lyrics makes an instrumental. engine yue2 (YuE2, where it is installed) or music3 "
+                                          "(MiniMax-Music3); left out, the studio's default (studio_state's music.engine).",
      "inputSchema": text_schema({"caption": {"type": "string", "description": "genre, tempo, mood, vocals, instruments"},
                                  "lyrics": {"type": "string", "description": "lyrics with [Verse] / [Chorus] tags, or empty for an instrumental"},
                                  "seconds": {"type": "number", "description": "length in seconds (default 60)"},
+                                 "engine": {"type": "string", "enum": ["yue2", "music3"], "description": "the song engine (default: the studio's)"},
                                  "seed": {"type": "integer"}, "title": {"type": "string"}}, ("caption",))},
     {"name": "queue_edit", "description": "Queue an edit of a Library picture by the image model: the prompt says what the picture "
                                           "should become (\"make it night, rain on the street\"). One edited picture.",
@@ -126,6 +129,18 @@ TOOLS = [
                                  "image_model": {"type": "string", "enum": ["qwen", "qwen-full", "flux3k-fast", "flux3k-full"]},
                                  "keep_sound": {"type": "boolean", "description": "keep the clip's own sound (default true)"},
                                  "seed": {"type": "integer"}}, ("video", "instruction"))},
+    {"name": "swap_character", "description": "Character Swap: replace the person in a 5 to 15 s part of a Library clip (one "
+                                              "continuous shot, the person in view in its first frame) with the character in a "
+                                              "Library picture. The scene, the performance and the clip's own sound stay; with "
+                                              "several people the largest is swapped. One job: its first output is the swapped part.",
+     "inputSchema": text_schema({"clip": {"type": "string", "description": "Library path of the clip"},
+                                 "picture": {"type": "string", "description": "Library path of the character's picture, outfit included"},
+                                 "start": {"type": "number", "description": "where the part starts, in seconds (default 0)"},
+                                 "seconds": {"type": "number", "description": "how long the part is, 5 to 15 (default 5)"},
+                                 "quality": {"type": "integer", "enum": [480, 768], "description": "the short side, 480 (default, Fast) or 768 (High, a little over twice as long)"},
+                                 "direction": {"type": "string", "description": "optional words for the model, e.g. she keeps her hands in her pockets"},
+                                 "anchor": {"type": "boolean", "description": "put the character in the first frame first (default true)"},
+                                 "seed": {"type": "integer"}, "title": {"type": "string"}}, ("clip", "picture"))},
     {"name": "queue_sound", "description": "Queue a sound: kind sfx is a sound effect from words (Stable Audio Open, 1 to 47 s, a .wav); "
                                            "kind foley makes a clip's sound for its picture (MMAudio: a .wav and the clip with it).",
      "inputSchema": text_schema({"kind": {"type": "string", "enum": ["sfx", "foley"]},
@@ -439,7 +454,7 @@ def project_of(given) -> dict:
 def run(name: str, args: dict):
     if name == "studio_state":
         state = call("GET", "/api/state")
-        return {k: state.get(k) for k in ("presets", "qualities", "lengths", "image_models", "platform", "platform_label", "turbo",
+        return {k: state.get(k) for k in ("presets", "qualities", "lengths", "image_models", "windows_stills", "capabilities", "platform", "platform_label", "turbo",
                                           "engine", "version", "home")}
     if name == "list_library":
         items = [i for i in call("GET", "/api/library") if not args.get("kind") or i.get("kind") == args["kind"]]
@@ -472,7 +487,7 @@ def run(name: str, args: dict):
         body = {k: args[k] for k in ("text", "seed", "title") if args.get(k) not in (None, "")}
         return job_summary(call("POST", "/api/voice/takes", body))
     if name == "queue_song":
-        body = {k: args[k] for k in ("caption", "lyrics", "seconds", "seed", "title") if args.get(k) not in (None, "")}
+        body = {k: args[k] for k in ("caption", "lyrics", "seconds", "seed", "title", "engine") if args.get(k) not in (None, "")}
         return job_summary(call("POST", "/api/music/takes", body))
     if name == "queue_edit":
         params = {k: args[k] for k in ("image", "prompt", "image_model", "seed") if args.get(k) not in (None, "")}
@@ -487,6 +502,10 @@ def run(name: str, args: dict):
                 "fix_clip": ("video", "instruction", "image_model", "keep_sound", "seed")}[name]
         made = call("POST", "/api/revise", {"kind": name.split("_")[0], "params": {k: args[k] for k in keys if args.get(k) not in (None, "")}})
         return {**job_summary(made), "revise": made.get("revise")}
+    if name == "swap_character":  # Character Swap (app/swap.py): one job of kind swap
+        params = {"video": args.get("clip"), "image": args.get("picture"),
+                  **{k: args[k] for k in ("start", "seconds", "quality", "direction", "anchor", "seed") if args.get(k) not in (None, "")}}
+        return job_summary(call("POST", "/api/jobs", {"kind": "swap", **({"title": args["title"]} if args.get("title") else {}), "params": params}))
     if name == "queue_sound":
         kind = args.get("kind")
         if kind not in ("sfx", "foley"):
@@ -729,7 +748,39 @@ def answer(message: dict):
     if method == "ping":
         return {}
     if method == "tools/list":
-        return {"tools": TOOLS}
+        try:
+            state = call("GET", "/api/state")
+        except Exception:  # noqa: BLE001  (the Studio not running yet, or an older one): every tool, as before
+            state = {}
+        if not isinstance(state, dict) or state.get("platform") != "windows":
+            return {"tools": TOOLS}
+        allowed = {"studio_state", "list_library", "search_library", "cancel_job", "list_projects", "add_to_timeline",
+                   "job_status", "wait_for_jobs", "list_jobs", "slate_films", "slate_film", "slate_new_film",
+                   "slate_add_scene", "slate_add_shot", "suite_imports", "suite_attach", "upload_file"}
+        for name, kind in {"queue_still": "scout", "queue_sound": "sfx", "make_graphics": "graphics", "export_timeline": "export", "music_beats": "beats"}.items():
+            if (state.get("capabilities", {}).get(kind) or {}).get("available"):
+                allowed.add(name)
+        tools = copy.deepcopy([tool for tool in TOOLS if tool["name"] in allowed])
+        for tool in tools:
+            props = tool["inputSchema"]["properties"]
+            if tool["name"] == "queue_sound":
+                tool["description"] = "Queue a five-second Stable Audio Open sound effect on this Windows Studio."
+                props["kind"]["enum"] = ["sfx"]
+                props["seconds"] = {"type": "number", "const": 5, "description": "Windows: five seconds only (the default)."}
+            elif tool["name"] == "make_graphics":
+                templates = state["capabilities"]["graphics"]["templates"]
+                tool["description"] = "Queue a checked Windows graphic (" + ", ".join(templates) + "); at most 1280x720, 24 fps and ten seconds. No transcription."
+                props["template"]["enum"] = templates
+                props["size"]["enum"] = ["720p", "match"]
+            elif tool["name"] == "music_beats":
+                tool["description"] = "Measure tempo, beats and bars of existing local audio with NumPy/FFmpeg; Windows accepts up to ten minutes. No generation model."
+            elif tool["name"] == "queue_still":
+                props.pop("preset", None)
+                props["width"] = {"type": "integer", "const": 512}
+                props["height"] = {"type": "integer", "const": 512}
+                props["image_model"] = {"type": "string", "const": "sd-turbo"}
+                props["count"].update(minimum=1, maximum=6)
+        return {"tools": tools}
     if method == "tools/call":
         try:
             out = run(params.get("name"), params.get("arguments") or {})

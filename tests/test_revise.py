@@ -459,7 +459,7 @@ def test_a_clip_gets_restyle_extend_and_fix_and_each_opens_its_panel():
       jobs.push({ id: "j3", status: "done", outputs: ["renders/j3.mp4"] }); out.fix_done = text(actPanel());
       actOpen("upscale", "renders/a.mp4"); out.upscale = text(actPanel());
     """)
-    assert got["video"] == ["Upscale", "Remove a person", "Restyle", "Extend", "Fix"] and got["image"] == ["Turnaround"]
+    assert got["video"] == ["Upscale", "keys-HDR LORA", "Remove a person", "Restyle", "Extend", "Fix"] and got["image"] == ["Turnaround"]
     assert got["id"] == "actpanel" and "Restyle this clip" in got["restyle"] and "three steps" in got["restyle"]
     assert "the motion, camera and timing come from the clip’s depth" in got["restyle"] and "The whole frame is redrawn" in got["restyle"]
     assert got["refused"] == "Say what the clip should look like now"
@@ -494,6 +494,7 @@ def test_agents_restyle_extend_and_fix_through_the_studio_tools(monkeypatch):
         reply = mcp.answer({"method": "tools/call", "params": {"name": name, "arguments": args}})
         assert not reply.get("isError"), reply
         assert json.loads(reply["content"][0]["text"])["revise"] == {"id": "c1", "of": 2}
+    sent = [one for one in sent if one[:2] != ("GET", "/api/state")]  # tools/list reads the platform first (Windows lists fewer tools)
     assert sent[0] == ("POST", "/api/revise", {"kind": "restyle", "params": {"video": "renders/a.mp4", "prompt": "anime", "keep_sound": False}})
     assert sent[1][2] == {"kind": "extend", "params": {"video": "renders/a.mp4", "seconds": 20}}
     assert sent[2][2] == {"kind": "fix", "params": {"video": "renders/a.mp4", "instruction": "make it snow"}}

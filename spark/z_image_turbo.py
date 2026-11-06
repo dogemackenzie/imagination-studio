@@ -25,6 +25,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
+import shared_backend
 import rtx_admit
 import sdxl_turbo
 
@@ -275,9 +276,7 @@ def _weight_report(files: dict[str, tuple[Path | None, int | None]]) -> dict:
 
 
 def _budgets(sample: dict) -> dict:
-    sample["need_vram_mib"] = WEIGHT_MIB
-    sample["profile"] = True
-    return sample
+    return shared_backend.budgets(sample, load_profile(), WEIGHT_MIB)
 
 
 def _reasons_for(files: dict, found: dict | None) -> list[dict]:
@@ -306,7 +305,8 @@ def _report(files: dict, sample: dict, reasons: list[dict], processes, shared, o
         "host_total_mb": sample.get("host_total_mb"),
         "floor_mb": rtx_admit.host_floor_mb(sample.get("host_total_mb")),
         "vram_free_mib": sample.get("vram_free_mib"),
-        "vram_need_mib": WEIGHT_MIB,
+        "vram_need_mib": sample.get("need_vram_mib"),
+        "host_need_mb": sample.get("need_host_mb"),
         "vram_files_mib": {"unet": UNET_MIB, "clip": CLIP_MIB, "vae": VAE_MIB},
         "vram_reserve_mib": sample.get("vram_reserve_mib") or rtx_admit.vram_reserve_mib(),
         "cgroup": sample.get("cgroup"),
@@ -343,13 +343,8 @@ def _assess_shared() -> dict:
     else:
         device = next((item for item in (stats.get("devices") or []) if item.get("type") == "cuda"), None)
         free = device.get("vram_free") if isinstance(device, dict) else None
-        if isinstance(free, int):
-            sample["vram_free_mib"] = free // (1024 * 1024)
-            sample["vram_known"] = True
-        else:
-            sample["vram_known"] = False
-            sample["vram_free_mib"] = None
-        found = rtx_admit.decide(sample)
+        sample = shared_backend.shared_vram(sample, free)
+        found = shared_backend.decide(sample)
         if not found["ok"]:
             reasons.append({"code": found["code"], "reason": found["reason"]})
     return _report(files, sample, reasons, None, [], origin)
@@ -362,7 +357,7 @@ def assess() -> dict:
         return _assess_shared()
     files = weight_files()
     sample = _budgets(rtx_admit.collect())
-    found = rtx_admit.decide(sample)
+    found = shared_backend.decide(sample)
     processes = sdxl_turbo.gpu_processes()
     listeners = sdxl_turbo.listener_pids()
     shared = set(listeners or [])
@@ -384,6 +379,11 @@ def assess() -> dict:
 
 
 def render_images(args, text: str, render=None, fetch=None, url: str | None = None) -> list[dict]:
+    with shared_backend.session(sdxl_turbo.exchange, sdxl_turbo.shared_origin()):
+        return _render_images(args, text, render, fetch, url)
+
+
+def _render_images(args, text: str, render=None, fetch=None, url: str | None = None) -> list[dict]:
     """Submit one still to the shared ComfyUI. ``render``, ``fetch`` and ``url`` are ignored."""
 
     del render, fetch, url
@@ -409,11 +409,14 @@ def render_images(args, text: str, render=None, fetch=None, url: str | None = No
         queue = sdxl_turbo.exchange("GET", "/queue", timeout=10)
         if sdxl_turbo.queue_busy(queue):
             sys.exit("The shared ComfyUI queue already has work. Studio leaves that queue alone.")
+        report = assess()  # recheck after the queue read, immediately before submission
+        if not report["ok"]:
+            sys.exit(report["reason"])
         started = time.time()
         peaks = sdxl_turbo._sample_floor()
-        posted = sdxl_turbo.exchange("POST", "/prompt", {
+        posted = shared_backend.submit(sdxl_turbo.exchange, sdxl_turbo.shared_origin(), {
             "prompt": workflow(text, seed, args.width, args.height),
-            "client_id": "studio-z-image"}, timeout=60)
+            "client_id": "studio-z-image"})
         prompt_id = str(posted.get("prompt_id") or "")
         if not prompt_id:
             sys.exit("The shared ComfyUI did not accept the still.")
@@ -433,6 +436,7 @@ def render_images(args, text: str, render=None, fetch=None, url: str | None = No
             time.sleep(1)
         if record is None:
             sys.exit("The still did not finish within the wait. Studio did not interrupt the shared ComfyUI.")
+        shared_backend.finished()  # backend completion, not client cancellation
         if record.get("status", {}).get("status_str") != "success":
             sys.exit("The shared ComfyUI did not finish the still. Studio did not interrupt it.")
         item = sdxl_turbo._saved_image(record)

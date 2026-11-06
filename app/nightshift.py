@@ -548,7 +548,10 @@ def build_reel(clips: list[dict], target: Path) -> Path:
             parts += [title, body]
         listing = Path(scratch) / "list.txt"
         listing.write_text("".join(f"file '{p}'\n" for p in parts))
-        run([ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy", "-movflags", "+faststart", str(target)])
+        # AAC segment padding can make a stream-copy join drift from the promised 24 fps.
+        # Normalize video timestamps at the join; keep the already encoded sound.
+        run([ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(listing),
+             "-vf", f"fps={REEL_FPS}", *video, "-c:a", "copy", "-movflags", "+faststart", str(target)])
     return target
 
 

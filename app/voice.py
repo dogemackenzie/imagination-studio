@@ -44,6 +44,7 @@ import hardware
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
+import model_catalog
 
 try:
     import discover  # Models & weights: what was found elsewhere on this machine and linked
@@ -52,16 +53,21 @@ except ImportError:  # pragma: no cover - imported as app.voice from outside the
         from app import discover
     except ImportError:
         discover = None
+try:
+    import windows_cuda  # the native Windows CUDA tier: False off Windows without a look
+except ImportError:  # pragma: no cover - imported as app.voice from outside the app folder
+    from app import windows_cuda
 
 router = APIRouter()
 HOME: Path = Path.home() / "ImaginationStudio"
 qa = None  # app/qa.py, given by attach
-SPARK = hardware.is_spark()
+WINCUDA = windows_cuda.native_os()
+SPARK = hardware.is_spark() or WINCUDA
 FRAME_RATE = 21.5  # the Fish codec's frames per second of audio
 SAMPLING = {"temperature": (1.0, 0.1, 2.0), "top_p": (0.9, 0.1, 1.0), "top_k": (30, 1, 200)}  # Fish's defaults, then the range
 TEXT_LIMIT = 6000  # characters in one take (long text is split at sentence ends by the engine)
 REFERENCE_SECONDS = (2.0, 60.0)  # a voice to clone: Fish suggests 10 to 30 seconds of clean speech
-MEMORY_GB = 64  # a Mac with less does not run it: the model peaks at about 52 GB
+MEMORY_GB = 96  # a Mac with less does not run it (64 up to 4.3.0); the model peaks at about 52 GB
 LOCK = Path(os.environ.get("STUDIO_GPU_LOCK", Path.home() / "studio-gpu.lock.d"))
 CREDIT = "Built with Fish Audio"
 LICENCE = ("Fish Audio Drama 3 runs on this machine under the Fish Audio Community License v1.0 (research, non-commercial "
@@ -78,10 +84,33 @@ def tool(name: str) -> str | None:
 
 # ---------- backends ----------
 
+def _linux_ram_gb() -> float:
+    """MemAvailable in GB, or -1 when /proc/meminfo cannot be read (on the native Windows tier: Windows' available
+    physical memory)."""
+
+    if WINCUDA:
+        try:
+            import windows_memory
+            return windows_memory.host_memory()[1] / 1024
+        except (ImportError, OSError):
+            return -1.0
+    try:
+        with open("/proc/meminfo") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024 ** 2
+    except (OSError, ValueError, IndexError):
+        pass
+    return -1.0
+
+
 def mem_available_gb() -> float:
     """MemAvailable of this machine in GB (a DGX Spark's GPU and system share one pool); on a Mac what the kernel gets
     back without compressing (telemetry.parse_vm_stat: free, file-backed and purgeable pages), 0 while macOS says its
-    memory pressure is critical; -1 when unknown."""
+    memory pressure is critical; -1 when unknown.
+
+    On a discrete card the smaller of that card's free memory (``gpu_free_gb``) and MemAvailable: the weights are
+    read through system RAM, so a short RAM is still the limit. ``has_card_memory`` says when the card is the one."""
 
     if sys.platform == "darwin":
         import telemetry
@@ -93,17 +122,23 @@ def mem_available_gb() -> float:
             return 0.0 if telemetry.mac_pressure_critical() else mb / 1024
         except (OSError, ValueError, subprocess.TimeoutExpired):
             return -1.0
-    ram = -1.0
-    try:
-        with open("/proc/meminfo") as handle:
-            for line in handle:
-                if line.startswith("MemAvailable:"):
-                    ram = int(line.split()[1]) / 1024 ** 2
-                    break
-    except (OSError, ValueError, IndexError):
-        pass
-    card = gpu_free_gb()
+    ram, card = _linux_ram_gb(), gpu_free_gb()
+    if WINCUDA and card is not None and _n1x():
+        # an RTX Spark N1X natively: the weights live in the GPU's carve-out, not in the ~30 GB Windows keeps for
+        # itself, so the card's free memory is the engine's room (as memory_guard.card_pool counts it)
+        return card
     return ram if card is None or ram < 0 else min(ram, card)
+
+
+def _n1x() -> bool:
+    try:
+        spark = str(Path(__file__).resolve().parent.parent / "spark")
+        if spark not in sys.path:
+            sys.path.insert(0, spark)
+        import memory_guard
+        return memory_guard.n1x()
+    except Exception:  # noqa: BLE001  (a reading, never a reason to fail)
+        return False
 
 
 def gpu_free_gb() -> float | None:
@@ -118,7 +153,35 @@ def gpu_free_gb() -> float | None:
         card = memory_guard.device(fresh=True)
     except Exception:  # noqa: BLE001  (a reading, never a reason to fail)
         return None
-    return None if card is None else card["free_mb"] / 1024
+    # Drama 3 runs on one card: with paired cards (spark/gpus.py) its room is the head's card, never their sum
+    return None if card is None else card.get("head_free_mb", card["free_mb"]) / 1024
+
+
+def has_card_memory() -> bool:
+    """True when the number ``mem_available_gb`` gives is a card's free memory: this GPU has memory of its own and it
+    is no more than MemAvailable. A sentence then names the GPU; where the RAM is the smaller, it names the machine.
+
+    A Mac is never that, and this does not ask nvidia-smi there. On Linux a reading ``mem_available_gb`` just took
+    is reused (``memory_guard.recent_device``), so a kill loop does not ask twice. A stale reading is taken again."""
+
+    if sys.platform == "darwin":
+        return False
+    try:
+        spark = str(Path(__file__).resolve().parent.parent / "spark")
+        if spark not in sys.path:
+            sys.path.insert(0, spark)
+        import memory_guard
+        fresh, card = memory_guard.recent_device()
+        if not fresh:
+            card = memory_guard.device(fresh=True)
+    except Exception:  # noqa: BLE001  (a reading, never a reason to fail)
+        return False
+    if card is None:
+        return False
+    ram = _linux_ram_gb()
+    if WINCUDA and _n1x():
+        return True
+    return ram < 0 or card.get("head_free_mb", card["free_mb"]) / 1024 <= ram
 
 
 def comfy_up(port: int | None = None) -> bool:
@@ -179,6 +242,47 @@ def one_speaker(text: str) -> bool:
     return set(SPEAKER.findall(text)) <= {"0"}
 
 
+STALL_S = 3.0  # quiet at the end that means a stalled take: Drama 3's own pauses run to about 2.4 s
+STALL_INSIDE_S = 8.0  # quiet inside a take the engine chunked (a chunk stalled, the next one went on)
+QUIET_DBFS = -30.0  # under it is silence or the stall's flat hum (about -36 dBFS)
+STALL_REDRAWS = 3
+
+
+def stall(path: Path) -> float | None:
+    """Where a take went quiet for good, in seconds, or None. Drama 3 sometimes speaks the first sentence or two of a
+    long line and then only silence or a flat hum until the frame cap (about 1 in 5 paragraphs, the same seed and text
+    every time; TensorFold issue 1275): after a second of speech, ``STALL_S`` under ``QUIET_DBFS`` at the end, or
+    ``STALL_INSIDE_S`` anywhere. Measured on the Metal engine: a stalled paragraph spoke 9.2 s then 26.9 s of quiet; on
+    12 paragraphs the longest pause of a good take was 2.4 s."""
+
+    import wave
+
+    import numpy as np
+
+    try:
+        with wave.open(str(path)) as w:
+            rate, channels, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+            data = w.readframes(w.getnframes())
+    except (OSError, EOFError, wave.Error):
+        return None
+    if width != 2 or not rate:
+        return None
+    x = np.frombuffer(data[: len(data) - len(data) % (2 * channels)], "<i2").astype(np.float32)
+    if channels > 1:
+        x = x.reshape(-1, channels).mean(axis=1)
+    window = rate // 20  # 50 ms
+    count = len(x) // window
+    if not count:
+        return None
+    loud = np.sqrt(np.mean(x[: count * window].reshape(count, window) ** 2, axis=1)) >= 32768 * 10 ** (QUIET_DBFS / 20)
+    voiced = quiet = 0
+    for index, on in enumerate(loud):
+        voiced, quiet = (voiced + 1, 0) if on else (voiced, quiet + 1)
+        if voiced >= 20 and quiet * 0.05 >= STALL_INSIDE_S:
+            return round((index + 1 - quiet) * 0.05, 2)
+    return round((count - quiet) * 0.05, 2) if voiced >= 20 and quiet * 0.05 >= STALL_S else None
+
+
 class Served:
     """A Drama 3 engine run as a persistent server, the protocol both TensorFold ports speak (``--serve``: one JSON
     request a line on its stdin, one JSON answer a line on its stderr, lines that are not protocol never start with
@@ -225,6 +329,10 @@ class Served:
     def loaded(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
+    def ram_route(self) -> str:
+        """Identity of this native model/weight route for same-session RAM accounting."""
+        return "native:" + self.owner_tag + ":" + str(getattr(self, "weights", ""))
+
     def note(self, what: str, **more) -> None:
         self.events = (self.events + [{"at": time.time(), "what": what, **more}])[-20:]
 
@@ -251,12 +359,18 @@ class Served:
         self.answers.put({"ok": False, "error": "the engine stopped", "gone": True})
 
     def guard(self, process: subprocess.Popen) -> None:
-        """MemAvailable four times a second; the engine is killed by its PID under the floor."""
+        """Available memory four times a second; the engine is killed by its PID under the floor.
+
+        A DGX Spark and a Mac keep the MemAvailable line. A discrete card names GPU memory, and the number is that
+        card's free memory."""
 
         while process.poll() is None:
             free = mem_available_gb()
             if 0 <= free < self.guard_gb:
-                self.killed = f"MemAvailable {free:.1f} GB < {self.guard_gb:g} GB: the memory guard killed {self.title} (pid {process.pid})"
+                if has_card_memory():
+                    self.killed = f"GPU memory {free:.1f} GB < {self.guard_gb:g} GB: the memory guard killed {self.title} (pid {process.pid})"
+                else:
+                    self.killed = f"MemAvailable {free:.1f} GB < {self.guard_gb:g} GB: the memory guard killed {self.title} (pid {process.pid})"
                 try:
                     os.kill(process.pid, 9)
                 except OSError:
@@ -294,7 +408,8 @@ class Served:
             return
         if SPARK and comfy_up():
             job["progress"] = {"stage": "stopping ComfyUI to free the video models' memory", "at": 0, "of": 1}
-            subprocess.run(["bash", str(Path(__file__).resolve().parent.parent / "spark" / "comfy.sh"), "stop"],
+            subprocess.run(windows_cuda.comfy_argv("stop") if WINCUDA else
+                           ["bash", str(Path(__file__).resolve().parent.parent / "spark" / "comfy.sh"), "stop"],
                            capture_output=True, text=True, timeout=30)
             for _ in range(60):
                 if not comfy_up():
@@ -309,7 +424,8 @@ class Served:
             settle()
             free = mem_available_gb()
         if 0 <= free < self.NEED_GB:
-            raise RuntimeError(f"{self.title} needs about {self.NEED_GB:.0f} GB of free memory to load and this machine has "
+            who = "GPU" if has_card_memory() else "machine"
+            raise RuntimeError(f"{self.title} needs about {self.NEED_GB:.0f} GB of free memory to load and this {who} has "
                                f"{free:.0f} GB available")
 
     def start(self, job: dict) -> bool:
@@ -328,10 +444,14 @@ class Served:
             self.make_room(job)
             job["progress"] = {"stage": f"loading {self.title} (about {self.load_s:.0f} s)", "at": 0, "of": 1}
             env = self.environment()
+            if SPARK:
+                env["STUDIO_GPU_MODEL_RAM"] = "1"
+                env["STUDIO_GPU_MODEL_ROUTE"] = self.ram_route()
             self.answers, self.log, self.killed, self.device_gb = queue.Queue(), [], "", None
             began, self.before_gb = time.time(), mem_available_gb()
             self.process = subprocess.Popen(self.argv(), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                            stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
+                                            stderr=subprocess.PIPE, text=True, bufsize=1, env=env,
+                                            creationflags=0x08000000 if WINCUDA else 0)
             threading.Thread(target=self.read, args=(self.process,), daemon=True).start()
             threading.Thread(target=self.guard, args=(self.process,), daemon=True).start()
             if self.idler is None:
@@ -631,7 +751,7 @@ class Cuda(Served):
 
     name, label = "cuda", "TensorFold CUDA · DGX Spark"
     fps, load_s = 30.0, 18.0  # measured on a GB10: 29 to 31 frames a second sampled, 17 to 18 s to load from NFS
-    NEED_GB = 50.0  # free memory wanted before it loads: 41.6 GB at the peak, and the guard's 8 GB beside it
+    NEED_GB = model_catalog.required_free_gib("voice")
     CHUNK_WORDS = 60  # a request's text at most (about 27 s of speech, ~600 frames, well inside max_ctx 4096)
     GAP_S = 0.15  # the silence put between two parts of a long take
 
@@ -639,6 +759,11 @@ class Cuda(Served):
         super().__init__()
         prefix = Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-studio")).expanduser()
         here = prefix / "drama3"
+        # native Windows: drama3-generate.exe and tensorfold_drama3.dll (TensorFold's studio-1.2.2 Windows build), the
+        # paths windows_cuda.activate gives DRAMA3_CUDA_BIN and DRAMA3_CUDA_LIB; used only where both files are there
+        self.windows = WINCUDA
+        if self.windows:
+            self.label = "TensorFold CUDA · native Windows"
         self.bin = Path(os.environ.get("DRAMA3_CUDA_BIN", here / "bin" / "drama3-generate")).expanduser()
         self.lib = Path(os.environ.get("DRAMA3_CUDA_LIB", self.bin.parent.parent / "lib" / "libtensorfold_drama3.so")).expanduser()
         self.model = Path(os.environ.get("DRAMA3_CUDA_MODEL", Path.home() / "models" / "drama-3")).expanduser()
@@ -651,6 +776,10 @@ class Cuda(Served):
 
     def environment(self) -> dict:
         env = dict(os.environ)
+        if self.windows:  # the DLLs are found on PATH: the engine's folder and CUDA's arm64 runtime
+            cuda = windows_cuda.paths()["cuda_bin"]
+            env["PATH"] = os.pathsep.join([str(self.lib.parent), str(self.bin.parent), *([str(cuda)] if cuda.is_dir() else []), env.get("PATH", "")])
+            return env
         env["LD_LIBRARY_PATH"] = str(self.lib.parent) + (":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
         return env
 
@@ -668,7 +797,13 @@ class Cuda(Served):
         return why
 
     def look(self) -> str:
-        if not sys.platform.startswith("linux"):
+        if self.windows and not (self.bin.is_file() and self.lib.is_file()):
+            # the hook for the native Windows engine: wired only once both of its files are installed
+            return (f"Fish Audio Drama 3's native Windows engine is not installed: no {self.bin.name if not self.bin.is_file() else self.lib.name} "
+                    f"in {self.bin.parent if not self.bin.is_file() else self.lib.parent} (drama3-generate.exe and "
+                    "tensorfold_drama3.dll from TensorFold's studio-1.2.2 Windows build; DRAMA3_CUDA_BIN and DRAMA3_CUDA_LIB "
+                    "name other files). Run oneshot-setup-rtx-spark-n1x.ps1 again to build it.")
+        if not sys.platform.startswith("linux") and not self.windows:
             return "The CUDA backend runs on a DGX Spark (Linux, CUDA)."
         if managed() and not os.environ.get("SPARK_GOVERNOR"):
             return "DRAMA3_MANAGED_GUARD=1 starts Drama 3 under the machine's workload governor: set SPARK_GOVERNOR to its folder."
@@ -695,7 +830,8 @@ class Cuda(Served):
                     "DRAMA3_CUDA_CODEC names another)." + found_hint("drama3-codec"))
         free = mem_available_gb()
         if 0 <= free < self.NEED_GB and not comfy_up():
-            return (f"Drama 3 needs about {self.NEED_GB:.0f} GB of free memory and this Spark has {free:.0f} GB available now "
+            who = "GPU" if has_card_memory() else "Spark"
+            return (f"Drama 3 needs about {self.NEED_GB:.0f} GB of free memory and this {who} has {free:.0f} GB available now "
                     "(something outside the studio holds the rest).")
         return ""
 
@@ -741,6 +877,8 @@ class Cuda(Served):
                     if voice_of:
                         request.update(ref_audio=str(voice_of[0]), ref_text=voice_of[1])
                     answer = self.ask(job, request, 120 + 1500 / 10)
+                    if answer is not None:
+                        answer = self.unstalled(job, request, out, answer, index)
                     if answer is None:
                         return None
                     answers.append(answer)
@@ -764,13 +902,42 @@ class Cuda(Served):
         audio = sum(float(a.get("audio_s") or 0) for a in answers) + self.GAP_S * (len(answers) - 1)
         decoding = sum(int(a.get("frames") or 0) / float(a["fps"]) for a in answers if a.get("fps"))
         made = time.time() - loaded
+        stalls = [a["stalled"] for a in answers if a.get("stalled")]
         return {"frames": frames, "audio_s": round(audio, 3), "frames_per_s": round(frames / decoding, 1) if decoding else None,
                 "rtf": round(made / audio, 2) if audio else None, "total_s": round(time.time() - began, 1),
                 "engine_s": round(sum(float(a.get("total_ms") or 0) for a in answers) / 1000, 2),
                 "first_audio_ms": answers[0].get("first_audio_ms") if answers else None,
                 "encode_ms": answers[0].get("encode_ms") if answers else None,
                 "load_s": job.get("load_s"), "device_gb": self.device_gb,
-                "chunks": len(answers), "finish": ["stop" if a.get("eos") else "length" for a in answers], "stream": live}
+                "chunks": len(answers), "finish": ["stop" if a.get("eos") else "length" for a in answers], "stream": live,
+                **({"stalled": stalls} if stalls else {})}
+
+    def unstalled(self, job: dict, request: dict, out: Path, answer: dict, index: int) -> dict | None:
+        """A part that went quiet partway (``stall``) drawn again with the next seed, not played, ``STALL_REDRAWS``
+        times at most; the draw that speaks longest before going quiet is kept (one that never does, at once). Its
+        answer then says ``stalled``: where the first draw went quiet and the redraws taken. None when cancelled."""
+
+        first = at = stall(out)
+        draw, redraws, kept = {k: v for k, v in request.items() if k != "pcm"}, 0, request["seed"]
+        while at is not None and redraws < STALL_REDRAWS:
+            redraws += 1
+            draw["seed"] += 1
+            job["log"] += (f"[tensorfold] part {index + 1} went quiet after {at:.1f} s (a Drama 3 stall): drawn again, "
+                           f"seed {draw['seed']}, not played\n")
+            attempt = out.with_name(f"{out.stem}.stall{redraws}.wav")
+            again = self.ask(job, {**draw, "wav": str(attempt)}, 120 + 1500 / 10)
+            if again is None:
+                attempt.unlink(missing_ok=True)
+                return None
+            now = stall(attempt)
+            if now is None or now > at:
+                attempt.replace(out)
+                answer, at, kept = again, now, draw["seed"]
+            else:
+                attempt.unlink(missing_ok=True)
+        if redraws:
+            answer = {**answer, "stalled": {"part": index + 1, "at_s": first, "redraws": redraws, "seed": kept, "still": at}}
+        return answer
 
 
 LIVE: dict[str, dict] = {}  # a running take's raw PCM parts, as the engine writes them (the live WAV, /live)
@@ -881,7 +1048,7 @@ def backend():
 
 def state() -> dict:
     import capabilities
-    if not capabilities.renders(SPARK):
+    if not capabilities.renders(SPARK) and not WINCUDA and sys.platform != "win32":
         detail = capabilities.refusal("voice", SPARK) or {"error": "", "code": "unmeasured_configuration"}
         return {"available": False, "why": detail.get("error") or "", "code": detail.get("code"),
                 "backend": None, "label": None, "credit": CREDIT, "licence": LICENCE,
@@ -897,6 +1064,9 @@ def state() -> dict:
            "serves": bool(hasattr(one, "serving") and one.serving())}
     if hasattr(one, "status"):
         out["server"] = one.status()
+    if WINCUDA:
+        from windows_runtime import gate_native_state
+        out = gate_native_state("voice", out)
     return out
 
 
@@ -988,14 +1158,8 @@ def stale() -> bool:
 
     owner = lock_owner()
     pid = owner.split()[-1] if owner else ""
-    if pid.isdigit():
-        try:
-            os.kill(int(pid), 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-        return False
+    if pid.isdigit():  # windows_cuda.pid_alive: os.kill(pid, 0) would send a CTRL_C_EVENT on Windows
+        return not windows_cuda.pid_alive(int(pid))
     try:
         return not owner and time.time() - LOCK.stat().st_mtime > 60
     except OSError:
@@ -1043,7 +1207,7 @@ def checked(body: dict) -> dict:
         raise HTTPException(400, f"speakers are <|speaker:0|> to <|speaker:15|>, not <|speaker:{bad[0]}|>")
     import capabilities
     blocked = capabilities.refusal("voice", SPARK)
-    if blocked:
+    if blocked and not WINCUDA and sys.platform != "win32":
         raise HTTPException(400, blocked)
     why = backend().check()
     if why:
@@ -1121,6 +1285,10 @@ def perform(job: dict) -> bool:
             return False
         if params.get("ref_audio") and not params.get("ref_text") and measured.get("ref_texts"):
             params["ref_text"] = str(measured["ref_texts"][0]).strip()  # what the engine heard in the clip
+        if one.name != "cuda":  # the CUDA engine's parts are checked as they are made (``Cuda.unstalled``)
+            measured = unstalled(job, one, params, wav, reference, measured)
+            if measured is None:
+                return False
         if not getattr(one, "checks", False) and params.get("asr") and qa.ready()["transcript"]:
             measured = redrawn(job, one, params, wav, reference, measured)
             if measured is None:
@@ -1155,7 +1323,7 @@ def perform(job: dict) -> bool:
             "device_gb": measured.get("device_gb"),
             "chunks": measured.get("chunks"), "finish": measured.get("finish"), "first_audio_ms": measured.get("first_audio_ms"),
             "load_s": measured.get("load_s"), "engine_s": measured.get("engine_s"), "verify": checked_by_engine(measured),
-            "streamed": bool(measured.get("stream")), "retaken": measured.get("retaken"),
+            "streamed": bool(measured.get("stream")), "retaken": measured.get("retaken"), "stalled": measured.get("stalled"),
             "reference": {"path": params["ref_audio"], "text": params["ref_text"], "consent": True} if params.get("ref_audio") else None,
             "slate": params.get("slate"), "credit": CREDIT}
     if params.get("asr") and measured.get("app_check"):
@@ -1186,6 +1354,34 @@ def hears_references(one) -> bool:
     drama3-mlx 8f3d4b33 on): the app then does not run its own Whisper on the CPU first."""
 
     return bool(getattr(one, "hears", False) and hasattr(one, "serving") and one.serving())
+
+
+def unstalled(job: dict, one, params: dict, wav: Path, reference, measured: dict) -> dict | None:
+    """``Cuda.unstalled`` for an engine that makes a take in one request (the Mac's MLX server): a take that went quiet
+    partway (``stall``) is made again with the next seed, not played, ``STALL_REDRAWS`` times at most, and the draw
+    that speaks longest before going quiet is kept. None when the job was cancelled."""
+
+    first = at = stall(wav)
+    seed, redraws, kept = int(params["seed"]), 0, None
+    while at is not None and redraws < STALL_REDRAWS:
+        redraws += 1
+        seed += 1
+        job["log"] += f"[tensorfold] the take went quiet after {at:.1f} s (a Drama 3 stall): drawn again, seed {seed}, not played\n"
+        attempt = wav.with_name(f"{wav.stem}.stall{redraws}.wav")
+        again = one.make(job, params["text"], attempt, reference, seed, {k: params[k] for k in SAMPLING}, live=False)
+        if again is None:
+            attempt.unlink(missing_ok=True)
+            return None
+        now = stall(attempt)
+        if now is None or now > at:
+            attempt.replace(wav)
+            measured = {**again, "load_s": measured.get("load_s"), "first_audio_ms": measured.get("first_audio_ms")}
+            at, kept = now, seed
+        else:
+            attempt.unlink(missing_ok=True)
+    if redraws:
+        measured = {**measured, "stalled": {"at_s": first, "redraws": redraws, "seed": kept, "still": at}}
+    return measured
 
 
 RETRIES = 2  # draws again of a take with missing words, as the Mac engine's --verify-retries

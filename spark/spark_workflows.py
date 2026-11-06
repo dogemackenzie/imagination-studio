@@ -69,9 +69,13 @@ PATCHED = sg.PREFIX / "comfy.patched"
 PACK = {"upscale": "upsampler", "remove": "relay"}
 
 
+# what installs the actions' node packs and models: spark/setup-workflows.sh, natively on Windows the CUDA tier's setup
+SETUP = ("powershell -ExecutionPolicy Bypass -File scripts\\setup-windows-cuda.ps1 -SkipToolchain -Parts workflows"
+         if sg.WINDOWS else "bash spark/setup-workflows.sh")
+
+
 def comfy_pid() -> str:
-    port = sg.URL.rsplit(":", 1)[-1]
-    return subprocess.run(["pgrep", "-f", f"[m]ain.py --listen 127.0.0.1 --port {port}"], capture_output=True, text=True).stdout.split("\n")[0].strip()
+    return sg.comfy_pid()
 
 
 def server(action: str) -> None:
@@ -86,13 +90,13 @@ def server(action: str) -> None:
     if sg.up() and ((last and not last.startswith("workflow-")) or clash):
         say("restarting ComfyUI: this starts from a server with nothing loaded" if not clash else
             "restarting ComfyUI: the upscaler's and the remover's node packs do not share one server")
-        subprocess.run(["bash", str(sg.COMFY_SH), "stop"], check=False)
+        sg.run_comfy_control("stop", check=False)
         for _ in range(60):
             if not sg.up():
                 break
             time.sleep(1)
         time.sleep(5)
-    if not sg.MAC:
+    if not sg.MAC and not sg.WINDOWS:  # Windows has no per-file page-cache release (posix_fadvise)
         # the actions load 64 to 75 GB at once (MiniMax H3's Ref2VA transformer and text encoder): the model files' page
         # cache is given back first, so the load lands in free memory instead of the kernel reclaiming cache while it
         # streams in. That reclaim, on a head with 57 GB of cache and Bolt's weights read once, made the memory floor
@@ -103,10 +107,10 @@ def server(action: str) -> None:
     have = sg.call("/object_info")
     missing = [n for n in NODES[action] if n not in have]
     if missing:
-        sys.exit(f"ComfyUI has no node {', '.join(missing)}: run `bash {'scripts/setup-comfy.sh' if sg.MAC else 'spark/setup-workflows.sh'}`, "
-                 f"then `bash {'mac' if sg.MAC else 'spark'}/comfy.sh stop`")
-    if sg.REF2VA["bf16"] not in listed("UNETLoader", "unet_name"):
-        sys.exit("MiniMax H3 Ref2VA is not installed: bash oneshot-setup-spark.sh --ref2va")
+        sys.exit(f"ComfyUI has no node {', '.join(missing)}: run `{'bash scripts/setup-comfy.sh' if sg.MAC else SETUP}`, "
+                 f"then `{'bash mac/comfy.sh stop' if sg.MAC else 'python spark/comfy_win.py stop' if sg.WINDOWS else 'bash spark/comfy.sh stop'}`")
+    if action != "mask" and ref2va() is None:  # finding a person is SAM 3.1's alone
+        sys.exit("MiniMax H3 Ref2VA is not installed: " + (SETUP.replace("workflows", "swap") if sg.WINDOWS else "bash oneshot-setup-spark.sh --ref2va"))
     if action in PACK:
         PATCHED.write_text(f"{PACK[action]} {comfy_pid()}")
 
@@ -125,7 +129,9 @@ def lora_name(spec: str) -> tuple[str, float]:
     if not source.is_file():
         sys.exit(f"no LoRA at {path}")
     link = sg.MODELS / "loras" / f"hub_{source.name}"
-    if not link.exists() or link.resolve() != source:
+    if sg.WINDOWS:  # a hard link (or a copy): a symlink needs a privilege a person may not have
+        sg.link_lora(source, link)
+    elif not link.exists() or link.resolve() != source:
         link.parent.mkdir(parents=True, exist_ok=True)
         link.unlink(missing_ok=True)
         link.symlink_to(source)
@@ -143,6 +149,7 @@ async def follow(workflow: dict, sampler: str, parts: int) -> str:
     sg.gate()
     import aiohttp
 
+    workflow = sg.gpus.place(workflow)  # two cards: the text encoders and decoders on the second (spark/gpus.py)
     client = uuid.uuid4().hex
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(sg.URL.replace("http", "ws", 1) + f"/ws?clientId={client}", max_msg_size=0) as ws:
@@ -203,8 +210,18 @@ def take(item: dict, target: Path) -> None:
     (sg.PREFIX / "ComfyUI" / "output" / item.get("subfolder", "") / item["filename"]).unlink(missing_ok=True)
 
 
+def ref2va() -> str | None:
+    """Prefer the measured bf16 action weights. Windows refuses int8 runtime adapter merging; the existing
+    Linux fallback is retained. Character Swap has its own weight-route selection."""
+
+    have = listed("UNETLoader", "unet_name")
+    if sg.WINDOWS:
+        return sg.REF2VA["bf16"] if sg.REF2VA["bf16"] in have else None
+    return next((sg.REF2VA[one] for one in ("bf16", "int8") if sg.REF2VA.get(one) in have), None)
+
+
 def loaders(w: dict, vae: str | None = None) -> None:
-    w["1"] = {"class_type": "UNETLoader", "inputs": {"unet_name": sg.REF2VA["bf16"], "weight_dtype": "default"}}
+    w["1"] = {"class_type": "UNETLoader", "inputs": {"unet_name": ref2va() or sg.REF2VA["bf16"], "weight_dtype": "default"}}
     w["3"] = {"class_type": "CLIPLoader", "inputs": {"clip_name": sg.H3_TEXT, "type": "minimax", "device": "default"}}
     w["4"] = {"class_type": "VAELoader", "inputs": {"vae_name": vae or sg.H3_VAE}}
     w["5"] = {"class_type": "VAELoader", "inputs": {"vae_name": sg.H3_AUDIO_VAE}}
@@ -274,7 +291,7 @@ def upscale(args) -> None:
         sys.exit("--megapixels is between 0.1 and 8")
     server("upscale")
     if UPSCALER not in listed("H3VideoUpsampler", "upscale_model"):
-        sys.exit(f"{UPSCALER} is not installed: bash spark/setup-workflows.sh")
+        sys.exit(f"{UPSCALER} is not installed: {SETUP}")
     name, strength = lora_name(args.lora)
     w = {}
     loaders(w)
@@ -683,7 +700,7 @@ def find_person(args, scratch: Path) -> tuple[str, dict, Path, Path]:
 def mask(args) -> None:
     server("mask")
     if SAM not in listed("CheckpointLoaderSimple", "ckpt_name"):
-        sys.exit(f"{SAM} is not installed: bash spark/setup-workflows.sh")
+        sys.exit(f"{SAM} is not installed: {SETUP}")
     base = Path(args.output)
     base.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -721,7 +738,7 @@ def remove(args) -> None:
         sys.exit("--window is 22, 39, 56, ... (17n + 5)")
     server("remove")
     if SAM not in listed("CheckpointLoaderSimple", "ckpt_name"):
-        sys.exit(f"{SAM} is not installed: bash spark/setup-workflows.sh")
+        sys.exit(f"{SAM} is not installed: {SETUP}")
     lora = lora_name(args.lora)
     target = Path(args.output)
     target.parent.mkdir(parents=True, exist_ok=True)

@@ -391,7 +391,7 @@ print("[tensorfold] " + json.dumps({"output": out, "audio_s": 3.0, "ar_s": 20.0,
         music._engine, voice.comfy_up = had, had_up
 
 
-# `music3-generate --model M --weights W --serve 1`, stood in for: TensorFold's CUDA engine (music3-cuda 6b714531)
+# `music3-generate --model M --weights W --serve 1`, stood in for: TensorFold's CUDA engine (music3-cuda-118 8cd08c83)
 # speaks the Mac engine's protocol, with "engine":"tensorfold-music3-cuda" and "weights" on its ready line
 CUDA_SERVE = r"""
 import json, os, struct, sys, wave
@@ -445,6 +445,8 @@ class Spark:
 
     def __enter__(self):
         self.had = (music.SPARK, music.PREFIX, music._engine, music._chosen_why, {k: os.environ.get(k) for k in self.env})
+        # Models & weights' scan of the machine the tests run on finds its own engine and weights: not this install's
+        self.discover, voice.discover = voice.discover, None
         music.SPARK, music.PREFIX, music._engine = True, self.folder / "prefix", None
         for key in ("MUSIC3_BACKEND", "MUSIC3_CUDA_BIN", "MUSIC3_MODEL", "MUSIC3_WEIGHTS"):
             self.had[4].setdefault(key, os.environ.get(key))
@@ -455,7 +457,10 @@ class Spark:
     def __exit__(self, *_):
         if music._engine is not None and hasattr(music._engine, "release"):
             music._engine.release("test over")
+        if "music_yue2" in sys.modules:  # YuE2's engine, asked about by the Music tab's state here, is not kept
+            sys.modules["music_yue2"]._engine = None
         music.SPARK, music.PREFIX, music._engine, music._chosen_why, saved = self.had
+        voice.discover = self.discover
         for key, value in saved.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -474,7 +479,7 @@ def test_a_spark_prefers_the_cuda_engine_and_falls_back_to_comfy():
         argv = one.argv()
         assert argv[0] == str(one.bin) and argv[argv.index("--weights") + 1] == "int8" and argv[-2:] == ["--serve", "1"]
         assert one.guard_route == "music-cuda-int8" and one.RTF == 2.1 and one.NEED_GB == 30.0
-        assert one.estimate(60) == int(37 + 60 * 2.1 + 2)
+        assert one.estimate(60) == int(16 + 60 * 2.1 + 2)
     with Spark(folder, MUSIC3_WEIGHTS="bf16"):
         one = music.engine()
         assert one.weights == "bf16" and one.argv()[one.argv().index("--weights") + 1] == "bf16" and one.RTF == 3.3
@@ -600,7 +605,7 @@ def test_the_cuda_engine_makes_a_song_stops_comfy_first_and_is_unloaded_before_o
             assert state["route"] == "cuda" and state["label"].startswith("TensorFold CUDA") and state["weights"] == "int8"
             assert state["fallback"] is None and state["rtf"] == 2.1 and state["credit"] == "MiniMax-Music3"
             job = client.post("/api/music/takes", json={"caption": "Hip-hop anthem, 92 BPM", "lyrics": "[Verse]\nRaise it up", "seconds": 60, "seed": 7}).json()
-            assert job["kind"] == "music" and job["estimate"] >= int(37 + 60 * 2.1)
+            assert job["kind"] == "music" and job["estimate"] >= int(16 + 60 * 2.1)
             done = wait(job["id"])
             assert done["status"] == "done", done
             take = done["music"]
@@ -815,3 +820,54 @@ if __name__ == "__main__":
                 print("skipped", name, skipped)
                 continue
             print("ok", name)
+
+
+def test_a_song_cancelled_as_its_engine_finishes_leaves_no_take(monkeypatch):
+    """Cancelled after the engine wrote the song (YuE2 at its Whisper stage): the job said cancelled, the song stayed."""
+
+    class Finishing:
+        name = "stand-in"
+
+        def make(self, job, params, wav):
+            wav.write_bytes(b"RIFF")
+            wav.with_suffix(".yue2").mkdir(exist_ok=True)
+            job["status"] = "cancelled"  # the cancel lands while the engine hands the song back
+            return {"audio_s": 1.0}
+
+    monkeypatch.setattr(music, "engine", lambda chosen: Finishing())
+    monkeypatch.setattr(music, "loaded_engines", lambda: [])
+    job = {"id": "test-cancel-at-the-end", "status": "running", "params": {"caption": "pop", "lyrics": "", "seconds": 10, "seed": 1}}
+    assert music.perform(job) is False
+    wav = music.HOME / "music" / f"{job['id']}.wav"
+    assert not wav.exists() and not wav.with_suffix(".yue2").exists() and not wav.with_suffix(".take.json").exists()
+
+
+def test_music3_on_a_mac_needs_96_gb(monkeypatch):
+    """The Studio's minimum for a Mac is 96 GB (64 up to 4.3.0): the Music tab says so on a smaller one."""
+
+    folder = Path(tempfile.mkdtemp())
+    python = folder / "venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    for part in music.WEIGHTS:
+        (folder / "model" / part).parent.mkdir(parents=True, exist_ok=True)
+        (folder / "model" / part).write_bytes(b"")
+    monkeypatch.setenv("MUSIC3_VENV", str(folder / "venv"))
+    monkeypatch.setenv("MUSIC3_MODEL", str(folder / "model"))
+    monkeypatch.delenv("MUSIC3_SRC", raising=False)
+
+    def mac_with(gib: int) -> None:
+        def run(argv, *args, **kwargs):
+            if argv[:2] == ["sysctl", "-n"]:
+                return subprocess.CompletedProcess(argv, 0, stdout=f"{gib << 30}\n", stderr="")
+            raise OSError("the probe is not run here")
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(subprocess, "run", run)
+
+    assert music.Mlx.MEMORY_GB == 96
+    for gib in (64, 95):
+        mac_with(gib)
+        assert music.Mlx().look() == f"This Mac has {gib} GB of memory; MiniMax Music 3 takes about 33 GB, so 96 GB or more."
+    mac_with(96)
+    assert music.Mlx().look().startswith("The MiniMax Music 3 environment did not answer")

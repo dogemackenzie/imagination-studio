@@ -4,6 +4,7 @@ name: tests
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches: [main]
 
@@ -34,7 +35,23 @@ jobs:
         with:
           node-version: "20"
       - name: ffmpeg
-        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+        # A stalled Ubuntu mirror used to hang this step until the job's 20 minutes ran out: each apt attempt gets
+        # 4 minutes, and after three a static build from GitHub (BtbN/FFmpeg-Builds) stands in.
+        timeout-minutes: 14
+        run: |
+          apt_opts="-q -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          for try in 1 2 3; do
+            if timeout 240 sudo apt-get update $apt_opts && timeout 240 sudo apt-get install -y $apt_opts ffmpeg; then
+              ffmpeg -version | head -1; exit 0
+            fi
+            echo "apt attempt $try failed"; sleep 10
+          done
+          echo "apt is unavailable: using a static ffmpeg build"
+          curl -fsSL --retry 3 --max-time 300 -o "$RUNNER_TEMP/ffmpeg.tar.xz" \
+            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          mkdir -p "$RUNNER_TEMP/ffmpeg" && tar -xJf "$RUNNER_TEMP/ffmpeg.tar.xz" -C "$RUNNER_TEMP/ffmpeg" --strip-components=1
+          echo "$RUNNER_TEMP/ffmpeg/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ffmpeg/bin/ffmpeg" -version | head -1
       - name: Test dependencies
         # The light part of requirements.lock that the tests import (av for app/shot.py); no MLX, torch or weights.
         run: python -m pip install fastapi==0.142.2 starlette==1.7.0 httpx==0.28.1 uvicorn==0.54.0 python-multipart==0.0.32 numpy==2.4.6 pillow==12.3.0 av cryptography pywebpush pytest
@@ -44,3 +61,43 @@ jobs:
         run: |
           export STUDIO_HOME="$RUNNER_TEMP/ImaginationStudio"
           python -m pytest -q tests
+
+  windows-arm64:
+    # Standard public-repository runner only; never opt private forks into billed Windows minutes.
+    if: github.event.repository.private == false
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          architecture: arm64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.4"
+          architecture: arm64
+      - name: Lightweight test dependencies (no CUDA or models)
+        run: |
+          python -m pip install --only-binary=:all: -r app\requirements-windows.txt httpx==0.28.1 pytest
+      - name: Native Windows ARM64 model-free tests
+        env:
+          STUDIO_TESTS_NEED_NODE: "1"
+          STUDIO_TEST_HARDWARE: "0"
+          PYTHONUTF8: "1"          # the pages and their tests are UTF-8; Windows' default code page is not
+          PYTHONIOENCODING: "utf-8"
+        shell: pwsh
+        run: |
+          python -c "import platform,sys; assert sys.platform == 'win32' and platform.machine().lower() in ('arm64','aarch64')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node -e "if (process.platform !== 'win32' || process.arch !== 'arm64') process.exit(1)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:STUDIO_HOME = Join-Path $env:RUNNER_TEMP 'ImaginationStudio'
+          $tests = @(Get-ChildItem -Path tests -Filter 'test_windows_*.py' | ForEach-Object { $_.FullName })
+          $tests += @(
+            'tests\test_slate_package.py', 'tests\test_shell_page.py', 'tests\test_studio_mcp_tools.py',
+            'tests\test_agents_copilot.py', 'tests\test_graphics_page.py', 'tests\test_nodes_page.py',
+            'tests\test_local_gpus_page.py', 'tests\test_access.py', 'tests\test_settings.py',
+            'tests\test_slate_compile.py', 'tests\test_suite.py', 'tests\test_suite_links.py'
+          )
+          python -m pytest -q @tests

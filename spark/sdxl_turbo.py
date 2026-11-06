@@ -24,6 +24,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import shared_backend
 import rtx_admit
 
 ID = "sdxl-turbo"
@@ -389,8 +390,7 @@ def _assess_shared() -> dict:
 
     path, size = _checkpoint_size()
     sample = rtx_admit.collect()
-    sample["need_vram_mib"] = WEIGHT_MIB
-    sample["profile"] = True
+    sample = shared_backend.budgets(sample, load_profile(), WEIGHT_MIB)
     sample["cgroup"] = {"known": True, "cap": False, "headroom_mb": None, "pressure_full_avg10": 0.0}
     reasons = []
     if size != BYTES:
@@ -413,13 +413,8 @@ def _assess_shared() -> dict:
     if isinstance(stats, dict):
         device = next((item for item in (stats.get("devices") or []) if item.get("type") == "cuda"), None)
         free = device.get("vram_free") if isinstance(device, dict) else None
-        if isinstance(free, int):
-            sample["vram_free_mib"] = free // (1024 * 1024)
-            sample["vram_known"] = True
-        else:
-            sample["vram_known"] = False
-            sample["vram_free_mib"] = None
-        found = rtx_admit.decide(sample)
+        sample = shared_backend.shared_vram(sample, free)
+        found = shared_backend.decide(sample)
         if not found["ok"]:
             reasons.append({"code": found["code"], "reason": found["reason"]})
     return {
@@ -438,7 +433,8 @@ def _assess_shared() -> dict:
         "host_total_mb": sample.get("host_total_mb"),
         "floor_mb": rtx_admit.host_floor_mb(sample.get("host_total_mb")),
         "vram_free_mib": sample.get("vram_free_mib"),
-        "vram_need_mib": WEIGHT_MIB,
+        "vram_need_mib": sample.get("need_vram_mib"),
+        "host_need_mb": sample.get("need_host_mb"),
         "vram_reserve_mib": sample.get("vram_reserve_mib") or rtx_admit.vram_reserve_mib(),
         "cgroup": sample.get("cgroup"),
         "gpu_processes": None,
@@ -464,9 +460,8 @@ def assess() -> dict:
         except OSError:
             size = None
     sample = rtx_admit.collect()
-    sample["need_vram_mib"] = WEIGHT_MIB
-    sample["profile"] = True
-    found = rtx_admit.decide(sample)
+    sample = shared_backend.budgets(sample, load_profile(), WEIGHT_MIB)
+    found = shared_backend.decide(sample)
     processes = gpu_processes()
     listeners = listener_pids()
     shared = set(listeners or [])
@@ -504,7 +499,8 @@ def assess() -> dict:
         "host_total_mb": sample.get("host_total_mb"),
         "floor_mb": rtx_admit.host_floor_mb(sample.get("host_total_mb")),
         "vram_free_mib": sample.get("vram_free_mib"),
-        "vram_need_mib": WEIGHT_MIB,
+        "vram_need_mib": sample.get("need_vram_mib"),
+        "host_need_mb": sample.get("need_host_mb"),
         "vram_reserve_mib": sample.get("vram_reserve_mib") or rtx_admit.vram_reserve_mib(),
         "cgroup": sample.get("cgroup"),
         "gpu_processes": processes,
@@ -534,6 +530,11 @@ def _sample_floor() -> dict:
 
 
 def render_images(args, text: str, render=None, fetch=None, url: str | None = None) -> list[dict]:
+    with shared_backend.session(exchange, shared_origin()):
+        return _render_images(args, text, render, fetch, url)
+
+
+def _render_images(args, text: str, render=None, fetch=None, url: str | None = None) -> list[dict]:
     """Submit stills to the shared ComfyUI. ``render``, ``fetch`` and ``url`` are ignored.
 
     Spark's renderer posts interrupts and follows SPARK_COMFY_URL. This route does neither.
@@ -562,11 +563,14 @@ def render_images(args, text: str, render=None, fetch=None, url: str | None = No
         queue = exchange("GET", "/queue", timeout=10)
         if queue_busy(queue):
             sys.exit("The shared ComfyUI queue already has work. Studio leaves that queue alone.")
+        report = assess()  # recheck after the queue read, immediately before submission
+        if not report["ok"]:
+            sys.exit(report["reason"])
         started = time.time()
         peaks = _sample_floor()
-        posted = exchange("POST", "/prompt", {
+        posted = shared_backend.submit(exchange, shared_origin(), {
             "prompt": workflow(text, seed, args.width, args.height),
-            "client_id": "studio-sdxl"}, timeout=60)
+            "client_id": "studio-sdxl"})
         prompt_id = str(posted.get("prompt_id") or "")
         if not prompt_id:
             sys.exit("The shared ComfyUI did not accept the still.")
@@ -586,6 +590,7 @@ def render_images(args, text: str, render=None, fetch=None, url: str | None = No
             time.sleep(1)
         if record is None:
             sys.exit("The still did not finish within the wait. Studio did not interrupt the shared ComfyUI.")
+        shared_backend.finished()  # backend completion, not client cancellation
         if record.get("status", {}).get("status_str") != "success":
             sys.exit("The shared ComfyUI did not finish the still. Studio did not interrupt it.")
         item = _saved_image(record)

@@ -15,6 +15,31 @@ sys.path.insert(0, str(ROOT / "app"))
 sys.path.insert(0, str(ROOT / "spark"))
 
 
+@pytest.mark.parametrize("base", [False, True])
+def test_qwen_production_uses_the_same_graph_as_qualification(tmp_path, monkeypatch, base):
+    from types import SimpleNamespace
+    import spark_generate as generation
+
+    args = SimpleNamespace(model="qwen", base=base, width=512, height=512, output=str(tmp_path / "image.png"),
+                           seeds="", seed=7, steps=None, cfg=4.0, negative="", upsample=True)
+    graph = generation.qwen_image_workflow(args, "A sunlit hallway.", 7)
+    if base:
+        assert graph["12"]["class_type"] == "KSampler"
+        assert graph["12"]["inputs"]["steps"] == 40 and graph["12"]["inputs"]["cfg"] == 4.0
+    else:
+        assert graph["12"]["class_type"] == "SamplerCustomAdvanced"
+        assert graph["11"]["inputs"]["cfg"] == 1.0 and graph["10"]["inputs"]["sigmas"] == generation.TURBO_SIGMAS
+    calls = []
+    monkeypatch.setattr(generation, "qwen_image_workflow", lambda *given: calls.append(given) or graph)
+    monkeypatch.setattr(generation, "ensure_server", lambda *_: None)
+    monkeypatch.setattr(generation, "prompt_of", lambda _: "A sunlit hallway.")
+    monkeypatch.setattr(generation, "render", lambda actual, sampler: ({"filename": "image.png"}, 0.1)
+                        if actual is graph and sampler == "12" else pytest.fail("Different production graph"))
+    monkeypatch.setattr(generation, "fetch", lambda *_: None)
+    generation.image(args)
+    assert calls == [(args, "A sunlit hallway.", 7)]
+
+
 def test_only_installed_models_are_offered_and_asked_for():
     import server
     from fastapi import HTTPException
@@ -242,6 +267,39 @@ def test_qwen_on_the_mac_draws_the_sparks_noise_for_a_seed():
     expected = [-1.1258398, -1.1523602, -0.2505786, -0.4338788, 0.3222749, 1.9028565, 0.3903958]
     assert np.allclose(noise[[0, 1, 2, 3, 8, -2, -1]], expected, atol=1e-5)
     assert '"--noise", choices=("spark", "mlx"), default="spark"' in (ROOT / "qwen_image_generate.py").read_text()
+
+
+
+def test_a_text_encoder_saved_as_one_file_gets_the_index_mflux_loads_it_by(tmp_path):
+    # issue #10: Qwen-Image-2.1-Turbo's text encoder is one model.safetensors with no index since 2026-10-12, and mflux
+    # opens the index without looking; the index is built from the file's header (gsp-agent's workaround)
+    import importlib.util
+    import json
+    import struct
+    spec = importlib.util.spec_from_file_location("qwen_image_generate", ROOT / "qwen_image_generate.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    folder = tmp_path / "Qwen-Image-2.1-Turbo" / "text_encoder"
+    folder.mkdir(parents=True)
+    header = json.dumps({"__metadata__": {"format": "pt"},
+                         "model.norm.weight": {"dtype": "BF16", "shape": [2], "data_offsets": [0, 4]},
+                         "model.embed_tokens.weight": {"dtype": "BF16", "shape": [2, 2], "data_offsets": [4, 12]}}).encode()
+    (folder / "model.safetensors").write_bytes(struct.pack("<Q", len(header)) + header + bytes(12))
+    module.text_encoder_index(str(folder.parent))
+    index = json.loads((folder / "model.safetensors.index.json").read_text())
+    assert index == {"metadata": {"total_size": 12}, "weight_map": {"model.embed_tokens.weight": "model.safetensors",
+                                                                     "model.norm.weight": "model.safetensors"}}
+    assert [p.name for p in folder.iterdir() if p.name.startswith(".")] == []  # no temp file left behind
+    (folder / "model.safetensors.index.json").write_text("{}")  # an index already there (the base model's shards) stays
+    module.text_encoder_index(str(folder.parent))
+    assert (folder / "model.safetensors.index.json").read_text() == "{}"
+    (folder / "model.safetensors.index.json").unlink()
+    (folder / "model.safetensors").write_bytes(struct.pack("<Q", len(header)) + header + bytes(6))  # cut short
+    with pytest.raises(SystemExit, match="not a whole safetensors file"):
+        module.text_encoder_index(str(folder.parent))
+    assert not (folder / "model.safetensors.index.json").exists()
+    assert "text_encoder_index(model_dir)" in (ROOT / "qwen_image_generate.py").read_text()
+    assert "text_encoder_index(args.model_dir)" in (ROOT / "qwen_image_edit.py").read_text()
 
 
 def test_moss_image_is_offered_only_with_its_files_and_a_comfyui_that_knows_it():

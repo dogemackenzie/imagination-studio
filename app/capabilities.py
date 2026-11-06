@@ -22,7 +22,7 @@ MODES = ("app-only", "managed-rtx", "mac", "spark", "controller")
 # Picture, video, edit, library actions, sound, voice and music. Aliases map onto these.
 GENERATIVE = (
     "scout", "video", "studio", "long", "edit",
-    "turnaround", "upscale", "mask", "remove",
+    "turnaround", "upscale", "mask", "remove", "swap",
     "sfx", "foley", "voice", "music",
 )
 PRESERVED = ("export", "soundtrack")

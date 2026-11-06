@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import ipaddress
 import json
 import math
@@ -38,6 +41,14 @@ from fastapi.staticfiles import StaticFiles
 
 HERE = Path(__file__).resolve().parent
 PACK = HERE.parent
+import windows_media
+os.environ["PATH"] = windows_media.search_path(os.environ.get("PATH", ""))
+import windows_cuda  # noqa: E402  (the native Windows CUDA tier: the Spark's path on Windows, where it is fully installed)
+WINCUDA = windows_cuda.active()  # False off Windows without a look; on Windows it points PREFIX, SPARK_MODELS, ... first
+if windows_cuda.native_os() and not WINCUDA:
+    windows_cuda.activate()  # Standalone native engines and CPU features do not require ComfyUI.
+if sys.platform == "win32":
+    os.environ.setdefault("PREFIX", str(windows_cuda.root()))
 from studio_home import studio_home  # noqa: E402  (~/ImaginationStudio, an older ~/TensorFoldStudio moved there once)
 import history  # noqa: E402  (a record of jobs, not the queue)
 import housekeeping  # noqa: E402  (disk reserve and Studio-owned temp files)
@@ -48,6 +59,12 @@ for name in ("projects", "uploads", "renders", "scouts", "exports"):
 import access  # noqa: E402  (the studio's access key, beside this file)
 ACCESS_KEY = access.ensure(HOME)  # <studio folder>/access-key, 0600, made once and kept
 APP_PORT = os.environ.get("PORT", "7870")
+LOCAL_GPU_CHILD = os.environ.get("STUDIO_LOCAL_GPU_CHILD") == "1"
+LOCAL_GPU_KEY = os.environ.get("STUDIO_LOCAL_GPU_KEY", "")
+if LOCAL_GPU_CHILD:
+    if not LOCAL_GPU_KEY:
+        raise RuntimeError("a managed local GPU worker requires its private control key")
+    os.environ["STUDIO_DISCOVER_DELAY"] = "-1"
 
 import lengths  # noqa: E402  (which frame counts the model takes, beside this file)
 sys.path.insert(0, str(PACK / "spark"))
@@ -148,12 +165,30 @@ def lead(first: bool, last: bool, seconds: float = 5, frames: int | None = None)
 
 # On a DGX Spark (Linux, CUDA) the scripts hand over to spark/: FastH3 and Qwen-Image-2.1 through ComfyUI. There is no
 # 2x decoder and no MiniMax H3 Turbo there, so only the native sizes and the FastH3 qualities are offered.
+# Windows reuses the shared CUDA command builders where their core is installed. Actual feature/backend selection
+# belongs to windows_runtime; WINDOWS remains a compatibility flag for older callers/tests, not a user-facing tier.
+WIN32 = sys.platform == "win32"
+
+WINDOWS = WIN32 and not WINCUDA
+import windows_storyboard
+import windows_sound
+import windows_features
+import windows_checks
+import windows_foley
+import windows_runtime
+if WINDOWS or WIN32:
+    os.environ.update(windows_runtime.session_env())
+WINDOWS_NOTE = ("Native Windows: each feature selects its installed backend. Machine > Feature checks explains model choices, "
+                "verification and memory requirements. Draft fallbacks are labelled; prerequisites and live memory guards always apply.")
+WINCUDA_NOTE = ("Native Windows (CUDA): video, pictures, songs, voice, sound effects and foley, the Library's actions, Character "
+                "Swap, LoRA training, Tesseract Finish and the Bolt brain run on this machine through ComfyUI and TensorFold's "
+                "Windows engines, each once its part is installed. Not native: DGX Spark workers (this machine renders alone).")
 # Linux is not a Spark. hardware.is_spark is a GB10 or "DGX Spark" in the GPU name or the DMI product.
 # The tables stay complete and filter from the live flag, so a test that sets SPARK still sees that machine's presets.
 import hardware  # noqa: E402
 import capabilities  # noqa: E402
 
-SPARK = hardware.is_spark()
+SPARK = hardware.is_spark() or WINCUDA
 
 
 class _LiveTable:
@@ -207,7 +242,8 @@ QUALITIES = _LiveTable(QUALITIES, _spark_quality)
 # scripts on TensorFold's CUDA engine with the 8-bit video decoder at 8 passes: 864x480 in 73 s (a pass 7.1 s, the
 # decode 14 s), 1280x736 in 183 s (18 s, 28 s) and 1344x768 in about 195 s (20.5 s, 29 s). The 4 and 20 pass cells
 # follow from the pass time.
-SPARK_ENGINE_LIB = Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-studio")) / "tf-h3" / "libtf_h3.so"
+SPARK_ENGINE_LIB = (Path(os.environ["TF_H3_LIB"]) if WINCUDA else
+                    Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-studio")) / "tf-h3" / "libtf_h3.so")
 SPARK_FASTH3_5S = {"fh4": {"small": 45, "p720": 111, "native": 113},
                    "fh8": {"small": 73, "p720": 183, "native": 195, "sharp": 202},  # sharp: Sam Wasserman's 330 to 380 s at 8 s
                    "fh20": {"small": 158, "p720": 399, "native": 441}}
@@ -216,6 +252,11 @@ SPARK_FASTH3_5S = {"fh4": {"small": 45, "p720": 111, "native": 113},
 SPARK_COMFY_5S = {"fh4": {"small": 76, "p720": 155, "native": 172},
                   "fh8": {"small": 118, "p720": 260, "native": 289},
                   "fh20": {"small": 244, "p720": 575, "native": 642}}
+# A discrete card's own warm samples, written beside the GB10 tables. Not a copy of those tables.
+# One entry is one canvas: (quality, preset, seconds, text_only) -> wall seconds, models already loaded.
+# A cold load is not an entry. Nothing else is priced from it: not another canvas, pass count, or length,
+# and not a clip that opens on a picture. Empty until this GPU has a sample. The line may then say "on this card."
+CARD_WARM: dict[tuple, int] = {}
 
 
 GPU_NAME: list[str] = []  # asked of the driver once: see machine()
@@ -230,16 +271,21 @@ def machine() -> tuple[str, str]:
     answering. A page that polls the state then holds one of the server's threads per call."""
 
     where = capabilities.mode(SPARK)
-    if where == "spark":
+    if WINDOWS or WIN32:
+        return "windows", "NATIVE WINDOWS"
+    if SPARK:
         if not GPU_NAME:
             try:
                 GPU_NAME.append(subprocess.run([*memory_guard.nvidia_argv(), "--query-gpu=name", "--format=csv,noheader"],
                                                capture_output=True, text=True, timeout=5).stdout.strip().splitlines()[0])
             except (OSError, IndexError, subprocess.TimeoutExpired):
                 return "spark", "DGX SPARK · CUDA · H3-CUDA"  # not kept: asked again on a later call
-        # the same build on a CUDA workstation (an RTX Pro 6000): named by its card, not as a DGX Spark
+        # the same build on a CUDA workstation (an RTX Pro 6000): named by its card, not as a DGX Spark; paired cards
+        # (STUDIO_GPUS) as "2× <card>"
+        paired = memory_guard.paired_gpus()
+        many = f"{len(paired)}× " if len(paired) > 1 else ""
         return "spark", (f"DGX SPARK · {GPU_NAME[0].upper()} · H3-CUDA" if "GB10" in GPU_NAME[0].upper()
-                         else f"CUDA · {GPU_NAME[0].upper()} · H3-CUDA")
+                         else f"CUDA · {many}{GPU_NAME[0].upper()} · H3-CUDA")
     if where == "mac":
         # no chip name: the same recipe runs from an M1 with 64 GB up
         return "mac", "MAC · APPLE SILICON MX · H3-METAL"
@@ -255,6 +301,14 @@ def machine() -> tuple[str, str]:
     return "linux", "LINUX"
 
 
+def card_face() -> bool:
+    """The discrete-card face of the CUDA build. The banner ``machine()`` writes starts with ``CUDA · ``.
+
+    A GB10, and a failed nvidia-smi, start with ``DGX SPARK``. The pages' ``cardFace()`` reads that same banner."""
+
+    return bool(SPARK and machine()[1].startswith("CUDA · "))
+
+
 app = FastAPI(title="Imagination Studio by keys+Wasserman, powered by TensorFold, built with Fish Audio Drama 3")
 jobs: dict[str, dict] = {}
 order: list[str] = []
@@ -262,7 +316,10 @@ lock = threading.Lock()
 wake = threading.Event()
 running: dict = {"process": None, "id": None}
 update_writes = 0
-_closing = threading.Event()  # set while this process is shutting down; new writes are refused
+stopping = threading.Event()
+local_work = threading.Condition()
+local_threads: set[threading.Thread] = set()
+_closing = stopping  # one admission/shutdown signal across both queue implementations
 
 
 @app.middleware("http")
@@ -399,6 +456,12 @@ class WriteGuard:
         if scope["type"] not in ("http", "websocket"):
             return await self.app(scope, receive, send)
         headers = {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in scope["headers"]}
+        if LOCAL_GPU_CHILD and ((scope.get("client") or (None,))[0] not in access.LOOPBACK_CLIENTS
+                                or not access.matches(headers.get(access.HEADER.lower()), LOCAL_GPU_KEY)):
+            if scope["type"] == "websocket":
+                return await send({"type": "websocket.close", "code": 4403})
+            return await JSONResponse({"error": "a managed local GPU worker requires its private control key"},
+                                      status_code=403)(scope, receive, send)
         if not trusted_host(headers.get("host", "")):
             if scope["type"] == "websocket":
                 return await send({"type": "websocket.close", "code": 1008})
@@ -427,6 +490,8 @@ class WriteGuard:
                 return await too_large(scope, receive, send)
         except ValueError:
             return await JSONResponse({"error": "Content-Length is a number"}, status_code=400)(scope, receive, send)
+        if WINDOWS and windows_runtime.mode()["enabled"] and not WINDOWS_WRITES.fullmatch(scope["path"]):
+            return await JSONResponse({"error": WINDOWS_NOTE}, status_code=501)(scope, receive, send)
         seen, over, started = 0, False, False
 
         async def counted():  # a body sent without a length (chunked) is counted as it comes
@@ -670,10 +735,19 @@ class SecurityHeaders:
 
 app.add_middleware(SecurityHeaders)
 
+WINDOWS_WRITES = re.compile(
+    r"/api/(?:key(?:/new)?|settings|compose|prompt/check|estimate|upload|frame|clear|trash(?:/restore)?|storage/refresh|motion/packs/import|jobs(?:/[A-Za-z0-9_-]+/cancel)?|"
+    r"projects(?:/[A-Za-z0-9_-]+)?|slate/(?:projects(?:/[A-Za-z0-9_-]+)?|exists|compile|brain|package)|"
+    r"suite/import|suite/imports/[A-Za-z0-9_-]+/(?:slate|attach|motion)|"
+    r"brains/(?:settings|test|(?:copilot|local)/(?:verify|default))|agent/(?:tasks(?:/[A-Za-z0-9_-]+/cancel)?|"
+    r"threads(?:/[A-Za-z0-9_-]+(?:/(?:messages|cancel))?)?)|"
+    r"music/beats|windows/stills/unload|windows/features/check|feature-checks/(?:check|mode)|nodes/(?:graphs(?:/[A-Za-z0-9_-]+)?|check))\Z"
+)
 
-def accepting_jobs():
+
+def accepting_jobs(job: dict | None = None):
     """Called under the queue lock, shared with the updater's idle check."""
-    if _closing.is_set():
+    if stopping.is_set():
         raise HTTPException(503, "Studio is shutting down.")
     if updater.maintenance.is_set():
         raise HTTPException(503, "Studio is restarting for an update. Try again after it reconnects.")
@@ -716,7 +790,7 @@ def hidden(relative_path: Path | str) -> bool:
 
 
 def relative(path: Path) -> str:
-    return str(Path(path).resolve().relative_to(HOME.resolve()))
+    return Path(path).resolve().relative_to(HOME.resolve()).as_posix()
 
 
 # What a Motion Previs layer shows, for the model: a control layer is a diagram of the shot, not footage of it.
@@ -1161,6 +1235,7 @@ IMAGE_MODELS = {"qwen": ("Qwen 2.1 Turbo", "8 steps, the quickest draft; Qwen Re
                 "moss-image": ("MOSS-Image", "25 steps: exact lettering for posters, titles and signs; Apache 2.0, commercial use allowed"),
                 "sdxl-turbo": (sdxl_turbo.LABEL, sdxl_turbo.NOTE),
                 "z-image": (z_image_turbo.LABEL, z_image_turbo.NOTE)}
+IMAGE_MODELS["sd-turbo"] = ("SD-Turbo", "Windows storyboard draft, 512x512, one step; Stability AI Community License")
 # BFL's file names, the present one first (renamed 2026-10-17, the same files; spark_generate.FLUX3_OLD)
 FLUX3_FILES = {"flux3k-fast": ("flux3-image-klein-bf16.safetensors", "flux3_image_klein_sd_bf16.safetensors"),
                "flux3k-full": ("flux3-image-klein-base-bf16.safetensors", "flux3_image_klein_base_bf16.safetensors")}
@@ -1181,6 +1256,11 @@ def image_models() -> list[str]:
     checkpoints on a Mac. An app-only machine lists none of those: it must not invent a Qwen install. SDXL Turbo
     is listed only when its measured profile is enabled and the checkpoint is the recorded file."""
 
+    if WINDOWS or WIN32:
+        choices = windows_runtime.image_options()
+        ready = [choice["id"] for choice in choices if choice["available"]]
+        preferred = windows_runtime.default_image()
+        return ([preferred] if preferred in ready else []) + [kind for kind in ready if kind != preferred]
     if not capabilities.renders(SPARK):
         if SPARK:
             return []
@@ -1419,6 +1499,17 @@ def references(params: dict) -> dict:
 
 def estimate(preset: str, quality: str, seconds: float, text_only: bool = False, referenced: bool = False,
              ref_turbo: bool = False, ref_media: bool = False) -> int | None:
+    if WINDOWS or WINCUDA and windows_cuda.h3_why_not():
+        return None
+    if card_face():
+        # this GPU's own sample of this canvas, or no number. Not the GB10 table, and not a power of it.
+        if referenced or ref_media or seconds > LONGEST:
+            return None
+        seconds_key = float(seconds)
+        if seconds_key.is_integer():
+            seconds_key = int(seconds_key)
+        hit = CARD_WARM.get((quality, preset, seconds_key, bool(text_only)))
+        return None if hit is None else int(hit)
     if referenced and ref_media:
         return None  # a reference video or audio clip adds its own rows to every pass: the time depends on its length
     if referenced:
@@ -1458,7 +1549,14 @@ def environment(extra: dict) -> dict:
     for key, value in settings.job_env().items():  # Settings → Presets (the delivery sound rate); the environment's own wins
         env.setdefault(key, value)
     env.update({key: str(value) for key, value in extra.items() if value not in (None, "")})
-    env["PATH"] = "/opt/homebrew/bin:" + env.get("PATH", "")
+    if WINDOWS or WIN32:
+        env["PATH"] = windows_media.search_path(env.get("PATH", ""))
+        env.update(windows_runtime.session_env())
+        if WINCUDA:  # the render scripts print prompts and paths in UTF-8 whatever the console's code page is
+            env.setdefault("PYTHONUTF8", "1")
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+    else:
+        env["PATH"] = os.pathsep.join(["/opt/homebrew/bin", env.get("PATH", "")])
     return env
 
 
@@ -1555,7 +1653,11 @@ def bolt_need(job: dict, resident_gb: float) -> tuple[bool, str] | None:
     room = bolt_room_mb(resident_gb)
     if room is None:
         return None
-    floor = memory_guard.floor_mb()
+    # On a card the floor is the 2 GB margin, once. bolt_room_mb is that room after the margin, so the voice
+    # branch adds the margin back and compares it once (memory_guard.card_pool, which holds it to the RAM too).
+    # A Spark keeps a tenth of its RAM, and so does a card with STUDIO_ROOM_MB (its budget is the RAM).
+    on_card = memory_guard.card_room_applies()
+    floor = memory_guard.VRAM_MARGIN_MB if on_card else memory_guard.floor_mb()
     try:
         if kind in ("video", "studio", "long"):
             chosen, _ = custom(params) if params.get("preset") == "custom" else ({}, False)
@@ -1566,15 +1668,22 @@ def bolt_need(job: dict, resident_gb: float) -> tuple[bool, str] | None:
             said = memory_of(params, sized, frames, bool(params.get("loras")), found, available_mb=room)
         elif kind == "music":
             said = memory_guard.music_check(float(params.get("seconds") or 60), available_mb=room,
-                                            route=getattr(music.engine(), "guard_route", "music"))
+                                            route=music.guard_route(params), card=on_card)
         elif kind in sound.KINDS:
-            said = memory_guard.sound_check(kind, float(params.get("seconds") or 10), available_mb=room)
+            said = memory_guard.sound_check(kind, float(params.get("seconds") or 10), available_mb=room, card=on_card)
             if said.get("need_mb") is None:
                 return None
+        elif kind in swap.KINDS:
+            said = memory_guard.swap_check(int(params.get("quality") or swap.QUALITY), available_mb=room, card=on_card,
+                                           weights=swap_build.weights())
         elif kind == "voice":
             one = voice.backend()
             need = 0 if one.loaded() else int(float(getattr(one, "NEED_GB", 50)) * 1024)
-            said = {"fits": room - need >= floor, "need_mb": need, "available_mb": room}
+            if on_card:
+                have, floor, _ = memory_guard.card_pool(room)
+                said = {"fits": have - need >= floor, "need_mb": need, "available_mb": have}
+            else:
+                said = {"fits": room - need >= floor, "need_mb": need, "available_mb": room}
         else:
             return None
     except (HTTPException, ValueError, KeyError, TypeError):
@@ -1582,6 +1691,7 @@ def bolt_need(job: dict, resident_gb: float) -> tuple[bool, str] | None:
     if said.get("route") is None and said.get("need_mb") is None:
         return None
     need, have = said.get("need_mb") or 0, said.get("available_mb") or room
+    floor = said.get("floor_mb") or floor
     return bool(said.get("fits")), (f"{have / 1000:.0f} GB for the job with Bolt resident, the job's estimated peak about "
                                     f"{need / 1000:.0f} GB, the floor {floor / 1000:.0f} GB")
 
@@ -1603,11 +1713,22 @@ def memory_of(params: dict, env: dict, frames: int, lora: bool, found: dict | No
     engine = SPARK_ENGINE_LIB.exists() and (not lora or memory_guard.engine_takes_lora(SPARK_ENGINE_LIB))
     # a Drama 3 server kept loaded after a voice take is unloaded before this job starts (voice.release): its memory
     # counts as this job's, like the ComfyUI server's own; so does MiniMax Music 3's CUDA engine (music.release), and
-    # NVIDIA Nemotron 3.5 Bolt's (bolt.admit unloads it when the job does not fit beside it)
-    room = held_room() if available_mb is None else available_mb
-    return memory_guard.check(width, height, frames, lora=lora, references=bool(found), available_mb=room,
+    # NVIDIA Nemotron 3.5 Bolt's (bolt.admit unloads it when the job does not fit beside it).
+    # On a card that memory is the card's raw free before the engine loaded. held_room() mixes it with the
+    # after-margin card room, so it is not passed in. A caller that already adjusted the card's room (Bolt beside
+    # the job) passes it through and the margin is applied once.
+    # With STUDIO_ROOM_MB the budget is the machine's RAM and the job keeps the Spark's arithmetic (held_room).
+    on_card = memory_guard.card_room_applies()
+    if on_card and available_mb is None:
+        room = memory_guard.card_room_for_job([voice.room_mb(), music.room_mb(), bolt.room_mb()])
+        card = True
+    elif on_card:
+        room, card = available_mb, True
+    else:
+        room, card = (held_room() if available_mb is None else available_mb), False
+    return memory_guard.check(width, height, frames, lora=lora, references=bool(found), available_mb=room, card=card,
                               base=env.get("SPARK_BASE") == "h3", engine=engine,
-                              pictures=len(found.get("pictures") or []),
+                              pictures=len(found.get("pictures") or []), adapter=bool(found and params.get("ref_turbo")),
                               reference_frames=sum(min(frames, int(round((media_seconds(path)[0] or frames / FPS) * FPS))) for path in videos))
 
 
@@ -1618,7 +1739,7 @@ def media_tools() -> dict:
     return {name: bool(shutil.which(name, path=path)) for name in ("ffmpeg", "ffprobe")}
 
 
-FFMPEG_HOW = "sudo apt install ffmpeg" if sys.platform.startswith("linux") else "brew install ffmpeg"
+FFMPEG_HOW = "run scripts\\setup-windows-ffmpeg.ps1 and restart Studio, or add ffmpeg and ffprobe to PATH" if WIN32 else "sudo apt install ffmpeg" if sys.platform.startswith("linux") else "brew install ffmpeg"
 FFMPEG_NOTE = ("ffmpeg is not installed on this machine (" + FFMPEG_HOW + "). Without it: no long videos, no timeline export, "
                "no frame taken from a clip (continue from a clip, end on a clip), no reference videos or audio, no silenced "
                "sound track" + (", and a clip keeps ComfyUI's own sound track instead of the limited 256 kb/s one. Single clips, "
@@ -1696,12 +1817,39 @@ def build(kind: str, params: dict, job_id: str, room: bool = True) -> tuple[list
     """(command, environment, output paths) for one job. ``room`` False leaves this machine's memory out of it: the
     clip renders on another Spark, whose own guard is asked (sparks.py)."""
 
+    if (WINDOWS or WIN32) and windows_runtime.bounded(kind, params):
+        if kind == "qualification":
+            return windows_checks.build(HOME, params, job_id)
+        if kind == "foley":
+            try:
+                windows_foley.preflight()
+                return windows_foley.build(params, HOME, job_id, inside)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                raise HTTPException(400, str(error)) from None
+        if kind == "graphics":
+            return graphics_build(params, job_id)
+        if kind in windows_features.KINDS:
+            try:
+                windows_features.preflight(kind)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise HTTPException(400, str(error)) from None
+            return finish.build(params, job_id, local_only=True) if kind == "finish" else action_build(kind, params, job_id)
+        if kind != "scout":
+            raise HTTPException(501, WINDOWS_NOTE)
+        return windows_storyboard.build(params, HOME, job_id)
+    if WINDOWS or WIN32:
+        try:
+            windows_runtime.require_native(kind, params)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from None
     scripts = PACK / "scripts"
-    if kind in actions.KINDS:  # a Library action (actions.py): turnaround, upscale, mask, remove
+    if kind in actions.KINDS:  # a Library action (actions.py): turnaround, upscale, mask, remove, hlg
         built = action_build(kind, params, job_id)
         if room:
             mac_comfy_room(kind)
         return built
+    if kind in swap.KINDS:  # Character Swap, a Library action on a clip (swap.py: spark/spark_swap.py)
+        return swap_build(kind, params, job_id)
     if kind in sound.KINDS:  # a sound effect or a clip's foley (sound.py)
         return sound_build(kind, params, job_id)
     if kind in train.KINDS:  # a LoRA trained on this Spark (train.py: spark/train_lora.py)
@@ -1712,6 +1860,11 @@ def build(kind: str, params: dict, job_id: str, room: bool = True) -> tuple[list
         return graphics_build(params, job_id)
     seed = str(int(params.get("seed", 0)))
     if kind == "scout":
+        if ((WINDOWS or WIN32) and windows_runtime.mode()["enabled"]
+                and params.get("image_model") in windows_runtime.IMAGE_SPECS and params.get("prompts")):
+            raise HTTPException(400, "The checked native recipe takes one image prompt at a time.")
+        if params.get("loras"):  # text to picture has no LoRA path: an identity LoRA works only in an edit of a picture
+            raise HTTPException(400, "a picture made from words alone cannot take LoRAs (they would be ignored): use Edit a picture with a source picture for an identity LoRA")
         folder = HOME / "scouts" / job_id
         prompt = params["prompt"]
         count = max(1, min(int(params.get("count", 4)), 12))
@@ -1731,6 +1884,13 @@ def build(kind: str, params: dict, job_id: str, room: bool = True) -> tuple[list
                 width, height = z_image_turbo.canvas(params)
             except ValueError as error:
                 raise HTTPException(400, str(error)) from None
+        if (WINDOWS or WIN32) and windows_runtime.mode()["enabled"]:
+            import windows_image_checks
+            if params.get("image_model") in windows_image_checks.KINDS:
+                try:
+                    windows_image_checks.require_scope(params["image_model"], width, height, count)
+                except ValueError as error:
+                    raise HTTPException(400, str(error)) from None
         env = {"SEED": seed, "WIDTH": width, "HEIGHT": height, **image_model_env(params)}
         # After the profile check inside image_model_env, so a missing profile is the error, not the count.
         if params.get("image_model") == "sdxl-turbo":
@@ -1839,7 +1999,10 @@ def passes(chosen: dict, steps: bool) -> dict:
 
 
 def last_frame(video: Path, image: Path) -> None:
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-sseof", "-0.2", "-i", str(video), "-vsync", "0", "-update", "1",
+    """The clip's last frame. No -vsync/-fps_mode: ffmpeg 7+ dropped -vsync and 4.x lacks -fps_mode, and with -update
+    each decoded frame overwrites the image, so the last one written is the last frame either way."""
+
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-sseof", "-0.2", "-i", str(video), "-update", "1",
                     "-q:v", "1", str(image)], check=True, env=environment({}), timeout=120)
 
 
@@ -1864,25 +2027,42 @@ def export(job: dict) -> None:
         source = inside(clip["path"])
         start = max(0.0, float(clip.get("in", 0.0)))
         end = float(clip.get("out", 0.0))
-        inputs += ["-i", str(source)]
+        inputs += (["-threads", "1"] if in_container() else []) + ["-i", str(source)]
         cut = f"start={start}" + (f":end={end}" if end > start else "")  # Out 0 (or before In) plays to the clip's end
         span = f"trim={cut},setpts=PTS-STARTPTS," if start > 0 or end > start else ""
         aspan = f"atrim={cut},asetpts=PTS-STARTPTS," if start > 0 or end > start else ""
         length = (end - start) if end > start else max(float(clip.get("duration", 5.0)) - start, 0.1)
+        sound = clip.get("sound", True)
+        if in_container():
+            duration, sound = media_seconds(str(source))
+            if duration is None or sound is None:
+                raise RuntimeError("the export clip could not be measured")
+            length = max(min(end, duration) - start if end > start else duration - start, 0.1)
         fade = min(0.08, length / 4)
         filters.append(f"[{index}:v]{span}scale={width}:{height}:force_original_aspect_ratio=decrease,"
                        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS}[v{index}]")
-        filters.append(f"[{index}:a]{aspan}afade=t=in:d={fade},afade=t=out:st={max(length - fade, 0)}:d={fade},"
-                       f"aresample=48000[a{index}]")
+        audio = f"[{index}:a]{aspan}"
+        if (WINDOWS or in_container()) and not sound:
+            audio = f"anullsrc=r=48000:cl=stereo,atrim=duration={length},"
+        layout = ",aformat=channel_layouts=stereo" if WINDOWS or in_container() else ""
+        filters.append(f"{audio}afade=t=in:d={fade},afade=t=out:st={max(length - fade, 0)}:d={fade},"
+                       f"aresample=48000{layout}[a{index}]")
         labels.append(f"[v{index}][a{index}]")
     filters.append(f"{''.join(labels)}concat=n={len(clips)}:v=1:a=1[v][a]")
     command = ["ffmpeg", "-v", "error", "-y", *inputs, "-filter_complex", ";".join(filters), "-map", "[v]", "-map",
                "[a]", "-c:v", "libx264", "-crf", "17", "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "aac",
                "-b:a", "256k", str(target)]
-    done = subprocess.run(command, capture_output=True, text=True, env=environment({}))
-    job["log"] += done.stderr
-    if done.returncode:
-        raise RuntimeError("ffmpeg failed")
+    if in_container():
+        command[1:1] = ["-filter_complex_threads", "1"]
+        command[-1:-1] = ["-threads", "2"]
+    if WINDOWS or in_container():
+        if not run(job, command, {}):
+            return
+    else:
+        done = subprocess.run(command, capture_output=True, text=True, env=environment({}))
+        job["log"] += done.stderr
+        if done.returncode:
+            raise RuntimeError("ffmpeg failed")
     job["outputs"] = [relative(target)]
     if params.get("soundtrack"):  # a song of the Music tab laid under the whole export (music.lay)
         said = params["soundtrack"]
@@ -1895,41 +2075,115 @@ def export(job: dict) -> None:
         job["progress"] = None
 
 
-STEP = re.compile(r"\[tensorfold\] (step|voice|ar|dit|train) (\d+)/(\d+)")
-STEP_WORDS = {"step": "picture", "voice": "sound", "ar": "the model writes the song", "dit": "the sound", "train": "training step"}  # MiniMax Music 3: ar, dit
+STEP = re.compile(r"\[tensorfold\] (step|voice|ar|dit|train|frame) (\d+)/(\d+)")
+STEP_WORDS = {"step": "picture", "voice": "sound", "ar": "the model writes the song", "dit": "the sound", "train": "training step",
+              "frame": "frame"}  # MiniMax Music 3: ar, dit; frame: a clip followed frame by frame (Character Swap)
+STAGE = re.compile(r"\[tensorfold\] stage (\d+)/(\d+) (.+)$")  # a job of several stages (Character Swap): said above its passes
 RAN_ON = re.compile(r"\[tensorfold\] engine: (\w+)")
 
 
 def run(job: dict, command: list[str], env: dict, label: str = "") -> bool:
-    """Run one script for ``job``, following its progress; False when the job was cancelled meanwhile."""
+    """Run one script for ``job``, following its progress; False when cancelled."""
 
-    process = subprocess.Popen(command, cwd=PACK, env=environment(env), stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, text=True, start_new_session=True)
-    running.update(process=process, id=job["id"])
+    managed = SPARK and (LOCAL_GPU_CHILD or hub.local.managed)
+    owned = None
+    deadline = None
+    expired = threading.Event()
+    child_env = environment(env)
+    job_key = uuid.uuid4().hex if managed else None
+    if job_key:
+        child_env["STUDIO_GPU_JOB_KEY"] = job_key
+    local_windows = WINDOWS or WIN32
+    bounded_job = local_windows and windows_runtime.bounded(job["kind"], job["params"])
+    with lock:  # cancellation must see either no launch, or the published owned process
+        if job["status"] in ("cancelled", "failed", "done") or stopping.is_set():
+            return False
+        if (WINDOWS or WIN32) and running.get("process") is not None:
+            raise RuntimeError("the previous Windows job did not drain; no new render was started")
+        if WINDOWS or WIN32:
+            from windows_process import OwnedJob
+            if WINCUDA and not bounded_job:
+                command = windows_cuda.translate(command)
+            # the native tier's job tree may let ComfyUI break away (spark/comfy_win.py): it stays warm after the job
+            gpu_check = local_windows and bounded_job and windows_checks.gpu_check(job)
+            # Native image checks keep production native guards; draft allocator/commit caps do not apply.
+            commit = (0 if windows_checks.native_image_check(job) else windows_storyboard.JOB_LIMIT_MB if gpu_check else
+                      windows_features.COMMIT_MB if bounded_job and job["kind"] in (*windows_features.KINDS, "qualification") else
+                      graphics.WINDOWS_COMMIT_MB if job["kind"] == "graphics" else 0)
+            owned = OwnedJob(job_commit_mb=commit, breakaway=WINCUDA and not bounded_job)
+            try:
+                process = owned.spawn(command, cwd=PACK, env=child_env, stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                                      stdin=subprocess.PIPE if "prompts" in job["params"] else subprocess.DEVNULL,
+                                      creationflags=0x08000000 if windows_checks.native_image_check(job) else 0)
+            except (OSError, RuntimeError):
+                owned.close()
+                raise
+            def timed_out():
+                expired.set()
+                owned.terminate()
+            if bounded_job:
+                deadline = threading.Timer(windows_checks.timeout_seconds(job), timed_out)
+                deadline.daemon = True
+                deadline.start()
+        else:
+            process = subprocess.Popen(command, cwd=PACK, env=child_env, stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT, text=True, start_new_session=True)
+        start = local_gpus.process_identity(process.pid) if managed else None
+        running.update(process=process, id=job["id"], start=start, key=job_key, owned_job=owned)
     try:
-        for line in process.stdout:
-            job["log"] = (job["log"] + line)[-20000:]
-            engine = RAN_ON.search(line)
-            if engine:
-                job["engine"] = engine.group(1)
-            found = STEP.search(line)
-            if found:
-                kind, at, total = found.group(1), int(found.group(2)), int(found.group(3))
-                job["progress"] = {"stage": label + STEP_WORDS[kind], "at": at, "of": total}
-        code = process.wait()
-    finally:  # a reader that died mid-render must not leave the detached group owning the GPU
-        if process.poll() is None:
+        if (WINDOWS or WIN32) and "prompts" in job["params"]:
+            try:
+                with process.stdin as pipe:
+                    pipe.write(json.dumps({key: job["params"][key] for key in ("prompts", "seeds")
+                                           if key in job["params"]}, ensure_ascii=False))
+            except BrokenPipeError as error:
+                if job["status"] == "cancelled":
+                    return False
+                raise RuntimeError("the Windows renderer could not read its batched prompts") from error
+        guard = windows_features.watch(owned) if local_windows and job["kind"] in windows_features.KINDS else contextlib.nullcontext()
+        with guard:
+            for line in process.stdout:
+                job["log"] = (job["log"] + line)[-20000:]
+                engine = RAN_ON.search(line)
+                if engine:
+                    job["engine"] = engine.group(1)
+                staged = STAGE.search(line.rstrip())
+                if staged:
+                    label = staged.group(3).strip() + " · "
+                    job["progress"] = {"stage": staged.group(3).strip(), "at": int(staged.group(1)), "of": int(staged.group(2))}
+                found = STEP.search(line)
+                if found:
+                    kind, at, total = found.group(1), int(found.group(2)), int(found.group(3))
+                    job["progress"] = {"stage": label + STEP_WORDS[kind], "at": at, "of": total}
+            code = process.wait()
+    finally:
+        if deadline:
+            deadline.cancel()
+        # Successful scripts leave ComfyUI warm; only aborted/failed runner trees are drained here.
+        if owned:
+            owned.close()
+        elif managed and (process.poll() != 0 or job["status"] == "cancelled"):
+            if not local_gpus.stop_job_tree(process.pid, start, key=job_key):
+                hub.local.drain_failed = True
+                raise RuntimeError("Owned job processes did not stop; their GPU lease is retained.")
+        elif process.poll() is None:
             with contextlib.suppress(ProcessLookupError, OSError):
                 os.killpg(process.pid, signal.SIGKILL)
         with contextlib.suppress(subprocess.TimeoutExpired, OSError):
             process.wait(10)
-        running.update(process=None, id=None)
+        with lock:
+            if running["process"] is process:
+                running.update(process=None, id=None, start=None, key=None, owned_job=None)
     if job["status"] == "cancelled":
         return False
+    if expired.is_set():
+        raise RuntimeError(f"the Windows image job exceeded its {windows_checks.timeout_seconds(job)} second deadline")
     if code:
-        # the script's own last words say why: a file out of range, a model not installed, memory
+        # The script's own last words explain a refusal better than the runner's exit status.
         said = [line.strip() for line in job["log"].splitlines() if line.strip() and not STEP.search(line)]
-        raise RuntimeError((said[-1][-400:] if said else "the script stopped") + f" (status {code})")
+        # the exit status only where the script gave no words of its own: a refusal reads as the script wrote it
+        raise RuntimeError(said[-1][-400:] if said else f"the script stopped (status {code})")
     return True
 
 
@@ -1937,6 +2191,41 @@ def take(job: dict, params: dict, label: str = "") -> tuple[bool, dict, list[str
     """One render of a job's clip, on this machine or on the Spark the job was handed to (sparks.py), which leaves the
     clip at the same path: (False when the job was cancelled meanwhile, the environment, the output paths)."""
 
+    if (WINDOWS or WIN32) and job["kind"] in ("scout", "sfx") and windows_runtime.bounded(job["kind"], params):
+        expired = threading.Event()
+        def timed_out():
+            with lock:
+                if job["status"] not in ("queued", "running"):
+                    return
+                expired.set()
+                job["status"] = "cancelled"
+            try:
+                windows_storyboard.cancel_job(job["id"])
+            except (OSError, RuntimeError, ValueError) as error:
+                job["log"] += f"[tensorfold] timed-out ComfyUI prompt cancellation failed: {error}\n"
+        deadline = threading.Timer(600, timed_out)
+        deadline.daemon = True
+        deadline.start()
+        try:
+            result = windows_storyboard.render_job(job, HOME)
+        finally:
+            deadline.cancel()
+        if expired.is_set():
+            job["status"] = "failed"
+            raise RuntimeError("the Windows image job exceeded its 600 second deadline")
+        if result.get("cancelled") or job["status"] == "cancelled":
+            return False, {}, []
+        job["engine"] = "cuda"
+        job["render"] = {"backend_reused": result["backend_reused"],
+                         "request_seconds": result["request_to_files_seconds"]}
+        job["log"] += f"[tensorfold] ComfyUI {'reused' if result['backend_reused'] else 'started'}; kept warm\n"
+        if job["kind"] == "sfx":
+            target = HOME / "sound" / "sfx" / job["id"] / "sound.wav"
+            job["_sound_seconds"] = result["audio"]["seconds"]
+            return True, {}, [str(target)]
+        target = HOME / "scouts" / job["id"]
+        paths = [str(target / name) for _, _, name in windows_storyboard.image_plan(params)]
+        return True, {}, paths + [str(target / "sheet.jpg")]
     worker = job.get("remote") and next((one for one in hub.workers() if one["address"] == job["remote"]), {"address": job["remote"]})
     if worker:
         _, env, outputs = build(job["kind"], params, job["id"], room=False)
@@ -1948,8 +2237,9 @@ def take(job: dict, params: dict, label: str = "") -> tuple[bool, dict, list[str
 
 
 def hush(clip: Path) -> None:
-    """The clip with its sound track silenced (``silent`` in a job's settings: a Flow clip without music). Asking the
-    model for near silence is not enough: on the Mac it laid music of its own over two of three such clips."""
+    """The clip with its sound track silenced (``silent`` in a job's settings: the Video page's *No sound*, or a Flow
+    clip without music; for a long video, its joined file). Asking the model for near silence is not enough: on the
+    Mac it laid music of its own over two of three such clips."""
 
     quiet = clip.with_name(clip.stem + ".quiet" + clip.suffix)
     done = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(clip), "-map", "0:v:0", "-map", "0:a?", "-c:v", "copy", "-af", "volume=0",
@@ -2103,7 +2393,114 @@ def long_take(job: dict) -> bool:
     return True
 
 
+# Cold host-RAM high-water on a 96 GB RTX PRO 6000 Blackwell card in a two-card 128 GB host,
+# sampled through the complete render: 34,347 MiB at 864x480/22 frames and 35,044 MiB
+# at 1376x768/243 frames (plain TensorFold int8 FastH3, four passes, regular encoder).
+# Round above both observations and retain the guard's full 6 GB error margin.
+# Other routes, smaller/offloaded cards and larger clips keep the unified upper bound.
+LOCAL_VIDEO_HOST_MB = 36000
+
+
+def local_ram_need(job: dict) -> int | None:
+    """Conservative shared-host reservations from existing peaks; unmeasured GPU jobs run exclusively."""
+    kind, params = job["kind"], job["params"]
+    if kind == "long":
+        params = {**params, "seconds": max(plan(int(params["total_seconds"]), int(params.get("segment_seconds", LONGEST))))}
+    if kind in ("video", "long"):
+        chosen, _ = custom(params)
+        sized = {**(PRESETS[params["preset"]][2] if params.get("preset") in PRESETS else {}), **chosen}
+        frames = lengths.of({"frames": params.get("frames"), "seconds": min(float(params.get("seconds") or 5), LONGEST)})
+        found = references(params) if kind == "video" else None
+        room = memory_of(params, sized, frames, bool(params.get("loras")), found)
+        card = memory_guard.device()
+        if (room.get("route") == "int8" and card and card["total_mb"] >= 96000
+                and memory_guard.room_budget_mb() is None and not found and not params.get("loras")
+                and not params.get("text_encoder") and os.environ.get("TEXT_ENCODER", "regular") in ("", "regular")
+                and os.environ.get("SPARK_ENGINE", "tensorfold") == "tensorfold"
+                and sized.get("SPARK_BASE") != "h3" and os.environ.get("SPARK_BASE") != "h3"
+                and frames <= 243 and (room.get("rows") or 0) <= 75336
+                and int(sized.get("WIDTH") or 864) * int(sized.get("HEIGHT") or 480) <= 1376 * 768):
+            return LOCAL_VIDEO_HOST_MB + memory_guard.ERROR_MB
+    elif kind == "voice":
+        return int(voice.backend().NEED_GB * 1024)
+    elif kind == "music":
+        room = memory_guard.music_check(float(params.get("seconds") or 60), route=music.guard_route(params))
+    elif kind in sound.KINDS:
+        room = memory_guard.sound_check(kind, float(params.get("seconds") or 10))
+    elif kind in swap.KINDS:
+        room = memory_guard.swap_check(int(params.get("quality") or swap.QUALITY), weights=swap_build.weights())
+    elif kind in train.KINDS:
+        return int(train.NEED_GB * 1024)
+    else:
+        return None
+    return int(room["need_mb"] + (room.get("error_mb") or 0)) if room.get("need_mb") is not None else None
+
+
 def perform(job: dict, worker: dict | None = None) -> None:
+    """Reserve shared RAM for local execution and drain managed jobs before releasing ownership."""
+    managed = SPARK and (LOCAL_GPU_CHILD or hub.local.managed)
+    if not managed:
+        return perform_job(job, worker)
+    current = threading.current_thread()
+    with lock:
+        if stopping.is_set() or job["status"] == "cancelled":
+            job.update(status="cancelled", finished=time.time())
+            return
+        with local_work:
+            local_threads.add(current)
+    try:
+        if worker is not None or job.get("remote") or job["kind"] in ("export", "soundtrack", "finish", "graphics", "hlg"):
+            return perform_job(job, worker)
+        if not LOCAL_GPU_CHILD:
+            hub.local.validate_head(local_gpus.inventory()["devices"])
+        params = job["params"]
+        kind = job["kind"]
+        # Release this card's incompatible idle engines before counting new growth, not after admission.
+        if kind != "voice":
+            voice.release(f"a {kind} job needs the GPU")
+        if kind != "music":
+            music.release(f"a {kind} job needs the GPU")
+        route, native = None, None
+        if kind == "voice":
+            native = voice.backend()
+        elif kind == "music":
+            selected = music.engine(params.get("engine") or "music3")
+            for loaded in music.loaded_engines():
+                if loaded is not selected:
+                    loaded.release("another song engine needs the GPU")
+            native = selected if isinstance(selected, voice.Served) else None
+        if native is not None:
+            route = native.ram_route()
+            local_gpus.stop_child_comfy()  # only this private GPU session, never another card's warm model
+        elif kind in ("video", "long") and not (params.get("references") or params.get("reference_videos")
+                                                     or params.get("reference_audios") or params.get("loras")
+                                                     or params.get("base") == "h3"):
+            encoder = params.get("text_encoder") or "regular"
+            route = "video" + ("+" + encoder if encoder != "regular" else "")
+        need = local_ram_need(job)
+        total, available = local_gpus.memory()
+        if need is not None and available - need + local_gpus.model_ram_mb(route) < memory_guard.floor_mb(total):
+            # A different warm Comfy route on this card is releasable; idle servers on other cards are not ours.
+            local_gpus.stop_child_comfy()
+            if native is not None and native.loaded() and not local_gpus.model_ram_mb(route):
+                native.release("shared host RAM requires loading under the current GPU session")
+        with local_gpus.ram_reservation(need, job, route=route) as admitted:
+            if admitted and job["status"] != "cancelled":
+                if LOCAL_GPU_CHILD:
+                    local_gpus.check_child_comfy()
+                perform_job(job, worker)
+            else:
+                job["finished"] = time.time()
+    except Exception as error:
+        if job["status"] != "cancelled":
+            job.update(status="failed", error=str(getattr(error, "detail", error)), finished=time.time())
+    finally:
+        with local_work:
+            local_threads.discard(current)
+            local_work.notify_all()
+
+
+def perform_job(job: dict, worker: dict | None = None) -> None:
     """One claimed job to its end: on this machine, or its clip on the Spark it was handed to (``worker``, sparks.py)
     with everything else done here: the frame it opens on is cut here, the clip comes back to its own path, and the
     QA gate, the shot check and the sound follow as on a clip made here."""
@@ -2111,17 +2508,25 @@ def perform(job: dict, worker: dict | None = None) -> None:
     params = job["params"]
     asked = dict(params)
     try:
+        if WINDOWS or WIN32:
+            local_bounded = windows_runtime.bounded(job["kind"], params)
+            gpu_kind = job["kind"] in windows_cuda.NATIVE and job["kind"] not in ("export", "soundtrack", "hlg", "finish", "graphics")
+            if job["kind"] == "qualification" or job["kind"] == "foley" and local_bounded or gpu_kind and not local_bounded:
+                windows_storyboard.release_backend()
+            if job["kind"] == "qualification" or gpu_kind and local_bounded:
+                if WINCUDA and windows_runtime.release_native():
+                    job["log"] += "[studio] Native ComfyUI was unloaded before the bounded recipe.\n"
         # a Drama 3 server kept loaded after a voice take (voice.py) never stands beside a render here, nor MiniMax Music 3
         # kept loaded after a song (music.py): each is unloaded before any other job of this machine's queue
-        if job["kind"] not in ("voice", "export", "soundtrack", "finish", "graphics") and worker is None and not job.get("remote"):
+        if job["kind"] not in ("voice", "export", "soundtrack", "finish", "graphics", "hlg") and worker is None and not job.get("remote"):
             if voice.release(f"a {job['kind']} job needs the GPU"):
                 job["log"] += "[tensorfold] Drama 3 was unloaded to give this job its memory\n"
-        if job["kind"] not in ("music", "export", "soundtrack", "finish", "graphics") and worker is None and not job.get("remote"):
+        if job["kind"] not in ("music", "export", "soundtrack", "finish", "graphics", "hlg") and worker is None and not job.get("remote"):
             if music.release(f"a {job['kind']} job needs the GPU"):
                 job["log"] += "[tensorfold] MiniMax Music 3 was unloaded to give this job its memory\n"
         # NVIDIA Nemotron 3.5 Bolt (bolt.py), the Studio's brain engine: unloaded before this job when the job's measured
         # peak does not fit beside it (bolt_need), after the answers in flight; held until the queue is empty
-        if job["kind"] not in ("export", "soundtrack", "finish", "graphics") and worker is None and not job.get("remote"):
+        if job["kind"] not in ("export", "soundtrack", "finish", "graphics", "hlg") and worker is None and not job.get("remote"):
             job["log"] += bolt.admit(job, lambda resident: bolt_need(job, resident))
         if job["kind"] in train.KINDS and worker is None:  # a LoRA run holds about 55 GB for hours: ComfyUI's models go first
             job["log"] += train_free(job)
@@ -2144,6 +2549,8 @@ def perform(job: dict, worker: dict | None = None) -> None:
         elif job["kind"] == "long":
             if not long_take(job):
                 return
+            if params.get("silent"):  # the joined video, delivered silent like a single clip (hush)
+                hush(HOME / job["outputs"][0])
         elif job["kind"] == "voice":  # Fish Audio Drama 3 text to speech (voice.py), under the GPU lock
             if not voice_perform(job):
                 return
@@ -2160,6 +2567,14 @@ def perform(job: dict, worker: dict | None = None) -> None:
             job["outputs"] = [relative(Path(p)) for p in outputs if Path(p).is_file()]
             if not job["outputs"]:
                 raise RuntimeError("the script finished without writing its output")
+            if (WINDOWS or WIN32) and windows_runtime.bounded(job["kind"], params) and job["kind"] == "scout" and params.get("suite_import"):
+                ids = params["suite_shots"] if "suite_shots" in params else [params["suite_shot"]]
+                images = [path for path in job["outputs"] if path.endswith(".png")]
+                if len(images) != len(ids):
+                    raise RuntimeError("the storyboard batch returned the wrong number of images")
+                with lock:
+                    if job["status"] != "cancelled":
+                        suite.keep_storyboards(HOME, params["suite_import"], list(zip(ids, images, strict=True)))
             if job["kind"] == "video" and params.get("preset") == "sharp" and params.get("qa", True):
                 if not gated(job, Path(outputs[0])):
                     return
@@ -2178,8 +2593,13 @@ def perform(job: dict, worker: dict | None = None) -> None:
         hub.record(job)  # the clip, its seed and settings, and the Spark that rendered it (sparks/takes.jsonl)
         if params.get("then") and job["status"] != "cancelled":  # the next step of Extend or Fix (revise.py)
             revise_then(job)
-        if job["status"] != "cancelled":
-            job["status"] = "done"
+        with lock:
+            if job["status"] != "cancelled":
+                if (WINDOWS or WIN32) and job["kind"] == "sfx" and windows_runtime.bounded("sfx", params):
+                    windows_sound.save_take(job, HOME, HOME / job["outputs"][0], job["_sound_seconds"])
+                if (WINDOWS or WIN32) and job["kind"] == "foley" and windows_runtime.bounded("foley", params):
+                    windows_foley.save_take(job, HOME, HOME / "sound/foley" / job["id"])
+                job["status"] = "done"
     except sparks.Moved:  # the Spark it was on refused it, failed it or stopped answering: it is in the queue again
         params.clear()  # as it was queued: a retake's seed and the frames cut for it are made again
         params.update(asked)
@@ -2189,6 +2609,13 @@ def perform(job: dict, worker: dict | None = None) -> None:
     finally:
         if job["status"] != "queued":
             job["finished"] = time.time()
+            if (WINDOWS or WIN32) and job["kind"] == "qualification" and job["status"] in ("failed", "cancelled"):
+                try:
+                    windows_checks.save_outcome(job)
+                except (OSError, ValueError) as error:
+                    job["log"] += f"\n[studio] Could not save the qualification attempt: {error}\n"
+            if job["kind"] in swap.KINDS:  # a cancelled or failed swap's frames do not stay behind
+                swap.tidy(HOME, job["id"])
         _keep(job)
 
 
@@ -2205,7 +2632,7 @@ def work() -> None:
     while not _worker_stop.is_set():
         wake.wait()
         with lock:
-            if _worker_stop.is_set():  # shutdown asked while this thread waited: do not claim a job on the way out
+            if stopping.is_set() or _worker_stop.is_set():
                 return
             job = hub.claim()  # the next job for this machine; on a DGX Spark a worker may have taken others (sparks.py)
             if job is None:
@@ -2220,7 +2647,7 @@ def work() -> None:
 def public(job: dict) -> dict:
     out = {k: job.get(k) for k in ("id", "kind", "status", "title", "outputs", "progress", "error", "created",
                                     "started", "finished", "estimate", "engine", "qa", "passes", "pace", "source", "shot",
-                                    "negations", "sparks", "spark", "moved", "voice", "music", "soundtrack")}
+                                    "negations", "sparks", "spark", "placement", "moved", "voice", "music", "soundtrack", "render")}
     # by this machine's clock: the page may be open on another one
     out["elapsed"] = (job.get("finished") or time.time()) - job["started"] if job.get("started") else None
     out["log"] = job["log"][-3000:]
@@ -2272,9 +2699,12 @@ def health() -> dict:
 
 @app.get("/api/state")
 def state() -> dict:
+    local_windows = WINDOWS or WIN32
+    selected_mode = windows_runtime.mode() if local_windows else None
+    choices = windows_runtime.image_options(selected_mode) if local_windows else []
     mac = capabilities.mode(SPARK) == "mac"
     rendering = capabilities.renders(SPARK)
-    return {"presets": {k: {"label": v[0], "size": v[1]} for k, v in PRESETS.items()},
+    out = {"presets": {k: {"label": v[0], "size": v[1]} for k, v in PRESETS.items()},
             "qualities": {k: v[0] for k, v in QUALITIES.items()}, "durations": DURATIONS, "long": LONG,
             "home": str(HOME), "pack": str(PACK), "version": (PACK / "VERSION").read_text().strip(),
             "revision": image_revision(), "container": in_container(),
@@ -2289,15 +2719,17 @@ def state() -> dict:
             # the picture models installed here, in the order the page offers them (IMAGE_MODELS)
             "image_models": [image_model_card(k) for k in image_models()], "sharp": SHARP if "sharp" in PRESETS and "fh8" in QUALITIES else None, "custom": {"sides": CUSTOM_SIDES, "pixels": CUSTOM_PIXELS, "steps": CUSTOM_STEPS},
             "platform": machine()[0], "platform_label": machine()[1],
-            "gpu_index": os.environ["STUDIO_GPU"] if os.environ.get("STUDIO_GPU", "").isdigit() else None,
+            "ui_only": WINDOWS, "platform_note": "",
+            "feature_checks": windows_checks.discovery(local_windows),
+            "windows_stills": windows_runtime.usage_status("scout", selected_mode=selected_mode) if local_windows else None,
+            "gpu_index": (",".join(memory_guard.paired_gpus()) if not local_windows else "") or (os.environ["STUDIO_GPU"] if os.environ.get("STUDIO_GPU", "").isdigit() else None),
             "last_frame": True,
             # every clip length the model takes (lengths.py), and the longest this machine renders at each size
             "lengths": {"fps": FPS, "step": lengths.STEP, "shortest": lengths.SHORTEST, "longest": lengths.LONGEST,
                         "presets": {k: longest_frames(v[2]) for k, v in PRESETS.items()}, "custom": longest_frames({"WIDTH": 1344, "HEIGHT": 768})},
             "ffmpeg": media_tools()["ffmpeg"], "ffmpeg_note": "" if media_tools()["ffmpeg"] else FFMPEG_NOTE,
             "shot_check": True, "negation_reason": negation.REASON,
-            # how many DGX Sparks a job may use (sparks.py): a Spark, a Mac at the head, or a controller
-            "sparks": {"supported": hub.schedules(), "limit": sparks.LIMIT},
+            "sparks": {"supported": hub.schedules() and not (WINDOWS or WIN32), "limit": hub.chooser_limit()},
             # Sam Wasserman's QA gate: whether it can run here, and what is missing when it cannot (qa.py)
             "qa": qa.ready(),
             # Voice: Fish Audio Drama 3 text to speech on this machine (voice.py): MLX on a Mac, CUDA on a DGX Spark
@@ -2309,6 +2741,58 @@ def state() -> dict:
             "engine": (("CUDA · TensorFold int8" if SPARK_ENGINE_LIB.exists() else "CUDA · ComfyUI") if capabilities.mode(SPARK) == "spark"
                        else ("native Zig engine" if zig_ready() else "MLX engine") if mac else "none"),
             "capabilities": capabilities.public(SPARK)}
+    if local_windows:
+        out["image_model_options"] = choices
+        out["windows_runtime"] = {"qualification": selected_mode, "image_models": choices,
+                                  "backend": "per-feature", "native_core": windows_cuda.status()}
+        out["windows_stills"]["backend"] = windows_runtime.backend_status()
+        if out["windows_stills"]["backend"].get("native"):
+            with lock:
+                out["windows_stills"]["backend"]["busy"] = any(job["status"] in ("queued", "running") for job in jobs.values())
+        if selected_mode["enabled"] or windows_cuda.h3_why_not():
+            for key in ("ref2va", "ref2va_turbo", "ref_media", "last_frame", "shot_check"):
+                out[key] = False
+            out["text_encoders"] = []
+        for key in ("voice", "music"):
+            out[key] = windows_runtime.gate_native_state(key, out[key], selected_mode)
+        out["capabilities"] = ({kind: {"available": False, "why": why + " needs a supported, verified Windows recipe."}
+                               for kind, why in {
+                                   "video": "H3 video generation", "edit": "Generative picture editing", "flux": "FLUX3-K image generation",
+                                   "voice": "Drama 3 voice", "music": "Music generation", "foley": "MMAudio foley",
+                                   "motion": "Motion analysis", "workers": "Worker routing", "nodes": "Graph execution",
+                                   "captions": "Vision descriptions and speech transcription", "looks": "Model LoRAs",
+                                   "models": "Automatic model installation", "updates": "Automatic source updates",
+                                   "image_actions": "Model-based Library actions", "finish": "Tesseract Finish", "hlg": "keys-HDR LORA finishing",
+                               }.items()} if selected_mode["enabled"] or not WINCUDA else {})
+        sound_ready = windows_runtime.usage_status("sfx", selected_mode=selected_mode) if windows_runtime.bounded("sfx") else windows_runtime.native_status("sfx", selected_mode, {"available": windows_runtime.native_sound_installed("sfx"), "why": ""})
+        gfx_ready = graphics.ready()
+        out["capabilities"].update(
+            scout={k: out["windows_stills"].get(k) for k in ("available", "why", "runtime_updated")},
+            sfx={k: sound_ready.get(k) for k in ("available", "why", "runtime_updated")},
+            graphics={"available": gfx_ready["ok"], "why": gfx_ready["why"], "templates": list(graphics.WINDOWS_TEMPLATES),
+                      "runtime_updated": gfx_ready.get("runtime_updated", False)},
+            beats={"available": bool(out["ffmpeg"]), "why": out["ffmpeg_note"], "max_seconds": beats.WINDOWS_MAX_SECONDS},
+            export={"available": all(media_tools().values()), "why": out["ffmpeg_note"] or "Install the native FFmpeg/ffprobe pair."},
+            frame={"available": all(media_tools().values()), "why": out["ffmpeg_note"] or "Install the native FFmpeg/ffprobe pair."})
+        out["capabilities"].update({kind: windows_runtime.usage_status(kind, selected_mode=selected_mode) for kind in windows_features.KINDS})
+        out["capabilities"]["foley"] = (windows_runtime.usage_status("foley", selected_mode=selected_mode) if windows_runtime.bounded("foley")
+                                         else windows_runtime.native_status("foley", selected_mode, {"available": windows_runtime.native_sound_installed("foley"), "why": ""}))
+        out["capabilities"].update({choice["id"]: choice for choice in choices if choice["id"] != "sd-turbo"})
+        for kind in ("video", "edit", "image_actions", "looks"):
+            out["capabilities"][kind] = windows_runtime.native_status(kind, selected_mode)
+        import windows_library_checks as library
+        library_states = {kind: library.usage_status(kind, selected_mode) for kind in library.KINDS}
+        out["capabilities"].update(library_states)
+        usable = any(found["available"] for found in library_states.values())
+        out["capabilities"]["image_actions"] = {"available": usable, "installed": any(found["installed"] for found in library_states.values()),
+            "why": "" if usable else "Model-based Library actions need their own setup and qualification in Machine > Feature checks."}
+        for kind in ("voice", "music"):
+            out["capabilities"][kind] = {key: out[kind].get(key) for key in ("available", "installed", "qualified", "why", "backend")}
+        out["engine"] = "Per-feature native Windows backends"
+    if WINCUDA and not local_windows:
+        out["windows_cuda"] = windows_cuda.status()
+        out["capabilities"] = {kind: {"available": False, "why": windows_cuda.unsupported(kind)} for kind in windows_cuda.NOT_NATIVE}
+    return out
 
 
 def numbers(body: dict, keys: tuple) -> dict:
@@ -2378,6 +2862,10 @@ def estimate_time(body: dict) -> dict:
             lengths.of({"frames": body["frames"]})
         except ValueError as error:
             raise HTTPException(400, str(error))
+    placement = hub.placement(body.get("placement"), kind=str(body.get("kind") or "video"))
+    selected = hub.estimate_worker(body, placement)
+    if selected is not None:
+        return selected
     room = None
     if SPARK and float(body.get("seconds") or 5) <= LONGEST + 1:
         try:
@@ -2392,11 +2880,13 @@ def estimate_time(body: dict) -> dict:
             room = None  # the settings are refused for another reason when the job is queued
     if body.get("preset") == "custom" or body.get("steps") not in (None, "") or body.get("loras"):
         return {"seconds": None, "memory": room}  # a LoRA changes which engine renders the clip: no time is measured for it
-    return {"seconds": estimate(body.get("preset", "draft"), body.get("quality", "standard"),
-                                clip_seconds({"frames": body.get("frames"), "seconds": body.get("seconds", 5)})
-                                if float(body.get("seconds") or 5) <= LONGEST + 1 or body.get("frames") else int(body["seconds"]),
-                                bool(body.get("text_only")), bool(body.get("referenced")),
-                                bool(body.get("ref_turbo")), bool(body.get("ref_media"))), "memory": room}
+    seconds = estimate(body.get("preset", "draft"), body.get("quality", "standard"),
+                       clip_seconds({"frames": body.get("frames"), "seconds": body.get("seconds", 5)})
+                       if float(body.get("seconds") or 5) <= LONGEST + 1 or body.get("frames") else int(body["seconds"]),
+                       bool(body.get("text_only")), bool(body.get("referenced")),
+                       bool(body.get("ref_turbo")), bool(body.get("ref_media")))
+    # "card" marks a warm sample of this canvas. A GB10 number is never sent under that mark.
+    return {"seconds": seconds, "memory": room, **({"where": "card"} if seconds is not None and card_face() else {})}
 
 
 def clip_estimate(kind: str, params: dict, referenced: bool = False, ref_media: bool = False) -> int | None:
@@ -2437,15 +2927,132 @@ def submit(body: dict) -> dict:
         raise HTTPException(400, WRONG_TYPE) from None
 
 
+def windows_export(body: dict) -> dict:
+    params = body.get("params")
+    if not isinstance(params, dict) or set(params) - {"clips", "width", "height"}:
+        raise HTTPException(400, "Windows export takes clips, width and height only")
+    export_clips(params)
+    clips = params["clips"]
+    if not 1 <= len(clips) <= 12 or not all(media_tools().values()):
+        raise HTTPException(400, "Windows export needs FFmpeg/ffprobe and 1 to 12 clips")
+    if body.get("placement") is not None or body.get("sparks") not in (None, 1):
+        raise HTTPException(400, "Windows media exports run on this machine only")
+    for key, default in (("width", 1920), ("height", 1080)):
+        value = params.get(key, default)
+        if type(value) is not int or not 16 <= value <= 1920 or value % 2:
+            raise HTTPException(400, "export sides are even whole numbers from 16 to 1920")
+    checked, total = [], 0.0
+    for clip in clips:
+        info = probe(clip["path"])
+        duration = info["duration"]
+        if not info["width"] or not math.isfinite(duration) or duration <= 0:
+            raise HTTPException(400, "each timeline source must be a readable video")
+        start, end = clip.get("in") or 0, clip.get("out") or 0
+        if not math.isfinite(start) or not math.isfinite(end) or not 0 <= start < duration or end < 0 or end > duration:
+            raise HTTPException(400, "timeline trim points must be finite and inside the clip")
+        total += end - start if end > start else duration - start
+        checked.append({**clip, "in": start, "out": end, "duration": duration, "sound": info["sound"]})
+    if total > 600:
+        raise HTTPException(400, "the initial Windows export is limited to ten minutes")
+    title = body.get("title") or "Timeline export"
+    if not isinstance(title, str):
+        raise HTTPException(400, "title is text")
+    return enqueue("export", title, {**params, "clips": checked})
+
+
 def queue_job(body: dict) -> dict:
+    if WINDOWS or WIN32:
+        if not isinstance(body.get("kind"), str) or not body["kind"]:
+            raise HTTPException(400, "choose a job kind")
+        if body.get("params") is not None and not isinstance(body["params"], dict):
+            raise HTTPException(400, "params is an object of the job's settings")
+        body = {**body, "params": windows_runtime.freeze(body["kind"], dict(body.get("params") or {}))}
+        if not windows_runtime.bounded(body["kind"], body["params"]):
+            try:
+                windows_runtime.require_native(body["kind"], body["params"])
+            except windows_runtime.RouteUnavailable as error:
+                raise HTTPException(501, str(error)) from None
+            except ValueError as error:
+                raise HTTPException(400, str(error)) from None
+    if (WINDOWS or WIN32) and windows_runtime.bounded(body["kind"], body["params"]):
+        if body.get("kind") == "foley":
+            found = windows_runtime.usage_status("foley")
+            if not found["available"]:
+                raise HTTPException(501, found["why"])
+            if body.get("placement") is not None or body.get("sparks") not in (None, 1):
+                raise HTTPException(400, "Foley runs on this machine only.")
+            try:
+                params = windows_foley.parameters(body.get("params") or {})
+                build("foley", params, "check")
+            except (ValueError, RuntimeError) as error:
+                raise HTTPException(400, str(error)) from None
+            title = body.get("title") or sound_title("foley", params)
+            if not isinstance(title, str):
+                raise HTTPException(400, "title is text")
+            return enqueue("foley", title, params)
+        if body.get("kind") in windows_features.KINDS:
+            kind = body["kind"]
+            found = windows_runtime.usage_status(kind)
+            if not found["available"]:
+                raise HTTPException(501, found["why"])
+            if body.get("placement") is not None or body.get("sparks") not in (None, 1):
+                raise HTTPException(400, "This Windows feature runs on this machine only.")
+            params = body.get("params") or {}
+            if not isinstance(params, dict):
+                raise HTTPException(400, "params is an object")
+            build(kind, params, "check")
+            title = body.get("title") or ("Finish" if kind == "finish" else action_title(kind, params))
+            if not isinstance(title, str):
+                raise HTTPException(400, "title is text")
+            return enqueue(kind, title, params)
+        if body.get("kind") == "export":
+            return windows_export(body)
+        if body.get("kind") == "graphics":
+            if body.get("placement") is not None or body.get("sparks") not in (None, 1):
+                raise HTTPException(400, "Windows graphics runs on this machine only")
+            params = body.get("params") or {}
+            if not isinstance(params, dict):
+                raise HTTPException(400, "graphics params is an object")
+            graphics_build(params, "check")
+            title = body.get("title") or graphics_title(params)
+            if not isinstance(title, str):
+                raise HTTPException(400, "title is text")
+            return enqueue("graphics", title, params)
+        if body.get("kind") == "sfx":
+            sound_ready = windows_runtime.usage_status("sfx")
+            if not sound_ready["available"]:
+                raise HTTPException(501, sound_ready["why"])
+            if body.get("placement") is not None or body.get("sparks") not in (None, 1):
+                raise HTTPException(400, "Windows sound effects run on this machine only")
+            params = windows_sound.parameters(body.get("params") or {})
+            if body.get("title") is not None and not isinstance(body["title"], str):
+                raise HTTPException(400, "title is text")
+            return enqueue("sfx", body.get("title") or sound_title("sfx", params), params)
+        if body.get("kind") != "scout":
+            raise HTTPException(501, WINDOWS_NOTE)
+        image_ready = windows_runtime.usage_status("scout")
+        if not image_ready["available"]:
+            raise HTTPException(501, image_ready["why"])
+        if body.get("placement") is not None or body.get("sparks") not in (None, 1):
+            raise HTTPException(400, "Windows stills run on this machine only")
+        if body.get("title") is not None and not isinstance(body["title"], str):
+            raise HTTPException(400, "title is text")
+        params = windows_storyboard.parameters(body.get("params") or {})
+        if params.get("suite_import"):
+            for shot_id in params["suite_shots"] if "suite_shots" in params else [params["suite_shot"]]:
+                suite.storyboard_import(HOME, params["suite_import"], shot_id)
+        return enqueue("scout", body.get("title") or "Storyboard draft", params)
     kind = body.get("kind")
     if body.get("params") is not None and not isinstance(body.get("params"), dict):
         raise HTTPException(400, "params is an object of the job's settings")
     if body.get("title") is not None and not isinstance(body.get("title"), str):
         raise HTTPException(400, "title is text")
     params = dict(body.get("params") or {})
-    if kind not in ("scout", "video", "studio", "export", "long", "edit") + actions.KINDS + sound.KINDS + finish.KINDS + graphics.KINDS:
+    if kind not in ("scout", "video", "studio", "export", "long", "edit") + actions.KINDS + swap.KINDS + sound.KINDS + finish.KINDS + graphics.KINDS:
         raise HTTPException(400, "unknown job kind")
+    if WINCUDA and windows_cuda.unsupported(kind):  # refused when queued, with the reason: never sent to WSL or bash
+        raise HTTPException(501, windows_cuda.unsupported(kind))
+    placement = hub.placement(body.get("placement"), kind=kind)
     if kind == "long" and (params.get("last_image") or params.get("last_same") or params.get("last_frame_from")):
         raise HTTPException(400, "a last frame is for single clips: a long video is a chain of clips")
     # After the structural checks, before ffmpeg, build and the memory guard. Export is not a generative route.
@@ -2454,9 +3061,14 @@ def queue_job(body: dict) -> dict:
         gate = z_image_turbo.submission(kind, params)
     if gate is not None and not gate["ok"]:
         raise HTTPException(400, gate)
+    if gate is not None:
+        renderer = sdxl_turbo if params.get("image_model") == sdxl_turbo.ID else z_image_turbo
+        room = renderer.assess()
+        if not room["ok"]:
+            raise HTTPException(400, {"code": room["code"], "error": room["reason"]})
     remote_clip = kind == "video" and capabilities.mode(SPARK) == "controller"
     blocked = capabilities.refusal(kind, SPARK)
-    if blocked and gate is None and not remote_clip:
+    if blocked and gate is None and not remote_clip and not (WINDOWS or WIN32):
         raise HTTPException(400, blocked)
     if kind == "long":
         total = int(params.get("total_seconds", 0))
@@ -2468,7 +3080,7 @@ def queue_job(body: dict) -> dict:
         if missing:
             raise HTTPException(400, missing)
         build("video", {**params, "seconds": pieces[0], "output": None}, "check")
-    if kind not in ("export", "edit", "foley") + actions.KINDS + finish.KINDS + graphics.KINDS and not (params.get("prompt") or "").strip():
+    if kind not in ("export", "edit", "foley") + actions.KINDS + swap.KINDS + finish.KINDS + graphics.KINDS and not (params.get("prompt") or "").strip():
         raise HTTPException(400, "a prompt is needed")
     if kind != "video" and params.get("references"):
         raise HTTPException(400, "reference pictures are for single clips")
@@ -2497,26 +3109,35 @@ def queue_job(body: dict) -> dict:
         raise HTTPException(400, "MiniMax H3 Turbo is not installed here (oneshot-setup.sh --turbo adds it): use FastH3, quality fh4, fh8 or fh20")
     job_id = time.strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     # how many Sparks the job may use, this one counted (sparks.py): the number given, or the one set on the Sparks page
+    limit = hub.chooser_limit()
     try:
         chosen = int(body.get("sparks") or hub.config()["sparks"])
+        if not body.get("sparks"):
+            chosen = max(1, min(chosen, limit))
     except (TypeError, ValueError):
-        raise HTTPException(400, f"sparks is a whole number from 1 to {sparks.LIMIT}")
-    if not 1 <= chosen <= sparks.LIMIT:
-        raise HTTPException(400, f"sparks is a whole number from 1 to {sparks.LIMIT}")
-    said = hub.plan({"sparks": chosen, "kind": kind, "params": params})
+        raise HTTPException(400, f"sparks is a whole number from 1 to {limit}")
+    if not 1 <= chosen <= limit:
+        raise HTTPException(400, f"sparks is a whole number from 1 to {limit}")
+    said = hub.plan({"sparks": chosen, "kind": kind, "params": params, "placement": placement})
+    selected = hub.estimate_worker(params, placement)
+    if selected is not None and (selected.get("memory") or {}).get("fits") is False:
+        raise HTTPException(400, selected["memory"].get("reason") or "the selected worker cannot fit this clip")
+    required_worker = placement and placement["worker"] != "head" and placement["policy"] == "require"
     if kind not in ("export", "long"):
-        # Reject bad settings now, not when the job's turn comes. A controller clip is checked here for
-        # prompt, frames, paths and references; the worker's own memory guard is asked when the clip is sent.
-        # A clip other Sparks may take is held to their memory guards, not to this one's.
-        # Finish and graphics write their folder when built, so that check uses a stand-in id.
-        build(kind, params, "check" if kind in finish.KINDS + graphics.KINDS else job_id,
-              room=not remote_clip and not (kind in ("video", "studio") and said["used"] > 1))
+        # reject bad settings now, not when the job's turn comes; a clip other Sparks may take is held to their memory
+        # guards (asked before it is handed over), not to this one's
+        build(kind, params, "check" if kind in finish.KINDS + graphics.KINDS else job_id,  # these write their folder when built
+              room=not remote_clip and not (selected is not None or required_worker or (kind in ("video", "studio") and said["used"] > 1)))
     if kind in graphics.KINDS and not body.get("title"):
         body = {**body, "title": graphics_title(params)}
+    if kind in swap.KINDS and not body.get("title"):
+        body = {**body, "title": swap_title(params)}
     job = {"id": job_id, "kind": kind, "status": "queued", "title": body.get("title") or (action_title(kind, params) if kind in actions.KINDS else sound_title(kind, params) if kind in sound.KINDS else kind), "params": params,
-           "source": action_source(kind, params) if kind in actions.KINDS else sound_source(kind, params) if kind in sound.KINDS else None,
+           "source": action_source(kind, params) if kind in actions.KINDS else swap_source(params) if kind in swap.KINDS else sound_source(kind, params) if kind in sound.KINDS else None,
            "outputs": [], "progress": None, "error": None, "log": "", "created": time.time(), "started": None,
-           "finished": None, "estimate": clip_estimate(kind, params, referenced, ref_media)}
+           "finished": None, "estimate": swap_estimate(params) if kind in swap.KINDS else clip_estimate(kind, params, referenced, ref_media)}
+    if placement is not None:
+        job["placement"] = placement
     if referenced:  # the passes a reference clip runs: the number set by hand, or the model's 20, or the adapter's 4
         job["passes"] = int(params["steps"]) if params.get("steps") not in (None, "") else 4 if params.get("ref_turbo") else 20
     if kind in ("video", "studio", "long"):
@@ -2557,25 +3178,68 @@ def get_job(job_id: str) -> dict:
 
 @app.post("/api/jobs/{job_id}/cancel")
 def cancel(job_id: str) -> dict:
-    job = jobs.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job")
-    if job["status"] in ("queued", "running"):
-        job["status"] = "cancelled"
-        process = running["process"] if running["id"] == job_id else None
-        if process is not None:
+    with lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "no such job")
+        active = job["status"] in ("queued", "running")
+        process = running["process"] if active and running["id"] == job_id else None
+        start, key = running.get("start"), running.get("key")
+        owned = running.get("owned_job") if process is not None else None
+        if (WINDOWS or WIN32) and process is not None and (owned is None or getattr(process, "_studio_job", None) is not owned):
+            raise HTTPException(409, "the Windows job's private ownership handle is missing")
+        if active:
+            job["status"] = "cancelled"
+    if active:
+        if (WINDOWS or WIN32) and job["kind"] in ("scout", "sfx") and windows_runtime.bounded(job["kind"], job["params"]):
             try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass  # it ended on its own meanwhile
+                windows_storyboard.cancel_job(job_id)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise HTTPException(409, f"owned ComfyUI cancellation failed: {error}") from None
+        if process is not None:
+            if WINDOWS or WIN32:
+                try:
+                    owned.terminate()
+                except OSError as error:
+                    with lock:
+                        job["status"], job["error"] = "failed", f"owned Windows cancellation failed: {error}"
+                    raise HTTPException(409, job["error"]) from None
+            elif SPARK and (LOCAL_GPU_CHILD or hub.local.managed or key):
+                local_gpus.stop_job_tree(process.pid, start, key=key)
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGTERM)
             if SPARK and job["kind"] not in NOT_ON_COMFY:
                 stop_comfy(job)
-        hub.kick.set()  # a clip on another Spark is cancelled there by the thread that follows it
+        hub.kick.set()  # a worker's render loop sees the cancelled job and interrupts its own prompt
+        if (WINDOWS or WIN32) and job["kind"] == "qualification":
+            try:
+                windows_checks.save_outcome({**job, "status": "cancelled", "finished": time.time(),
+                                             "error": "The check was cancelled."})
+            except (OSError, ValueError) as error:
+                job["log"] += f"\n[studio] Could not save the qualification cancellation: {error}\n"
     _keep(job)
     return public(job)
 
 
-NOT_ON_COMFY = ("voice", "export", "soundtrack", "qa", "train", "finish", "graphics")  # jobs a Spark runs without its ComfyUI server
+@app.post("/api/windows/stills/unload")
+def unload_windows_stills(request: Request) -> dict:
+    agents.local(request, True)
+    if not (WINDOWS or WIN32):
+        raise HTTPException(501, "this control is for the Windows storyboard backend")
+    with lock:
+        if any(job["status"] in ("queued", "running") for job in jobs.values()):
+            raise HTTPException(409, "Studio work is queued/running; finish or cancel it before unloading ComfyUI")
+        try:
+            windows_storyboard.release_backend()
+            if WINCUDA:
+                windows_runtime.release_native()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            raise HTTPException(409, str(error)) from None
+    return windows_runtime.backend_status()
+
+
+NOT_ON_COMFY = ("voice", "export", "soundtrack", "qa", "train", "finish", "graphics", "hlg")  # jobs a Spark runs without its ComfyUI server
 
 
 COMFY_PROMPT = re.compile(r"^\[tensorfold\] comfy prompt ([0-9a-f-]{8,64})$", re.M)
@@ -2673,8 +3337,9 @@ def library() -> list[dict]:
     found = []
     for folder, kinds in (("renders", (".mp4",)), ("exports", (".mp4",)), ("scouts", (".png",)), ("sound", (".mp4",)),
                           ("uploads", (".png", ".jpg", ".jpeg", ".webp", ".mp4", ".mov")), ("projects", (".mp4",)), ("slate", (".mp4",)),
-                          ("agent", (".png", ".jpg", ".jpeg", ".webp", ".mp4", ".mov"))):
-        for path in (HOME / folder).rglob("*"):
+                          ("agent", (".png", ".jpg", ".jpeg", ".webp", ".mp4", ".mov")), ("qa", (".mp4",))):
+        # qa: the takes the QA gate and the shot check kept when they failed (not the clips fetched to be checked)
+        for path in ((HOME / folder).glob("*") if folder == "qa" else (HOME / folder).rglob("*")):
             if path.suffix.lower() in kinds and not hidden(path.relative_to(HOME)) and path.is_file():
                 try:
                     stat = path.stat()
@@ -2686,10 +3351,49 @@ def library() -> list[dict]:
     found += library_sounds()
     found = sorted(found, key=lambda item: -item["modified"])[:400]
     made = hub.takes()  # which Spark rendered a clip, and at which seed (sparks.py)
+    failed = failed_takes()
     for item in found:
         if item["path"] in made:
             item.update(spark=made[item["path"]].get("spark"), seed=made[item["path"]].get("seed"))
+        if item["path"] in failed or item["folder"] == "qa":
+            item["failed"] = True  # shown in the Library to look at; the Director never cuts it in unless it is circled
     return found
+
+
+FAILED_SEEN: dict = {}  # project.json -> (its mtime, the failed takes in it): a film is read again only when it changed
+
+
+def failed_takes() -> set[str]:
+    """The clips of Slate shots that failed their check: a take whose own QA gate or shot check failed it, and one the
+    Director rated no-good (it rates a failed take so). A take rated no-good by hand is the user's call, not a check's."""
+
+    def listed(value) -> list:
+        return value if isinstance(value, list) else []
+
+    def failed(take) -> bool:
+        try:  # a take written by hand or by an older build: one that cannot be read is not counted
+            return isinstance(take, dict) and isinstance(take.get("mediaPath"), str) and bool(
+                director.failed_check(take) or take.get("rating") == "no-good" and str(take.get("origin") or "").startswith("The Director"))
+        except Exception:  # noqa: BLE001 - one odd take never takes the Library down
+            return False
+
+    out, seen = set(), set()
+    for file in (HOME / "slate").glob("*/project.json"):
+        seen.add(file)
+        try:
+            stamp = file.stat().st_mtime_ns
+            if FAILED_SEEN.get(file, (None,))[0] != stamp:
+                film, found = json.loads(file.read_text()), set()
+                for scene in listed(film.get("scenes")) if isinstance(film, dict) else []:
+                    for shot in listed(scene.get("shots")) if isinstance(scene, dict) else []:
+                        found.update(take["mediaPath"] for take in (listed(shot.get("takes")) if isinstance(shot, dict) else []) if failed(take))
+                FAILED_SEEN[file] = (stamp, found)
+        except (OSError, ValueError):
+            continue
+        out |= FAILED_SEEN[file][1]
+    for gone in set(FAILED_SEEN) - seen:
+        FAILED_SEEN.pop(gone, None)
+    return out
 
 
 SOUND_FILES = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
@@ -2736,7 +3440,7 @@ def discard(path: str) -> dict:
     """Take a clip or still out of the library: it is moved to the studio's trash folder, not erased."""
 
     target = inside(path)
-    if not target.is_file() or relative(target).split("/")[0] not in ("renders", "exports", "scouts", "uploads", "projects", "slate") \
+    if not target.is_file() or relative(target).split("/")[0] not in ("renders", "exports", "scouts", "uploads", "projects", "slate", "qa") \
             or target.suffix.lower() not in (".mp4", ".mov", ".png", ".jpg", ".jpeg", ".webp"):
         raise HTTPException(400, "not a library file")
     with lock:
@@ -2774,6 +3478,8 @@ def probe(path: str) -> dict:
         raise HTTPException(400, "the file could not be read")
     if not isinstance(data, dict):
         raise HTTPException(400, "the file could not be read")
+    if out.returncode:
+        raise HTTPException(400, "the file is not readable media")
     streams = data.get("streams") or []
     stream = next((one for one in streams if one.get("codec_type") == "video"), {})
     # sound: whether the file has an audio track (a reference video's own sound, a reference audio clip)
@@ -3054,14 +3760,57 @@ def enqueue(kind: str, title: str, params: dict, estimate: int | None = None) ->
     with lock:
         accepting_jobs()  # a restart refuses before a capability error, including a direct call
     blocked = capabilities.refusal(kind, route_spark(kind))
-    if blocked:
+    if blocked and not (WINDOWS or WIN32):
         raise HTTPException(400, blocked)
+    if WINDOWS or WIN32:
+        params = windows_runtime.freeze(kind, params)
+        if not windows_runtime.bounded(kind, params):
+            try:
+                windows_runtime.require_native(kind, params)
+            except windows_runtime.RouteUnavailable as error:
+                raise HTTPException(501, str(error)) from None
+            except ValueError as error:
+                raise HTTPException(400, str(error)) from None
+    local_bounded = (WINDOWS or WIN32) and windows_runtime.bounded(kind, params)
+    if WINCUDA and kind != "qualification" and windows_cuda.unsupported(kind):
+        raise HTTPException(501, windows_cuda.unsupported(kind))
+    if (WINDOWS or WIN32) and kind == "qualification":
+        params = windows_checks.parameters(params)
+        windows_checks.build(HOME, params, "check")
+    if local_bounded and kind == "foley":
+        foley_ready = windows_runtime.usage_status("foley")
+        if not foley_ready["available"]:
+            raise HTTPException(501, foley_ready["why"])
+        params = windows_foley.parameters(params)
+        build(kind, params, "check")
+    if local_bounded and kind == "graphics":
+        graphics_build(params, "check")
+    if local_bounded and kind in windows_features.KINDS:
+        feature_ready = windows_runtime.usage_status(kind)
+        if not feature_ready["available"]:
+            raise HTTPException(501, feature_ready["why"])
+        build(kind, params, "check")
+    if local_bounded and kind == "scout":
+        params = windows_storyboard.parameters(params)
+        try:
+            windows_storyboard.preflight()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            raise HTTPException(400, str(error)) from None
+    if local_bounded and kind == "sfx":
+        params = windows_sound.parameters(params)
+        try:
+            windows_sound.preflight()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            raise HTTPException(400, str(error)) from None
     job_id = time.strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
     job = {"id": job_id, "kind": kind, "status": "queued", "title": title, "params": params, "source": None, "outputs": [],
            "progress": None, "error": None, "log": "", "created": time.time(), "started": None, "finished": None,
            "estimate": estimate, "sparks": {"chosen": 1, "available": 1, "used": 1, "says": ""}}
     with lock:
-        accepting_jobs()
+        accepting_jobs(job)
+        if kind == "qualification" and any(one["kind"] == kind and one["params"] == params
+                                           and one["status"] in ("queued", "running") for one in jobs.values()):
+            raise HTTPException(409, "This feature check is already queued or running.")
         waiting = sum(1 for one in jobs.values() if one["status"] in ("queued", "running"))
         if waiting >= QUEUE_MAX:  # a page or a peer cannot fill the machine with jobs
             raise HTTPException(429, f"the queue is full ({QUEUE_MAX} jobs waiting or running): let some finish first")
@@ -3092,8 +3841,19 @@ def slate_room(plan: dict, lora: bool) -> dict:
 app.include_router(slate.attach(HOME, DURATIONS, compose, compose_references, REFERENCE_LIMIT,
                                 lambda: {"ref2va": ref2va_ready(), "ref2va_turbo": ref2va_turbo_ready()}, slate_room, within=inside))
 import director  # noqa: E402  (the Director: a logline to a checked, cut film, beside this file)
+
+
+def resident_words() -> str:
+    """What the Studio has loaded beside the queue now, in words, for a refusal the Director reports."""
+
+    return ", ".join(name for name, loaded in (("Fish Audio Drama 3", voice.room_mb()), ("MiniMax Music 3", music.room_mb()),
+                                               (bolt.NAME, bolt.room_mb())) if loaded)
+
+
 app.include_router(director.attach(HOME, queue=queue_job, lookup=jobs.get, stop_job=cancel, check=qa_gate, new_project=new_project,
-                                   save_project=save_project, presets={k: v[1] for k, v in PRESETS.items()}, app=app, references=ref2va_ready))
+                                   save_project=save_project, presets={k: v[1] for k, v in PRESETS.items()}, app=app, references=ref2va_ready,
+                                   renderers=lambda: 1 + sum(1 for w in hub.workers() if w.get("enabled", True)), loaded=resident_words,
+                                   picture_models=image_models))
 import agents  # noqa: E402  (Brains and agents: the user's own CLI sign-ins and MCP tools, beside this file)
 app.include_router(agents.attach(HOME))
 
@@ -3128,7 +3888,11 @@ def bolt_unload(request: Request) -> dict:
 import motion  # noqa: E402  (Motion Previs: a Python port of Sam Wasserman's Motion Previs Studio analysis, beside this file)
 app.include_router(motion.attach(HOME, PACK, SPARK))
 import actions  # noqa: E402  (Turnaround sheet, Upscale and Remove a person: Library actions, beside this file)
-action_router, action_build, action_title, action_source = actions.attach(HOME, PACK, SPARK, inside, relative)
+action_router, action_build, action_title, action_source = actions.attach(
+    HOME, PACK, SPARK, inside, relative, windows=lambda: bool(WINDOWS or WIN32) and windows_runtime.mode()["enabled"])
+import swap  # noqa: E402  (Character Swap: the person in a part of a clip replaced by a character, a Library action, beside this file)
+swap_router, swap_build, swap_title, swap_source, swap_estimate = swap.attach(HOME, PACK, SPARK, inside, relative, media_seconds, held_room)
+app.include_router(swap_router)
 import sound  # noqa: E402  (sound effects and foley: Stable Audio Open and MMAudio, run locally, beside this file)
 sound_router, sound_build, sound_title, sound_source = sound.attach(HOME, PACK, SPARK, inside, relative, held_room, media_seconds)
 app.include_router(action_router)
@@ -3145,13 +3909,16 @@ import train  # noqa: E402  (a LoRA trained from the Library's clips and stills 
 train_router, train_build, train_free = train.attach(HOME, PACK, SPARK, inside, media_seconds, enqueue, jobs, lock)
 app.include_router(train_router)
 import finish  # noqa: E402  (Finish: the final cut and mix through Tesseract, to Resolve, Premiere or After Effects, beside this file)
-app.include_router(finish.attach(HOME, PACK, inside, relative))
+app.include_router(finish.attach(HOME, PACK, inside, relative,
+                                windows=lambda: bool(WINDOWS or WIN32) and windows_runtime.bounded("finish")))
+app.include_router(windows_checks.attach(sys.modules[__name__]))
 import graphics  # noqa: E402  (motion graphics: titles, captions, slideshows, music videos, rendered with HyperFrames, beside this file)
 graphics_router, graphics_build, graphics_title = graphics.attach(HOME, PACK, SPARK, inside, relative)
 app.include_router(graphics_router)
 import clear  # noqa: E402  (finished jobs and their files into the trash folder, and back, beside this file)
 app.include_router(clear.attach(HOME, jobs, order, lock)[0])
 import sparks  # noqa: E402  (worker Sparks behind this queue: a job's "sparks" number, beside this file)
+import local_gpus  # noqa: E402  (bounded local GPU workers and shared-host RAM admission)
 
 
 def about_this_spark() -> dict:
@@ -3159,8 +3926,16 @@ def about_this_spark() -> dict:
 
     listing = next(route.endpoint for route in lora_router.routes if route.path == "/api/loras" and "GET" in route.methods)
     info = memory_guard.meminfo()
-    memory = {"available_mb": info.get("MemAvailable"), "total_mb": info.get("MemTotal"), "room_mb": max(memory_guard.room_mb() or 0, voice.room_mb() or 0) or None,
-              "floor_mb": memory_guard.floor_mb(info.get("MemTotal"))} if SPARK and info else {}
+    card = memory_guard.device() if SPARK else None
+    if card is not None:
+        # This machine's own line. A worker still reports whatever its own /api/spark/self says.
+        memory = {"available_mb": card["free_mb"], "total_mb": card["total_mb"],
+                  "room_mb": memory_guard.device_room_mb(), "floor_mb": memory_guard.VRAM_MARGIN_MB}
+    elif SPARK and info:
+        memory = {"available_mb": info.get("MemAvailable"), "total_mb": info.get("MemTotal"), "room_mb": max(memory_guard.room_mb() or 0, voice.room_mb() or 0) or None,
+                  "floor_mb": memory_guard.floor_mb(info.get("MemTotal"))}
+    else:
+        memory = {}
     with lock:
         active = sum(1 for job in jobs.values() if job["status"] in ("queued", "running"))
     # what it renders with its own settings: a head on a Mac hands a Spark only these (sparks.capable)
@@ -3168,7 +3943,13 @@ def about_this_spark() -> dict:
                "qualities": [name for name in QUALITIES if name.startswith("fh") or (turbo_ready() and not SPARK)]}
     if not SPARK:  # a Mac's models are not in ComfyUI's folders: what its own row on the Sparks tab says it renders
         renders.update(fasth3=Path(os.environ.get("FASTH3_DIR", Path.home() / "h3-models/FastH3-8-Step-V2")).is_dir(), image=bool(image_models()))
-    return sparks.about(HOME, hub.code(), state(), [one["id"] for one in listing() if one.get("installed")], active, memory, SPARK_REF2VA.parent, renders)
+    try:  # its own readings, for the head's per-machine panel: a reading that fails leaves the rest of the answer whole
+        status = telemetry.compact(TELEMETRY.snapshot())
+    except Exception:  # noqa: BLE001
+        status = None
+    info = sparks.about(HOME, hub.code(), state(), [one["id"] for one in listing() if one.get("installed")], active, memory, SPARK_REF2VA.parent, renders, status)
+    info["gpu_uuid"] = os.environ.get("STUDIO_LOCAL_GPU_UUID")
+    return info
 
 
 def clip_time(kind: str, params: dict) -> int | None:
@@ -3185,7 +3966,7 @@ _studio_mode = capabilities.mode(SPARK)
 _spark_head = ("controller" if _studio_mode == "controller" else "spark" if _studio_mode == "spark"
                else "mac" if _studio_mode == "mac" else "alone")
 hub = sparks.Hub(HOME, PACK, SPARK, jobs, order, lock, wake, about_this_spark, inside, perform, clip_time,
-                  controller=_studio_mode == "controller", head=_spark_head)
+                  controller=_studio_mode == "controller", head=_spark_head, enabled=not (WINDOWS or WIN32))
 app.include_router(hub.router())
 import updates  # noqa: E402  (Git source updates after an idle, graceful app shutdown)
 
@@ -3201,7 +3982,7 @@ def update_busy():
 
 
 updater = updates.Manager(PACK, HOME, lock, update_busy)
-hub.follow = updater.automatic  # automatic updates here bring the workers to this code too (sparks.Hub.catch_up)
+hub.follow = (lambda: False) if LOCAL_GPU_CHILD else updater.automatic
 
 
 def fits_here(job: dict) -> bool:
@@ -3217,15 +3998,18 @@ def fits_here(job: dict) -> bool:
 
 
 hub.fits_here = fits_here
-app.include_router(updater.router())
-app.router.on_startup.append(updater.start)
-app.router.on_shutdown.append(updater.stop.set)
+if not LOCAL_GPU_CHILD:
+    app.include_router(updater.router())
+    app.router.on_startup.append(updater.start)
+    app.router.on_shutdown.append(updater.stop.set)
 if hasattr(app.router, "on_shutdown"):
-    app.router.on_shutdown.append(hub.close)
-    app.router.on_shutdown.append(bolt.shutdown)  # the Studio's Bolt engine ends with the app (its leash also sees the pipe close)  # the tunnels to the workers are this app's: closed with it (and at exit, sparks.py)
+    # the Studio's Bolt engine ends with the app (its leash also sees the pipe close)
+    app.router.on_shutdown.append(bolt.shutdown)
+    app.router.on_shutdown.append(hub.close)  # the tunnels to the workers are this app's: closed with it (and at exit, sparks.py)
 import telemetry  # noqa: E402  (this machine's readings for the status bar: GPU, memory, disk, queue, beside this file)
 import constraints  # noqa: E402  (what this process can see; a reading does not open a route)
-app.include_router(telemetry.attach(HOME, jobs, order, lock, memory_guard, engines=lambda: {"bolt": bolt.summary()}))
+TELEMETRY = telemetry.attach(HOME, jobs, order, lock, memory_guard, engines=lambda: {"bolt": bolt.summary()})
+app.include_router(TELEMETRY)
 
 
 @app.get("/api/constraints")
@@ -3360,8 +4144,6 @@ def end() -> None:
 
 
 app.router.on_startup.append(begin)
-if hasattr(app.router, "on_shutdown"):
-    app.router.on_shutdown.insert(0, end)  # before the updater and before hub.close, so a stopping app claims nothing
 
 # pytest is already imported while it collects modules, and PYTEST_CURRENT_TEST is unset until a test runs. A test
 # that first imports the app during its own run still starts the queue. A script and `python app/server.py` do too.
@@ -3380,12 +4162,20 @@ def claim_instance() -> None:
     home.mkdir(parents=True, exist_ok=True)
     fd = os.open(home / "studio.lock", os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            import msvcrt
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b" ")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    except (BlockingIOError, OSError):
         os.close(fd)
         print(f"[studio] another Studio already has this data directory ({home}). This one was not started.", file=sys.stderr)
         raise SystemExit(1)
     os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
     os.write(fd, f"{os.getpid()}\n".encode())
     _instance_fd = fd
     try:
@@ -3402,6 +4192,22 @@ def claim_instance() -> None:
 def stop_session_comfy() -> None:
     """ComfyUI runs in its own session so the models stay loaded between clips. This process is the session:
     quitting it stops that server. PREFIX and SPARK_COMFY_PORT are already this install's, on a Spark and on a card."""
+    if in_container() or (not (WINDOWS or WIN32) and capabilities.mode(SPARK) in ("app-only", "managed-rtx", "controller")):
+        return  # the shared backend is not this session
+    if WINDOWS:
+        return
+    if WINCUDA:  # spark/comfy_win.py, the native tier's port of comfy.sh
+        try:
+            stopped = windows_runtime.release_native()
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            print("[studio] ComfyUI did not stop within 60 s", flush=True)
+            return
+        if stopped:
+            print("[studio] ComfyUI stopped", flush=True)
+        return
+    if LOCAL_GPU_CHILD:
+        local_gpus.stop_child_comfy()
+        return
 
     script = PACK / ("mac/comfy.sh" if sys.platform == "darwin" else "spark/comfy.sh")
     if not script.is_file():
@@ -3414,7 +4220,6 @@ def stop_session_comfy() -> None:
         return
     if "stopped" in done.stdout:
         print("[studio] ComfyUI stopped", flush=True)
-
 
 if __name__ == "__main__":
     claim_instance()
@@ -3433,14 +4238,40 @@ async def fresh_pages(request, call_next):
     return response
 
 
+import desktop_control  # noqa: E402
+app.include_router(desktop_control.attach(sys.modules[__name__]))
 app.mount("/", StaticFiles(directory=HERE / "static", html=True), name="static")
 
 if not media_tools()["ffmpeg"]:
     print("[studio] " + FFMPEG_NOTE, flush=True)
 
+def stop_local_jobs() -> None:
+    """Drain running managed work, without cancelling the Director's queued takes."""
+    stopping.set()
+    hub.quiesce()
+    with lock:
+        pending = [job["id"] for job in jobs.values() if job["status"] == "running"]
+    for job_id in pending:
+        cancel(job_id)
+    wake.set()
+    deadline = time.monotonic() + 30
+    with local_work:
+        while local_threads and time.monotonic() < deadline:
+            local_work.wait(min(0.2, max(0, deadline - time.monotonic())))
+        if local_threads:
+            hub.local.drain_failed = True
+            print("[studio] Owned jobs did not finish shutdown within 30 s; their GPU leases are retained.", flush=True)
+    voice.release("the Studio session is ending")
+    music.release("the Studio session is ending")
+    if WINDOWS or WIN32:
+        windows_storyboard.shutdown_backend()
+    stop_session_comfy()
+
+
 def begin_shutdown(sig_handler, sig, frame) -> None:
     """Ctrl-C and an update's restart end the open event streams, then the server closes."""
 
+    stopping.set()
     telemetry.STOPPING.set()
     sig_handler(sig, frame)
 
@@ -3464,6 +4295,18 @@ def catch_exit(handle_exit):
             signal.signal(sig, handler)
 
 
+def register_session_stop() -> None:
+    """Only the running app owns engine shutdown; workers may start after app startup."""
+    def stop():
+        if in_container() or (not (WINDOWS or WIN32) and capabilities.mode(SPARK) in ("app-only", "managed-rtx", "controller")):
+            end()
+        elif WINDOWS or WIN32 or SPARK and (LOCAL_GPU_CHILD or hub.local.managed or getattr(hub.local, "active", False) or local_threads):
+            stop_local_jobs()
+        else:
+            stop_session_comfy()
+    app.router.on_shutdown.insert(0, stop)
+
+
 if __name__ == "__main__":
     import uvicorn
 
@@ -3478,17 +4321,22 @@ if __name__ == "__main__":
 
     if os.environ.get("STUDIO_PIDFILE"):  # a worker Spark's app, started by another Spark's Studio: how that one finds it again
         Path(os.environ["STUDIO_PIDFILE"]).write_text(str(os.getpid()))
-    hub.start()
-    nightshift.start()  # the night shift's scheduler: planned shifts start at their time or when the queue is idle
-    if not os.environ.get("STUDIO_PIDFILE"):  # the captioner describes this studio's Library, not a worker Spark's
-        caption_router.captioner["start"]()
-    director.resume_later()  # the Director's runs a restart cut off
-    app.router.on_shutdown.append(stop_session_comfy)  # the detached ComfyUI belongs to this process, not to one render
+    if not (WINDOWS or WIN32):
+        hub.start()
+    if hub.local.active and not LOCAL_GPU_CHILD:
+        os.environ["STUDIO_LOCAL_GPU_KEY"] = hub.local.key  # private model ownership, not the head's browser access key
+    if not LOCAL_GPU_CHILD and not (WINDOWS or WIN32):
+        nightshift.start()  # schedules belong to the head, never to its private workers
+        if not os.environ.get("STUDIO_PIDFILE"):
+            caption_router.captioner["start"]()
+        director.resume_later()
+    register_session_stop()
 
     # Update authorization needs the actual socket peer. Tailscale Serve forwards the browser's IP,
     # but its authenticated local proxy is the peer allowed to manage this loopback installation.
     web_server = StudioServer(uvicorn.Config(app, host=listen_host(),
                                port=int(os.environ.get("PORT", "7870")), log_level="warning", proxy_headers=False,
+                               fd=int(os.environ["STUDIO_LOCAL_GPU_FD"]) if LOCAL_GPU_CHILD else None,
                                timeout_graceful_shutdown=10))  # open connections (event streams) never hold a restart
 
     def restart() -> None:
@@ -3496,6 +4344,21 @@ if __name__ == "__main__":
         web_server.should_exit = True
 
     updater.restart = restart
+    def desktop_shutdown() -> None:
+        voice.release("Desktop stop")
+        music.release("Desktop stop")
+        bolt.shutdown()
+        if WINDOWS or WIN32:
+            windows_storyboard.release_backend()
+            windows_runtime.release_native()
+        else:
+            command = ["bash", str(PACK / "spark" / "comfy.sh"), "stop"]
+            done = subprocess.run(command, cwd=PACK, capture_output=True, text=True, timeout=90)
+            if done.returncode:
+                raise RuntimeError("The session's ComfyUI did not stop.")
+        restart()
+
+    app.state.desktop_shutdown = desktop_shutdown
     try:
         web_server.run()
     except KeyboardInterrupt:  # Uvicorn re-raises Ctrl-C after the shutdown hooks have run

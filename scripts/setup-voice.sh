@@ -14,7 +14,7 @@
 # licence of its own from Fish Audio; clone a real person's voice only with their consent. Nothing here calls Fish
 # Audio's API; the weights come from Hugging Face (fishaudio/drama-3) and stay on this machine.
 #
-# Mac (Apple silicon, 64 GB or more): 39 GB for Fish's checkpoint, 39 GB for the MLX conversion, about 6 GB for the venv.
+# Mac (Apple silicon, 96 GB or more): 39 GB for Fish's checkpoint, 39 GB for the MLX conversion, about 6 GB for the venv.
 # Environment: DRAMA3_SRC (the TensorFold clone, default ~/tensorfold-drama3-mlx, or ~/TensorFold when that one has the
 # port already; an existing clone is used as it is),
 # DRAMA3_VENV (~/drama3-venv), DRAMA3_CHECKPOINT (~/models/drama-3), DRAMA3_MODEL (~/models/drama-3-mlx).
@@ -53,6 +53,15 @@ die() { echo "FATAL: $*" >&2; exit 1; }
 ok()  { echo "  ✓ $*"; }
 step(){ echo; echo "==> $*"; }
 CHECKPOINT="${DRAMA3_CHECKPOINT:-$HOME/models/drama-3}"
+# a folder the weights go into must be this user's to write: a root-owned ~/models stops here, before the engine is
+# built, not after it with the checkpoint quietly missing
+writable_for() {
+  local dir="$1"
+  while [ ! -e "$dir" ] && [ "$dir" != / ]; do dir="$(dirname "$dir")"; done
+  [ -d "$dir" ] && [ -w "$dir" ] && return 0
+  die "$dir is not writable by $(id -un) (it belongs to $(stat -c %U "$dir" 2>/dev/null || stat -f %Su "$dir")), so $1 cannot be made there. \
+Make it yours (sudo chown $(id -un) \"$dir\") or point DRAMA3_CHECKPOINT (DRAMA3_MODEL on a Mac) at a folder of your own, then run this again."
+}
 
 licence() {
   echo "  Fish Audio Drama 3 (39 GB) is licensed under the Fish Audio Community License v1.0: research, non-commercial"
@@ -77,6 +86,7 @@ if [ "$(uname -s)" = Linux ]; then
 sys.exit(0 if os.path.isfile(os.path.join(d, "config.json")) and all(os.path.isfile(os.path.join(d, f)) for f in set(m.values())) else 1)' "$MODEL" 2>/dev/null
   }
 
+  if [ "$VERIFY" = 0 ] && [ "$UPGRADE" = 0 ] && ! have_model; then writable_for "$MODEL"; fi
   step "TensorFold's Drama 3 engine for CUDA ($CUDA_BRANCH @ $CUDA_COMMIT) -> $(dirname "$(dirname "$BIN")")"
   if [ "$VERIFY" = 0 ] && [ -z "${DRAMA3_CUDA_BIN:-}" ]; then
     # spark/build-drama3.sh: the carrier image's prebuilt engine (checksums checked), else a build from source
@@ -173,7 +183,11 @@ fi
 
 [ "$(uname -m)" = arm64 ] || die "the MLX port of Drama 3 needs Apple silicon"
 MEM=$(sysctl -n hw.memsize)
-[ "$MEM" -ge $((64 * 1024 * 1024 * 1024)) ] || die "Drama 3 peaks at about 52 GB: a Mac with 64 GB or more"
+# 96 GB: the Studio's minimum for a Mac (64 GB up to 4.3.0). --verify of an install made under the old floor says so and goes on
+if [ "$MEM" -lt $((96 * 1024 * 1024 * 1024)) ]; then
+  [ "$VERIFY" = 1 ] || die "Drama 3 (the Voice tab) peaks at about 52 GB: a Mac with 96 GB or more (this one has $((MEM / 1073741824)) GB)"
+  echo "  ! this Mac has $((MEM / 1073741824)) GB: Drama 3 (the Voice tab) needs 96 GB or more now (64 GB up to 4.3.0); what is installed is checked and kept, and the app does not run it here"
+fi
 SRC="${DRAMA3_SRC:-$HOME/tensorfold-drama3-mlx}"
 # a TensorFold clone at ~/TensorFold that has the port already (the README's earlier hand setup) is used as it is
 if [ -z "${DRAMA3_SRC:-}" ] && [ ! -d "$SRC" ] && git -C "$HOME/TensorFold" merge-base --is-ancestor "$MLX_COMMIT" HEAD 2>/dev/null; then
@@ -182,6 +196,10 @@ fi
 VENV="${DRAMA3_VENV:-$HOME/drama3-venv}"
 MODEL="${DRAMA3_MODEL:-$HOME/models/drama-3-mlx}"
 PY="$VENV/bin/python"
+if [ "$VERIFY" = 0 ] && ! { [ -f "$MODEL/config.json" ] && [ -f "$MODEL/codec.safetensors" ]; }; then
+  [ -f "$CHECKPOINT/model.safetensors.index.json" ] || writable_for "$CHECKPOINT"
+  writable_for "$MODEL"
+fi
 
 step "TensorFold $MLX_BRANCH @ $MLX_COMMIT in $SRC"
 if [ -d "$SRC/.git" ]; then

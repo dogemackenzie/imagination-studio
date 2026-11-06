@@ -51,7 +51,9 @@ def measured(tmp_path, monkeypatch):
     recipe = Z.public_limits()
     profile = {
         "enabled": True, "model": "z-image", "gpu_name": "NVIDIA GeForce RTX 3060",
-        "recipe": recipe, "render": {"output": "/home/spark/ImaginationStudio/z-image/still_s1.png"},
+        "recipe": recipe, "host_available_mb": 14000, "vram_free_mib": 12000,
+        "render": {"output": "/home/spark/ImaginationStudio/z-image/still_s1.png",
+                   "host_available_mb_min": 13000, "vram_free_mib_min": 11000},
         "weights": {key: {"bytes": 4, "license": Z.LICENSE} for key, *_rest in tiny},
     }
     path = tmp_path / "profile.json"
@@ -92,14 +94,14 @@ def test_the_recorded_profile_keeps_the_floor_and_a_stand_in_path():
     assert "not lowered" in data["note"] and "Apache License 2.0" in data["weights"]["unet"]["license"]
 
 
-def test_admission_need_is_the_diffusion_file(measured, monkeypatch):
+def test_admission_keeps_measured_peak_margin_beyond_diffusion_file(measured, monkeypatch):
     assert Z.WEIGHT_MIB == Z.UNET_MIB
     assert Z.UNET_MIB + Z.CLIP_MIB + Z.VAE_MIB > Z.WEIGHT_MIB + 512
     monkeypatch.setattr(Z.sdxl_turbo, "listener_pids", lambda port=8188: {1})
     monkeypatch.setattr(Z.sdxl_turbo, "gpu_processes", lambda: [{"pid": 1, "name": "python", "vram_mib": 1}])
-    monkeypatch.setattr(Z.rtx_admit, "collect", lambda: budgets(vram_free_mib=Z.WEIGHT_MIB + 512))
-    assert Z.assess()["ok"] is True and Z.assess()["vram_need_mib"] == Z.UNET_MIB
-    monkeypatch.setattr(Z.rtx_admit, "collect", lambda: budgets(vram_free_mib=Z.WEIGHT_MIB + 511))
+    monkeypatch.setattr(Z.rtx_admit, "collect", lambda: budgets(vram_free_mib=Z.WEIGHT_MIB + 256 + 512))
+    assert Z.assess()["ok"] is True and Z.assess()["vram_need_mib"] == Z.UNET_MIB + 256
+    monkeypatch.setattr(Z.rtx_admit, "collect", lambda: budgets(vram_free_mib=Z.WEIGHT_MIB + 256 + 511))
     low = Z.assess()
     assert low["ok"] is False and low["code"] == "insufficient_vram" and low["enabled"] is False
     monkeypatch.setattr(Z.rtx_admit, "collect", lambda: budgets(host_available_mb=7999, vram_free_mib=12000))
@@ -246,7 +248,8 @@ const sdxl = pictureStillFacts();
 C.imageModel = "qwen"; C.count = 4; C.imageSize = "1344x768";
 const qwen = pictureStillFacts();
 C.imageModel = "z-image";
-imageModelPick();
+const picker = imageModelPick();
+const picked = Object.fromEntries(picker.kids[1].kids.map(card => [card.attrs["data-picture-model"], [card.kids[0].kids[0].kids[0]]]));
 console.log(JSON.stringify({ z, sdxl, qwen, titles: { z: picked["z-image"][0], sdxl: picked["sdxl-turbo"][0], flux: picked["flux3k-fast"][0] } }));
 """
     import tempfile

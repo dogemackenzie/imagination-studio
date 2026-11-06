@@ -47,7 +47,8 @@ COPY --from=build /opt/studio/venv /opt/studio/venv
 COPY app /opt/studio/app
 COPY scripts /opt/studio/scripts
 COPY spark /opt/studio/spark
-COPY VERSION /opt/studio/VERSION
+COPY VERSION CREDITS.md THIRD_PARTY_NOTICES.md LICENSE /opt/studio/
+COPY LICENSES /opt/studio/LICENSES
 # The measured still profile. The checkpoint stays on the host and is mounted read-only.
 COPY docs/benchmarks/rtx3060-images.json /opt/studio/docs/benchmarks/rtx3060-images.json
 COPY docs/benchmarks/rtx3060-z-image-turbo.json /opt/studio/docs/benchmarks/rtx3060-z-image-turbo.json
@@ -90,7 +91,7 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/opt/studio/scripts/container-entrypoint.sh"
 FROM runtime AS test
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get install -y --no-install-recommends nodejs git openssh-client procps \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.13.0@sha256:22fbda6ef3b6466750a6fb1c7ce1d23a2a63a53be91e03d408b6e4274753998d /uv /usr/local/bin/uv
 COPY requirements-test.lock /tmp/requirements-test.lock

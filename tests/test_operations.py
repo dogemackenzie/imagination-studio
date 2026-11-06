@@ -308,3 +308,15 @@ def test_preflight_refuses_a_busy_or_foreign_queue():
         preflight.fetch("http://127.0.0.1:8190")
     with pytest.raises(ValueError, match="protected_endpoint"):
         preflight.fetch("http://10.1.1.1:8188")
+
+
+def test_job_history_uses_the_windows_file_lock_without_fcntl(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(history, "fcntl", None)
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(LK_LOCK=1, LK_UNLCK=0,
+        locking=lambda fd, mode, size: calls.append((mode, size))))
+    monkeypatch.setenv("STUDIO_JOB_HISTORY", str(tmp_path / "history.json"))
+    history.remember({"id": "win-record", "status": "done"})
+    assert json.loads((tmp_path / "history.json").read_text())["jobs"][0]["id"] == "win-record"
+    assert calls == [(1, 1), (0, 1)]

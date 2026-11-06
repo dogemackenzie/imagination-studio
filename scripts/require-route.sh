@@ -6,4 +6,4 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIND="${1:-}"
 export PYTHONPATH="$HERE/../app${PYTHONPATH:+:$PYTHONPATH}"
-exec python3 -c 'import sys, capabilities; raise SystemExit(capabilities.script_exit(sys.argv[1]))' "$KIND"
+exec "${STUDIO_PYTHON:-python3}" -c 'import sys, capabilities; raise SystemExit(capabilities.script_exit(sys.argv[1]))' "$KIND"

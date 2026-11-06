@@ -4,7 +4,7 @@ The system runs on a Mac, a DGX Spark, and Linux. This page is the Linux app con
 The commands match `compose.yaml`, `Dockerfile.studio`, `scripts/container-entrypoint.sh`, `scripts/container-healthcheck.py`,
 `scripts/doctor.py`, `scripts/comfy_preflight.py`, and `scripts/studio-data.py`.
 
-The app listens on `127.0.0.1:7870`. There is no login. The container does not
+The tracked Compose file publishes `127.0.0.1:7870`; this deployment also retains its existing specific LAN address through the private override. There is no login. The container does not
 attach a GPU. It does not publish 8188, 8190, 8191, or 8443. `HOST` stays unset. `STUDIO_BIND` is `0.0.0.0`
 only inside the container so the published addresses can reach the app. `STUDIO_ACCESS_KEY=off` is set for
 this service. The entrypoint defaults that variable to off, and a container with it unset does not ask, so
@@ -17,9 +17,11 @@ not the start command here.
 
 ## Build, start, stop, logs, health
 
-From this repository:
+From this repository. This existing deployment uses both private overrides; preserve them so its LAN binding and
+read-only NVML telemetry remain the same. A fresh installation without these files uses `compose.yaml` alone.
 
 ```bash
+export COMPOSE_FILE=compose.yaml:compose.override.yaml:compose.nvml.yaml
 SOURCE_REV=<git short> UPSTREAM_REV=<origin/main> docker compose build studio
 SOURCE_REV=<git short> UPSTREAM_REV=<origin/main> docker compose up -d --force-recreate --no-deps studio
 docker compose logs --tail=200 studio
@@ -113,8 +115,8 @@ Checkpoint `sd_xl_turbo_1.0_fp16.safetensors`, 6938081905 bytes. ComfyUI pin
 ## Refusal reasons
 
 `app/capabilities.py` is the text the API returns. The lead reason on this host, where the GPU name
-is visible, is `unmeasured_configuration`. Inside the app container, where no GPU is visible, the
-lead reason is `unavailable_hardware`.
+is visible, is `unmeasured_configuration`. The deployed container has read-only NVML telemetry; it still does not qualify any local GPU route.
+Measured shared stills use their own capacity refusal.
 
 | Code | Reason |
 | --- | --- |
@@ -123,7 +125,7 @@ lead reason is `unavailable_hardware`.
 | `missing_model` | The model this route needs is not installed. |
 | `incompatible_nodes` | The installed nodes cannot run this route. |
 | `busy_renderer` | The renderer is busy with another job. |
-| `insufficient_memory` | Available memory is under the 8000 MB floor, so a render cannot start. |
+| `insufficient_memory` | Available memory cannot cover measured peak demand plus margin and the 8000 MB reserve. |
 | `unmeasured_configuration` | This machine has no measured render route. An RTX card is not a production render mode, and a managed RTX image does not enable one. |
 
 Export and soundtrack stay available. They assemble files that already exist. Offering SDXL Turbo
@@ -132,8 +134,8 @@ does not set `local_render` true and does not enable scout or video.
 ## A still
 
 SDXL Turbo is the measured picture route. The profile's `enabled` field is true. A still is one
-prompt to the shared ComfyUI when its queue is empty and host available memory is at or above
-8000 MB. The recipe stays 512×512, one step, cfg 1.0, `euler_ancestral`, `sgm_uniform`, batch size 1.
+prompt to the shared ComfyUI when its queue is empty and available memory covers the measured
+peak plus margin and reserves (at least 15525 MB host available for SDXL). The recipe stays 512×512, one step, cfg 1.0, `euler_ancestral`, `sgm_uniform`, batch size 1.
 The container uses `SDXL_COMFY_URL=http://172.17.0.1:8188`. The host uses `http://127.0.0.1:8188`.
 
 Before any integration run that would submit a prompt:
@@ -183,7 +185,7 @@ python3 scripts/studio-data.py backup --home /tmp/studio-data-copy --to /tmp/stu
 python3 scripts/studio-data.py restore --from /tmp/studio-backup --into /tmp/studio-restored
 ```
 
-Restore copies projects and settings. It does not run a job. There is no schema migration on the
+Restore copies projects, settings and any pending shared-prompt ownership record. It does not run a job. There is no schema migration on the
 live volume in this release. Rehearse on a copy before adding one.
 
 Return the app to a tag that is already on this machine:
@@ -208,3 +210,26 @@ python3 scripts/studio-data.py sweep --home /tmp/studio-data-copy
 `sweep` deletes regular files under `comfy/temp` that are older than a day. It skips symlinks.
 The server process runs the same sweep on its own data directory when it starts. It does not delete
 models, Docker images, or files outside that temp directory.
+
+## Shared-backend operation (November 6 update)
+
+The base Compose file publishes localhost; the existing private override also publishes a specific LAN address.
+The deployment explicitly disables the access key. Keep this visible in deployment review; Updates, Brains and
+Agents have separate local-only checks. No shared-backend lifecycle operations are authorized by these settings.
+
+The shared ComfyUI serializes its own queue. Studio checks the queue and memory immediately before submission,
+but that snapshot does not reserve capacity against another application. It never clears or interrupts the queue.
+Its client lock prevents overlapping submissions from Studio processes using the same data directory.
+
+Admission uses each profile's measured cold-load RAM/VRAM deltas, plus a 512 MB host margin and 256 MiB GPU margin,
+with the existing 8000 MB host and 512 MiB GPU reserves kept. SDXL requires at least 15525 MB host available;
+Z-Image requires 19646 MB, beyond this machine's total RAM. A completed benchmark is not proof of current capacity.
+No capacity is reclaimed from another application, and insufficient or unknown headroom refuses before submission.
+
+Cancellation stops waiting in Studio; the shared prompt can continue. `/data/shared-prompt.json` remembers it across
+client exits and container restarts. Another Studio submission waits until that exact prompt has a terminal history
+entry. If a POST response was lost, the outcome is uncertain and automatic retry is refused. Review ComfyUI's queue
+and history without mutating either, then archive the Studio-owned record only after confirming the submission is
+finished or was never accepted. Do not clear the backend queue or delete another application's work.
+
+Live cold/warm image tests remain conditional on measured headroom. Mock-backend success must be reported separately.

@@ -103,6 +103,8 @@ for line in sys.stdin:
     if "CRASH" in request["text"]:
         sys.exit(3)
     samples = struct.pack("<h", 100) * 44100
+    if "STALL" in request["text"] and (request["seed"] % 2 == 0 or "ALWAYS" in request["text"]):
+        samples = struct.pack("<hh", 8000, -8000) * 44100 + struct.pack("<h", 300) * 44100 * 4  # 2 s spoken, then 4 s of hum
     if request.get("pcm"):
         with open(request["pcm"], "wb") as pcm:
             for i in range(4):
@@ -154,14 +156,16 @@ def test_the_cuda_backend_says_what_is_missing():
     assert one.argv() == [str(one.bin), "--model", str(one.model), "--codec", str(one.codec), "--serve", "1"]
     (folder / "codec-v1.safetensors").unlink()
     one.known = None
-    assert "drama3_codec.py" in one.check() and "oneshot-setup-spark.sh --voice" in one.check() and "DRAMA3_CUDA_CODEC" in one.check()
-    one.known, one.model = None, folder / "nowhere"
-    assert "No Drama 3 checkpoint" in one.check()
-    one.known, one.bin = None, folder / "nothing"
-    why = one.check()
-    assert "drama3-cuda" in why and "DRAMA3_CUDA_BIN" in why
+    had_located = voice.located
+    voice.located = lambda need, path, there: path  # this desk's linked weights are not the missing install
     had = voice._backend
     try:
+        assert "drama3_codec.py" in one.check() and "oneshot-setup-spark.sh --voice" in one.check() and "DRAMA3_CUDA_CODEC" in one.check()
+        one.known, one.model = None, folder / "nowhere"
+        assert "No Drama 3 checkpoint" in one.check()
+        one.known, one.bin = None, folder / "nothing"
+        why = one.check()
+        assert "drama3-cuda" in why and "DRAMA3_CUDA_BIN" in why
         voice._backend = one
         state = client.get("/api/state").json()["voice"]
         assert state["available"] is False and state["backend"] == "cuda" and state["credit"] == "Built with Fish Audio"
@@ -169,6 +173,7 @@ def test_the_cuda_backend_says_what_is_missing():
         answer = client.post("/api/voice/takes", json={"text": "Hello."})
         assert answer.status_code == 400 and "DRAMA3_CUDA_BIN" in answer.json()["error"]
     finally:
+        voice.located = had_located
         voice._backend = had
 
 
@@ -289,12 +294,14 @@ def test_an_h3_job_unloads_drama3_before_it_runs():
         had_spark = server.SPARK
         server.SPARK = True
         try:
-            had_room = server.memory_guard.room_mb
+            had_room, had_device = server.memory_guard.room_mb, server.memory_guard.device_room_mb
             try:
                 server.memory_guard.room_mb = lambda: 1000
+                server.memory_guard.device_room_mb = lambda: None  # a card reads its own room and would ignore the stand-in
                 assert server.memory_of({}, {"WIDTH": 864, "HEIGHT": 480}, 121, False)["available_mb"] == voice.room_mb()
             finally:
                 server.memory_guard.room_mb = had_room
+                server.memory_guard.device_room_mb = had_device
         finally:
             server.SPARK = had_spark
         server.build = build
@@ -620,6 +627,72 @@ def test_a_cuda_take_with_missing_words_is_drawn_again_not_played_and_the_best_k
         voice._backend, voice.qa.ready, voice.qa.transcribe = had, had_ready, had_transcribe
 
 
+def wav_of(path: Path, *runs: tuple[float, int]) -> Path:
+    """A test WAV of (seconds, amplitude) runs: 8000 is speech-loud (-12 dBFS), 300 the stall's hum (-41 dBFS)."""
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(44100)
+        for seconds, amplitude in runs:
+            w.writeframes(struct.pack("<hh", amplitude, -amplitude) * int(22050 * seconds))
+    return path
+
+
+def test_a_stall_is_quiet_after_speech_that_lasts():
+    folder = Path(tempfile.mkdtemp())
+    assert voice.stall(wav_of(folder / "a.wav", (2, 8000), (2.4, 0), (2, 8000), (0.5, 0))) is None  # a long pause of its own
+    assert voice.stall(wav_of(folder / "b.wav", (9.2, 8000), (26.9, 300))) == 9.2  # the hum to the frame cap
+    assert voice.stall(wav_of(folder / "c.wav", (3, 8000), (3.5, 0))) == 3.0  # silence at the end
+    assert voice.stall(wav_of(folder / "d.wav", (3, 8000), (9, 300), (3, 8000))) == 3.0  # a chunk stalled, the next went on
+    assert voice.stall(wav_of(folder / "e.wav", (0.5, 8000), (10, 0))) is None  # under a second of speech
+    assert voice.stall(wav_of(folder / "f.wav", (3, 0))) is None and voice.stall(folder / "missing.wav") is None
+
+
+def test_a_cuda_part_that_stalls_is_drawn_again_with_the_next_seed_not_played():
+    folder = Path(tempfile.mkdtemp())
+    one = fake_cuda(folder)
+    had = voice._backend
+    try:
+        voice._backend = one
+        done = wait(client.post("/api/voice/takes", json={"text": "The tower STALL has not chimed in years.", "seed": 8, "asr": False}).json()["id"])
+        take, sent = done["voice"], requests_of(folder)[-2:]
+        assert [r["seed"] for r in sent] == [8, 9] and "pcm" in sent[0] and "pcm" not in sent[1]
+        assert take["stalled"] == [{"part": 1, "at_s": 2.0, "redraws": 1, "seed": 9, "still": None}]
+        assert "went quiet after 2.0 s" in done["log"] and not list((server.HOME / "voice").glob(f"{done['id']}*.stall*"))
+        assert voice.stall(server.HOME / take["path"]) is None
+        # a part that stalls on every seed: three draws again, then the first kept and said
+        count = len(requests_of(folder))
+        take = wait(client.post("/api/voice/takes", json={"text": "ALWAYS STALL here.", "seed": 3, "asr": False}).json()["id"])["voice"]
+        assert [r["seed"] for r in requests_of(folder)[count:]] == [3, 4, 5, 6]
+        assert take["stalled"] == [{"part": 1, "at_s": 2.0, "redraws": 3, "seed": 3, "still": 2.0}]
+        # a take that never stalls is asked once
+        count = len(requests_of(folder))
+        take = wait(client.post("/api/voice/takes", json={"text": "No trouble here.", "seed": 4, "asr": False}).json()["id"])["voice"]
+        assert len(requests_of(folder)) == count + 1 and take["stalled"] is None
+    finally:
+        one.release("test over")
+        voice._backend = had
+
+
+def test_a_one_request_take_that_stalls_is_made_again_with_the_next_seed():
+    folder = Path(tempfile.mkdtemp())
+
+    class OneRequest:  # the Mac's MLX server: the whole take in one request
+        seeds = []
+
+        def make(self, job, text, wav, reference, seed, sampling, live=True):
+            self.seeds.append((seed, live))
+            wav_of(wav, (2, 8000), (5, 300)) if seed < 13 else wav_of(wav, (4, 8000))
+            return {"audio_s": 7.0 if seed < 13 else 4.0, "first_audio_ms": 90.0 + seed}
+
+    job = {"log": ""}
+    params = {"text": "A long line.", "seed": 11, "temperature": 1.0, "top_p": 0.9, "top_k": 30}
+    wav = wav_of(folder / "t.wav", (2, 8000), (5, 300))
+    one = OneRequest()
+    measured = voice.unstalled(job, one, params, wav, None, {"audio_s": 7.0, "first_audio_ms": 80.0, "load_s": 5.0})
+    assert one.seeds == [(12, False), (13, False)] and measured["audio_s"] == 4.0 and measured["first_audio_ms"] == 80.0
+    assert measured["stalled"] == {"at_s": 2.0, "redraws": 2, "seed": 13, "still": None} and voice.stall(wav) is None
+    assert not list(folder.glob("*.stall*")) and job["log"].count("a Drama 3 stall") == 2
+
+
 def test_the_word_check_is_the_engines():
     import wordcheck
     text = "<|speaker:0|> [sighs] It's probably just the cat. <|speaker:1|> Cats don't knock on doors."
@@ -694,3 +767,59 @@ def test_an_engine_the_kernel_wont_release_still_gives_the_gpu_lock_back(monkeyp
     one.process = Corpse()
     one.stop("the engine hung")  # must not raise out of the wedged wait
     assert one.process is None and one.owner == "" and not voice.LOCK.exists()
+
+
+def test_voice_setup_stops_before_the_engine_when_the_weights_folder_is_not_writable(tmp_path):
+    """A root-owned ~/models: setup-voice.sh fails at once and says how to fix it, before the engine step, instead of
+    building the engine and leaving the checkpoint missing for the next boot to find."""
+
+    if os.geteuid() == 0:
+        pytest.skip("root can write anywhere")
+    script = (ROOT / "scripts" / "setup-voice.sh").read_text()
+    function = script[script.index("writable_for() {"):]
+    function = function[:function.index("\n}\n") + 3]
+    assert script.index('writable_for "$MODEL"; fi\n  step "TensorFold\'s Drama 3 engine') > 0  # Linux: before the engine is built
+    locked = tmp_path / "models"
+    locked.mkdir()
+    locked.chmod(0o555)
+    try:
+        run = lambda target: subprocess.run(["bash", "-c", 'die() { echo "FATAL: $*" >&2; exit 1; }\n' + function + f'writable_for "{target}" && echo fine'],
+                                            capture_output=True, text=True)
+        stopped = run(locked / "drama-3")
+        assert stopped.returncode == 1 and "is not writable by" in stopped.stderr and "DRAMA3_CHECKPOINT" in stopped.stderr
+        assert run(tmp_path / "mine" / "drama-3").stdout.strip() == "fine"
+    finally:
+        locked.chmod(0o755)
+
+
+def mac_with(gib: int, monkeypatch):
+    """This process as a Mac with ``gib`` GB of memory: sysctl answers that, and the engine's own probe does not answer."""
+
+    def run(argv, *args, **kwargs):
+        if argv[:2] == ["sysctl", "-n"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{gib << 30}\n", stderr="")
+        raise OSError("the probe is not run here")
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+def test_drama3_on_a_mac_needs_96_gb(monkeypatch):
+    """The Studio's minimum for a Mac is 96 GB (64 up to 4.3.0): the Voice tab says so on a smaller one."""
+
+    folder = Path(tempfile.mkdtemp())
+    python = folder / "venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    for name in ("config.json", "codec.safetensors"):
+        (folder / "model").mkdir(exist_ok=True)
+        (folder / "model" / name).write_text("{}")
+    monkeypatch.setenv("DRAMA3_VENV", str(folder / "venv"))
+    monkeypatch.setenv("DRAMA3_MODEL", str(folder / "model"))
+    assert voice.MEMORY_GB == 96
+    for gib in (64, 95):
+        mac_with(gib, monkeypatch)
+        assert voice.Mlx().look() == f"This Mac has {gib} GB of memory; Drama 3 needs about 52 GB free, so 96 GB or more."
+    mac_with(96, monkeypatch)
+    assert voice.Mlx().look().startswith("The Drama 3 environment did not answer")  # past the memory, to the engine

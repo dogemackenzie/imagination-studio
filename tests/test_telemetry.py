@@ -32,6 +32,51 @@ def test_a_gb10_line_parses():
     assert telemetry.parse_gpu("garbage") is None
 
 
+def test_paired_cards_combine():
+    """Two paired cards (STUDIO_GPUS=0,1): each card kept, the mean load, the hotter card, the power of both."""
+
+    cards = telemetry.parse_gpus("0, 33005, 48935, 100, 61, 280.5, 2400, NVIDIA RTX PRO 5000 Blackwell\n"
+                                 "1, 33719, 48935, 90, 58, 270.1, 2385, NVIDIA RTX PRO 5000 Blackwell\n")
+    both = telemetry.combine_gpus(cards)
+    assert both["count"] == 2 and both["util_pct"] == 95.0 and both["temp_c"] == 61.0 and both["power_w"] == 550.6
+    assert [c["index"] for c in both["cards"]] == ["0", "1"] and both["cards"][1]["used_mb"] == 33719
+    assert both["name"] == "NVIDIA RTX PRO 5000 Blackwell"
+    one = telemetry.combine_gpus(cards[:1])
+    assert "cards" not in one and one["util_pct"] == 100.0  # one card: the reading as before
+    assert telemetry.combine_gpus([]) is None
+    four = telemetry.combine_gpus([dict(cards[0], index=str(i), util_pct=float(10 * i)) for i in range(4)])
+    assert four["count"] == 4 and four["util_pct"] == 15.0 and [c["index"] for c in four["cards"]] == ["0", "1", "2", "3"]
+    old = telemetry.parse_gpus("99, 91, 80.0, 2400, NVIDIA GB10\n")  # the fields alone, no index or memory
+    assert old == [telemetry.parse_gpu("99, 91, 80.0, 2400, NVIDIA GB10")]
+    # a DGX Spark's GB10 with the index and memory fields: nvidia-smi says [N/A] for the memory it has none of
+    spark = telemetry.parse_gpus("0, [N/A], [N/A], 99, 91, 80.0, 2400, NVIDIA GB10\n")
+    assert len(spark) == 1 and spark[0]["used_mb"] is None and spark[0]["util_pct"] == telemetry.parse_gpu("99, 91, 80.0, 2400, NVIDIA GB10")["util_pct"]
+    assert "cards" not in telemetry.combine_gpus(spark)
+
+
+def test_n1x_npu_is_not_counted_or_averaged_as_a_second_gpu():
+    cards = telemetry.parse_gpus(
+        "GPU-00000000-0000-0000-0000-000000000001, 0, 1000, 31232, 8, 41, 12, 1500, RTX Spark N1X\n"
+        "DLA-00000000-0000-0000-0000-000000000002, 1, 0, 0, 0, 40, 0, 0, NVIDIA NPU\n",
+        with_uuid=True)
+    assert len(cards) == 1 and cards[0]["index"] == "0"
+    combined = telemetry.combine_gpus(cards)
+    assert combined["name"] == "RTX Spark N1X" and combined["util_pct"] == 8
+    assert "count" not in combined and "cards" not in combined
+
+
+def test_identified_real_gpus_still_combine_without_exposing_uuids():
+    cards = telemetry.parse_gpus(
+        "GPU-00000000-0000-0000-0000-000000000001, 0, 1000, 96000, 80, 41, 12, 1500, Example GPU\n"
+        "GPU-00000000-0000-0000-0000-000000000002, 1, 2000, 96000, 60, 42, 13, 1600, Example GPU\n"
+        "[N/A], 2, 0, 0, 0, 40, 0, 0, Unknown accelerator\n",
+        with_uuid=True)
+    combined = telemetry.combine_gpus(cards)
+    assert combined["count"] == 2 and combined["util_pct"] == 70
+    assert [card["index"] for card in combined["cards"]] == ["0", "1"]
+    assert "GPU-" not in json.dumps(combined)
+
+
 def test_vm_stat_parses():
     text = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 1000.\nPages active: 5000.\n"
             "Pages inactive: 2000.\nPages speculative: 100.\nPages purgeable: 0.\n")
@@ -90,6 +135,18 @@ def test_a_running_job_is_the_current_one():
             server.order.remove(job["id"])
 
 
+def test_a_card_under_its_floor_does_not_say_the_render_would_be_stopped():
+    """GPU free under 2 GB is the card's own warning. The guard beside ComfyUI still stops on system RAM,
+    so this line must not say the render would be stopped, and a tight card must not fall through to that RAM line."""
+
+    tight = telemetry.low_memory_warning({"card": {"free_mb": 500}, "available_mb": 1000, "floor_mb": 8000}, 2048)
+    assert tight == "GPU memory (0.5 GB) is below the memory guard's floor (2.0 GB)."
+    assert "stopped" not in tight
+    assert telemetry.low_memory_warning({"card": {"free_mb": 40000}, "available_mb": 1000, "floor_mb": 8000}, 2048) is None
+    spark = telemetry.low_memory_warning({"available_mb": 1000, "floor_mb": 8000}, 2048)
+    assert spark == "Available memory (1.0 GB) is below the memory guard's floor (8.0 GB): a render now would be stopped."
+
+
 def test_warnings_in_plain_words(monkeypatch):
     hot = {"name": "NVIDIA GB10", "util_pct": 99.0, "temp_c": 91.0, "power_w": 80.0, "clock_mhz": 2400}
     monkeypatch.setattr(telemetry.shutil, "which", lambda name, *a, **k: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None)
@@ -98,7 +155,8 @@ def test_warnings_in_plain_words(monkeypatch):
     def stand_in(command, *args, **kwargs):
         if command[0] == "nvidia-smi":
             assert kwargs.get("timeout")
-            return subprocess.CompletedProcess(command, 0, "99, 91, 80.0, 2400, NVIDIA GB10\n", "")
+            return subprocess.CompletedProcess(command, 0,
+                                               "GPU-00000000-0000-0000-0000-000000000001, 0, [N/A], [N/A], 99, 91, 80.0, 2400, NVIDIA GB10\n", "")
         return real(command, *args, **kwargs)
 
     monkeypatch.setattr(telemetry.subprocess, "run", stand_in)
@@ -180,6 +238,30 @@ def test_the_gpu_is_asked_less_while_something_renders_and_the_governor_only_whe
 def test_the_disk_reads_as_df_shows_it(tmp_path):
     import subprocess as sp
     mine = telemetry.disk_of(tmp_path)
+    if sys.platform == "win32":
+        import shutil
+        total, used, available = shutil.disk_usage(tmp_path)
+        assert mine["total_gb"] == round(total / 1e9, 1)
+        assert abs(mine["used_pct"] - 100 * used / (used + available)) < 1.0
+        return
     line = sp.run(["df", "-k", str(tmp_path)], capture_output=True, text=True).stdout.splitlines()[-1].split()
     used_k, avail_k = int(line[2]), int(line[3])
     assert abs(mine["used_pct"] - 100 * used_k / (used_k + avail_k)) < 1.0  # df rounds its own Use% up
+
+
+def test_compact_is_one_machines_status_for_the_per_machine_panel():
+    import telemetry
+    snap = {"time": 1.0, "host": "h", "platform": "spark", "gpu": {"name": "GB10", "util_pct": 7, "temp_c": 51, "power_w": 20, "clock_mhz": 2000},
+            "memory": {"total_mb": 1000, "available_mb": 400, "used_pct": 60.0, "floor_mb": 100}, "cpu": {"load1": 0.5, "cores": 4},
+            "disk": {"path": "/x", "total_gb": 10, "free_gb": 4, "used_pct": 60}, "gpu_lock": {"held": True, "holder": "x"},
+            "jobs": {"running": 1, "queued": 2, "current": {"id": "a", "title": "t", "kind": "video", "progress": {"stage": "s", "at": 1, "of": 2}, "estimate": 9, "elapsed": 3.0}},
+            "warnings": ["w1", "w2", "w3", "w4"]}
+    out = telemetry.compact(snap)
+    assert out["gpu"] == {"name": "GB10", "util_pct": 7, "temp_c": 51, "power_w": 20}
+    assert out["memory"] == {"total_mb": 1000, "free_mb": 400, "used_mb": 600, "used_pct": 60.0, "floor_mb": 100, "unified": True}
+    assert out["card"] is None and out["gpu_lock"] is True and out["queued"] == 2 and out["job"]["title"] == "t" and "estimate" not in out["job"]
+    assert out["disk"] == {"total_gb": 10, "free_gb": 4, "used_pct": 60} and len(out["warnings"]) == 3
+    # a Mac: no GPU line, no job; a card with memory of its own is listed apart and the memory is not unified
+    mac = telemetry.compact({**snap, "platform": "mac", "gpu": None, "jobs": {"queued": 0, "current": None},
+                             "memory": {"total_mb": 500, "available_mb": None, "used_pct": None, "card": {"total_mb": 96000, "used_mb": 1000, "free_mb": 95000, "simulated": False}}})
+    assert mac["gpu"] is None and mac["job"] is None and mac["memory"]["used_mb"] is None and mac["memory"]["unified"] is False and mac["card"]["free_mb"] == 95000

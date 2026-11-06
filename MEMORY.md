@@ -1,3 +1,19 @@
+# Current work — 2026-11-06
+
+The user approved completing the shared-backend integration plan and all additional testing needed. The existing ComfyUI is a **shared backend**: Studio may submit supported image jobs through its API but must not change its installation, service, configuration, models or the other application. No restart, unload, queue clear or interrupt of the shared server.
+
+Baseline: clean main at `fc9d9ec`, running healthy container version 3.2.0, upstream base `6bb1a46`. The published service is app-only with SDXL Turbo and Z-Image Turbo still routes, a persistent data volume, localhost plus a specific LAN binding, and `STUDIO_ACCESS_KEY=off`. Preserve these deliberate deployment settings during integration; remote Updates/Brains/Agents retain separate restrictions.
+
+Upstream inspected at `c572890` (4.3.1): 200 commits, 361 changed files, 26 merge-conflicting files. Work is on `integration/upstream-4.3.1` in an isolated worktree. The production checkout/container have not yet been replaced. The machine has RTX 3060 12 GB, about 16 GB RAM and only 18 GB free disk at baseline.
+
+Outstanding: finish merge and regression tests; correct measured-peak memory admission and cancellation/restart bookkeeping for shared prompts; container/UI and backup/rollback checks; deploy only Studio; update release evidence. Live GPU validation requires enough capacity without lowering reserves. The existing SDXL run dipped to 6654 MB host available; Z-Image to 2079 MB and 351 MiB GPU free. Both are below required reserves. No real video worker is configured; its optional live verification remains pending.
+
+[Current plan](docs/BUILD_PLAN.md) supersedes the architecture and next-step statements in the historical record below. Do not use the automatic updater while the integration is unfinished.
+
+---
+
+## Historical record (through October 23)
+
 # Project memory
 
 Last updated: 2026-10-21

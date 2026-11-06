@@ -3,8 +3,10 @@
 Run: python3 -m pytest tests/test_gpu_pin.py
 """
 import os
+import sys
 import subprocess
 from pathlib import Path
+import pytest
 
 import suite_gpu
 
@@ -24,7 +26,8 @@ def pin(tmp_path, rows, **env):
         "studio_pin_gpu\n"
         'printf "gpu=%s cuda=%s\\n" "${STUDIO_GPU-}" "${CUDA_VISIBLE_DEVICES-}"\n'
     )
-    clean = {key: value for key, value in os.environ.items() if key not in ("STUDIO_GPU", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER")}
+    clean = {key: value for key, value in os.environ.items()
+             if key not in ("STUDIO_GPU", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "STUDIO_LOCAL_GPU_UUID")}
     return subprocess.run(["bash", "-c", script], cwd=tmp_path, env={**clean, "PATH": f"{bin_dir}:/usr/bin:/bin", **env},
                           capture_output=True, text=True, timeout=10)
 
@@ -95,6 +98,7 @@ def test_the_suite_reads_the_first_compute_gpu_and_leaves_a_spark_alone():
     assert suite_gpu.choose_suite_gpu([]) is None
 
 
+@pytest.mark.skipif(os.environ.get("STUDIO_TEST_HARDWARE") != "1", reason="real GPU inspection requires STUDIO_TEST_HARDWARE=1")
 def test_this_run_is_pinned_to_the_choice_the_rows_give():
     try:
         done = subprocess.run(
@@ -114,3 +118,79 @@ def test_this_run_is_pinned_to_the_choice_the_rows_give():
     else:
         assert os.environ["STUDIO_GPU"] == expect
         assert os.environ["CUDA_VISIBLE_DEVICES"] == expect
+
+
+def test_the_only_compute_card_at_index_0_beside_a_display_is_pinned(tmp_path):
+    """Left unpinned, nvidia-smi and the memory guard read the display card too (and #168's head choice found none)."""
+
+    done = pin(tmp_path, ["0, 97887, Disabled", "1, 16311, Enabled"])
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "gpu=0 cuda=0"
+
+
+def test_every_installer_entry_pins_before_it_reads_the_card():
+    """oneshot-setup.sh and oneshot-setup-spark.sh reached the CUDA installer unpinned: beside a display card at
+    index 0 it read the display card's name and memory and refused video."""
+
+    cuda = (ROOT / "oneshot-setup-cuda.sh").read_text()
+    pinned = cuda.index("studio_pin_gpu || exit 1")
+    assert pinned < cuda.index("nvidia-smi --query-gpu=name") and pinned < cuda.index("nvidia-smi --query-gpu=memory.total")
+    assert cuda.index('. "$HERE/spark/gpu.sh"') < pinned < cuda.index('[ -z "${STUDIO_GPU:-}" ] || export PATH="$HERE/spark/smi-pin:$PATH"')
+    entry = (ROOT / "oneshot-setup.sh").read_text()
+    assert entry.index("studio_pin_gpu || exit 1") < entry.index('GPU_NAME="$(nvidia-smi -i "$STUDIO_GPU"')
+
+
+def test_the_memory_guard_reads_the_compute_card_when_nothing_pinned_it(tmp_path, monkeypatch):
+    import sys
+    sys.path.insert(0, str(ROOT / "spark"))
+    import memory_guard
+
+    stub = tmp_path / "nvidia-smi"
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    monkeypatch.delenv("STUDIO_GPU", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def argv(rows):
+        stub.write_text("#!/bin/bash\nprintf '%s\\n' " + " ".join("'" + row + "'" for row in rows) + "\n")
+        stub.chmod(0o755)
+        memory_guard._CHOSEN.clear()
+        return memory_guard.nvidia_argv()
+
+    try:
+        assert argv(["0, 16311, Enabled", "1, 97887, Disabled"]) == ["nvidia-smi", "-i", "1"]
+        assert argv(["0, 97887, Disabled", "1, 16311, Enabled"]) == ["nvidia-smi", "-i", "0"]
+        assert argv(["0, [N/A], Disabled"]) == ["nvidia-smi"]  # a DGX Spark
+        assert argv(["0, 97887, Disabled", "1, 97887, Disabled"]) == ["nvidia-smi"]  # two compute cards: STUDIO_GPU's to say
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+        assert argv(["0, 97887, Disabled", "1, 97887, Disabled"]) == ["nvidia-smi", "-i", "1"]
+        monkeypatch.setenv("STUDIO_GPU", "0")
+        assert argv(["0, 97887, Disabled", "1, 97887, Disabled"]) == ["nvidia-smi", "-i", "0"]
+    finally:
+        memory_guard._CHOSEN.clear()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="managed local GPU scripts run only on Linux")
+def test_managed_worker_preserves_uuid_cuda_pin(tmp_path):
+    ident = "GPU-00000000-0000-0000-0000-000000000002"
+    done = pin(tmp_path, ["1"], STUDIO_GPU="1", STUDIO_LOCAL_GPU_UUID=ident)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == f"gpu=1 cuda={ident}"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="managed local GPU scripts run only on Linux")
+def test_managed_worker_refuses_stale_numeric_memory_guard(tmp_path):
+    ident = "GPU-00000000-0000-0000-0000-000000000002"
+    done = pin(tmp_path, ["2"], STUDIO_GPU="1", STUDIO_LOCAL_GPU_UUID=ident)
+    assert done.returncode == 1
+    assert "index changed" in done.stderr and "gpu=" not in done.stdout
+
+
+def test_bare_cuda_ordinal_is_not_mapped_without_pci_order(tmp_path):
+    done = pin(tmp_path, ["0, 24000, Disabled", "1, 24000, Disabled"], CUDA_VISIBLE_DEVICES="1")
+    assert done.returncode == 1 and "Set STUDIO_GPU" in done.stderr
+
+
+def test_cuda_ordinal_with_pci_order_is_a_guard_index(tmp_path):
+    done = pin(tmp_path, [], CUDA_VISIBLE_DEVICES="1", CUDA_DEVICE_ORDER="PCI_BUS_ID")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "gpu=1 cuda=1"

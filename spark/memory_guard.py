@@ -74,18 +74,19 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import mmap
 import os
 import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 FPS, STEP, BASE, SHORTEST, LONGEST = 24, 17, 5, 22, 362
 # The sizes the app offers, smallest first: what "a smaller size" means when a clip does not fit.
 SIZES = ((864, 480), (1280, 736), (1344, 768), (1376, 768))
 # What an idle Spark keeps for itself (measured: 124.5 GB in all, 118.7 GB available with nothing running).
 IDLE_MB = 6000
-PORT = os.environ.get("SPARK_COMFY_PORT", "8190")
 # route -> (MB with the models loaded and no rows, MB per thousand rows). See the table above.
 ESTIMATES = {"int8": (54_500, 215), "int8-lora": (54_500, 215), "bf16": (75_000, 47)}
 ERROR_MB = 6000
@@ -108,6 +109,8 @@ POLL_S, RATE_WINDOW_S, STALL_WINDOW_S, STALL_SHARE = 0.05, 0.25, 2.0, 0.5
 def meminfo(text: str | None = None) -> dict:
     """/proc/meminfo in MB ({} where there is none: a Mac, which this guard does not cover)."""
 
+    if text is None and sys.platform == "win32" and os.environ.get("STUDIO_WINDOWS_CUDA") == "1":
+        return windows_meminfo()  # the native CUDA tier only (app/windows_cuda.py); the preview tier keeps {}
     if text is None:
         try:
             with open("/proc/meminfo") as handle:
@@ -120,6 +123,77 @@ def meminfo(text: str | None = None) -> dict:
         if rest.strip():
             out[name] = int(rest.split()[0]) // 1024
     return out
+
+
+def windows_meminfo() -> dict:
+    """Native Windows (the CUDA tier): the physical memory Windows has and what is available (GlobalMemoryStatusEx),
+    in MB under /proc/meminfo's names, so the checks run there too. On an RTX Spark N1X the GPU's carve-out is the pool
+    (``card_pool``), not this RAM. {} when Windows does not answer."""
+
+    import ctypes
+
+    class Status(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
+                    *[(name, ctypes.c_ulonglong) for name in
+                      ("total", "available", "page_total", "page_available", "virtual_total", "virtual_available", "extended")]]
+
+    status = Status()
+    status.length = ctypes.sizeof(status)
+    try:
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return {}
+    except (AttributeError, OSError):
+        return {}
+    mb = 1 << 20
+    return {"MemTotal": status.total // mb, "MemAvailable": status.available // mb, "MemFree": status.available // mb}
+
+
+# What the kernel's own counters leave unexplained on an idle Spark (MemTotal less free, cache, process and kernel
+# memory): 3.5 to 4 GB on the workers (2026-10-23, driver 580.173.02). Far more than that with no CUDA process running
+# is memory the NVIDIA driver kept after a process ended: drivers from 590 on keep it in their system memory pools
+# (issue #59), where MemAvailable does not count it.
+UNEXPLAINED_IDLE_MB = 16_000
+EXPLAINED = ("MemFree", "Buffers", "Cached", "SwapCached", "AnonPages", "Slab", "KernelStack", "PageTables",
+             "SecPageTables", "VmallocUsed")
+
+
+def unexplained_mb(info: dict | None = None) -> int:
+    """The machine's memory that /proc/meminfo puts nowhere: the GPU driver's, on a Spark (0 without meminfo)."""
+
+    info = meminfo() if info is None else info
+    if not info.get("MemTotal"):
+        return 0
+    return max(0, info["MemTotal"] - sum(info.get(name, 0) for name in EXPLAINED))
+
+
+def driver_pools() -> int | None:
+    """The driver's EnableSystemMemoryPools setting (0 is off), None where it does not say (R580 has no such line)."""
+
+    try:
+        with open("/proc/driver/nvidia/params") as handle:
+            for line in handle:
+                name, _, value = line.partition(":")
+                if name.strip() == "EnableSystemMemoryPools":
+                    return int(value.strip())
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def held_note(info: dict | None = None) -> str:
+    """A sentence for a refusal when the GPU driver, not a program, seems to hold the missing memory: much of it
+    unexplained by the kernel's counters while no CUDA process runs. "" otherwise, and where nvidia-smi does not
+    answer (it cannot then be told apart from a program's GPU memory)."""
+
+    held = unexplained_mb(info)
+    if held < UNEXPLAINED_IDLE_MB or not smi("--query-gpu=name") or processes_mb():
+        return ""
+    pools = driver_pools()
+    said = (f" About {held / 1000:.0f} GB is held outside every program with no GPU program running: the NVIDIA driver "
+            "keeps memory a finished process freed")
+    said += " (its system memory pools are on)" if pools else ""
+    return said + (". Turning those pools off (NVreg_EnableSystemMemoryPools=0), or the R580 driver, gives it "
+                   "back: README, \"The memory guard (DGX Spark)\".")
 
 
 def floor_mb(total_mb: int | None = None) -> int:
@@ -164,7 +238,8 @@ def state_file() -> str:
 def server_pid() -> int | None:
     """The ComfyUI server of spark/comfy.sh on this machine, if one runs (by its command line, as comfy.sh finds it)."""
 
-    wanted = b"\x00".join([b"main.py", b"--listen", b"127.0.0.1", b"--port", PORT.encode(), b""])
+    port = os.environ.get("SPARK_COMFY_PORT", "8190").strip() or "8190"  # read now: a test or a second studio sets it after import
+    wanted = b"\x00".join([b"main.py", b"--listen", b"127.0.0.1", b"--port", port.encode(), b""])
     try:
         entries = os.listdir("/proc")
     except OSError:
@@ -180,10 +255,35 @@ def server_pid() -> int | None:
     return None
 
 
+def family(pid: int) -> set[int]:
+    """``pid`` and every process under it (the ComfyUI server's own: the second card's rank, spark/tensorfold_h3/tp.py)."""
+
+    children: dict[int, list[int]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return {pid}
+    for name in entries:
+        if name.isdigit():
+            try:
+                with open(f"/proc/{name}/stat", "rb") as handle:
+                    parent = int(handle.read().rsplit(b")", 1)[1].split()[1])
+                children.setdefault(parent, []).append(int(name))
+            except (OSError, ValueError, IndexError):
+                pass
+    found, todo = set(), [pid]
+    while todo:
+        one = todo.pop()
+        if one not in found:
+            found.add(one)
+            todo.extend(children.get(one, []))
+    return found
+
+
 # ---------- a discrete GPU: an NVIDIA card with memory of its own (an RTX Pro 6000 Blackwell, 96 GB) ----------
 # A DGX Spark's GB10 has one memory for the CPU and the GPU (nvidia-smi says [N/A] for the GPU's), and everything above
 # reads it as /proc/meminfo. A card with its own memory is full long before the machine's RAM is: there a job's room is
-# the smaller of the two. The estimates stay the Spark's, measured as the fall of the whole machine's memory: a card
+# the card's own (device_room_mb, the 2 GB margin already taken out), held to the RAM as well (card_pool). The estimates stay the Spark's, measured as the fall of the whole machine's memory: a card
 # holds a part of that (the rest is the processes' own RAM), so they are an upper bound there.
 # STUDIO_VRAM_GB pretends to be such a card on a Spark (the RTX Pro 6000 simulation, docs/rtx-pro-6000.md): its total
 # is that, its used memory what the CUDA processes hold (nvidia-smi's compute apps).
@@ -191,14 +291,59 @@ VRAM_MARGIN_MB = 2048  # kept free on the card: CUDA's own context and fragmenta
 _DEVICE: dict = {"at": 0.0, "value": None}
 
 
+_CHOSEN: dict = {}
+
+
+def chosen_gpu() -> str:
+    """The nvidia-smi index of the studio's card when ``STUDIO_GPU`` is unset, as ``spark/gpu.sh`` picks it: a single
+    ``CUDA_VISIBLE_DEVICES`` index, else the only GPU not driving a display when another one is listed (a server
+    started without scripts/app.sh beside a display card). "" for one GPU (a DGX Spark), for two compute cards (the
+    app asks for STUDIO_GPU there) and where nvidia-smi does not answer. Asked once."""
+
+    if "index" not in _CHOSEN:
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+        pick = visible if visible.isdigit() else ""
+        if not pick:
+            try:
+                said = subprocess.run(["nvidia-smi", "--query-gpu=index,memory.total,display_active", "--format=csv,noheader,nounits"],
+                                      capture_output=True, text=True, timeout=5)
+                rows = [[part.strip() for part in line.split(",")] for line in said.stdout.splitlines() if line.strip()] if said.returncode == 0 else []
+            except (OSError, subprocess.SubprocessError):
+                rows = []
+            compute = [row[0] for row in rows if len(row) >= 3 and row[0].isdigit() and row[1].isdigit() and row[2].lower() != "enabled"]
+            pick = compute[0] if len(rows) > 1 and len(compute) == 1 else ""
+        _CHOSEN["index"] = pick
+    return _CHOSEN["index"]
+
+
 def nvidia_argv() -> list[str]:
     """`nvidia-smi` for the studio's card. `STUDIO_GPU` is an nvidia-smi index (`spark/gpu.sh`).
 
-    Unset, the first GPU, which is the only GPU on a DGX Spark. nvidia-smi ignores `CUDA_VISIBLE_DEVICES`, so the
-    index is passed with `-i`."""
+    Unset, the card ``chosen_gpu`` names, else the first GPU, which is the only GPU on a DGX Spark. nvidia-smi ignores
+    `CUDA_VISIBLE_DEVICES`, so the index is passed with `-i`."""
 
+    paired = paired_gpus()
+    if paired:
+        # paired cards (spark/gpus.py): every card this Studio renders on, the head's first
+        return ["nvidia-smi", "-i", ",".join(paired)]
     raw = os.environ.get("STUDIO_GPU", "").strip()
+    raw = raw if raw.isdigit() else chosen_gpu()
     return ["nvidia-smi", "-i", raw] if raw.isdigit() else ["nvidia-smi"]
+
+
+def paired_gpus() -> list[str]:
+    """``STUDIO_GPUS`` (spark/gpu.sh): two or more nvidia-smi indexes one Studio renders on together, the head's card
+    (``STUDIO_GPU``) first. [] when unset or invalid, when STUDIO_GPU_SPLIT is off, and in a managed local worker (a
+    UUID pin: one card a worker)."""
+
+    raw = os.environ.get("STUDIO_GPUS", "").strip()
+    if not raw or os.environ.get("STUDIO_LOCAL_GPU_UUID") or not _split_allowed():
+        return []
+    parts = [part.strip() for part in raw.split(",")]
+    if len(parts) < 2 or not all(part.isdigit() for part in parts) or len(set(parts)) != len(parts):
+        return []
+    head = os.environ.get("STUDIO_GPU", "").strip()
+    return parts if not head or head == parts[0] else []
 
 
 def smi(*query: str) -> list[list[str]]:
@@ -235,16 +380,145 @@ def device(fresh: bool = False) -> dict | None:
         except ValueError:
             value = None
     else:
-        rows_ = smi("--query-gpu=memory.total,memory.used,memory.free")
-        if rows_ and all(part.isdigit() for part in rows_[0][:3]):
+        rows_ = [row for row in smi("--query-gpu=memory.total,memory.used,memory.free")
+                 if len(row) >= 3 and all(part.isdigit() for part in row[:3])]
+        if len(rows_) >= 2 and paired_gpus():
+            # paired cards (STUDIO_GPUS, spark/gpus.py), the head's first. With an engine that splits a pass over them
+            # (tp_engine) each card holds its share, so the smallest card's free memory times the cards is the job's
+            # room; without one the whole pass runs on the head's card and only that card counts. ``head_free_mb`` is
+            # the head's card alone, for an engine that runs on one card (Drama 3, Bolt, Music 3).
+            cards = [tuple(int(part) for part in row[:3]) for row in rows_]
+            shared = tp_engine()
+            value = {"total_mb": len(cards) * min(c[0] for c in cards) if shared else cards[0][0],
+                     "used_mb": sum(c[1] for c in cards) if shared else cards[0][1],
+                     "free_mb": len(cards) * min(c[2] for c in cards) if shared else cards[0][2],
+                     "simulated": False, "cards": len(cards), "split_pass": shared,
+                     "head_free_mb": cards[0][2], "card_total_mb": min(c[0] for c in cards)}
+        elif rows_:
             total, used, free = (int(part) for part in rows_[0][:3])
             value = {"total_mb": total, "used_mb": used, "free_mb": free, "simulated": False}
     _DEVICE.update(at=time.monotonic(), value=value)
     return value
 
 
+def _split_allowed() -> bool:
+    """Whether paired cards are split (spark/gpus.py: STUDIO_GPU_SPLIT, on unless off; only with STUDIO_GPUS)."""
+
+    return os.environ.get("STUDIO_GPU_SPLIT", "auto").strip().lower() not in ("0", "off", "no", "false")
+
+
+def single_card_free_mb() -> int | None:
+    """What the head's card has free: what an engine that runs on one card (Drama 3, Bolt) can use. With paired cards
+    that is the first of them (CUDA's device 0), never their sum."""
+
+    card = device()
+    if card is None:
+        return None
+    return card.get("head_free_mb", card["free_mb"])
+
+
+_TP: dict = {}
+
+
+def tf_h3_lib() -> Path:
+    """The TensorFold engine library comfy.sh loads (TF_H3_LIB, else PREFIX/tf-h3/libtf_h3.so)."""
+
+    return Path(os.environ.get("TF_H3_LIB") or Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-studio")) / "tf-h3/libtf_h3.so")
+
+
+def tp_engine() -> bool:
+    """Whether the installed TensorFold engine (libtf_h3.so) can split one pass over two cards (it exports
+    tf_h3_tp_init). The pinned engine does not: paired cards then place only the text encoders and decoders on the
+    second card, and the pass and its memory stay on the head's. Read once per library file and size."""
+
+    lib = tf_h3_lib()
+    try:
+        key = (str(lib), lib.stat().st_size, lib.stat().st_mtime_ns)
+    except OSError:
+        return False
+    if key not in _TP:
+        try:
+            with open(lib, "rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                found = data.find(b"tf_h3_tp_init\0") >= 0
+        except (OSError, ValueError):
+            return False
+        _TP.clear()
+        _TP[key] = found
+    return _TP[key]
+
+
 def discrete() -> bool:
     return device() is not None
+
+
+def recent_device(within_s: float = 2.0) -> tuple[bool, dict | None]:
+    """(whether ``device`` read the card less than ``within_s`` seconds ago, that reading). A caller that only needs
+    to know whether there is a card reuses a fresh reading instead of asking nvidia-smi again."""
+
+    return time.monotonic() - _DEVICE["at"] < within_s, _DEVICE["value"]
+
+
+def room_budget_mb() -> int | None:
+    """STUDIO_ROOM_MB (MB) when it is set to a whole number above 0, else None (room_mb says what it is for)."""
+
+    asked = os.environ.get("STUDIO_ROOM_MB", "").strip()
+    return int(asked) if asked.isdigit() and int(asked) > 0 else None
+
+
+def card_room_applies() -> bool:
+    """Whether a job's room is the card's own (``device_room_mb``, the 2 GB margin as its floor): a discrete card with
+    no STUDIO_ROOM_MB. With STUDIO_ROOM_MB the budget is the machine's RAM and the checks keep the Spark's arithmetic,
+    as they did before the card had its own pool. False on a Spark."""
+
+    return device_room_mb() is not None and room_budget_mb() is None
+
+
+_N1X: dict = {}
+
+
+def n1x() -> bool:
+    """An NVIDIA RTX Spark N1X (Windows on Arm; the Studio's Linux runs in WSL2): STUDIO_N1X=1, or a GPU whose name says
+    RTX Spark / N1X (STUDIO_N1X=0 says no). Its firmware gives the GPU a fixed share of the machine's memory (96 of
+    128 GB on an HP OmniBook X) and leaves WSL the rest (about 30 GB), and under WSL nvidia-smi names no process's
+    memory. So the card is the pool, the Studio's own models on it count as the job's, and WSL's small RAM is not a
+    limit on what the GPU holds."""
+
+    said = os.environ.get("STUDIO_N1X", "").strip()
+    if said in ("0", "1"):
+        return said == "1"
+    if "name" not in _N1X:
+        rows_ = smi("--query-gpu=name")
+        _N1X["name"] = (rows_[0][0] if rows_ and rows_[0] else "").upper()
+    return "N1X" in _N1X["name"] or "RTX SPARK" in _N1X["name"]
+
+
+def guard_mode() -> str:
+    """STUDIO_MEMORY_GUARD: "strict" refuses a job the estimate says does not fit (a DGX Spark's default: there a job
+    that runs out of memory can take the whole machine down); "warn" flags it and lets it run, and a job that really
+    runs out of memory then fails with ComfyUI's error (an N1X's default: its GPU memory is a fixed carve-out, so a
+    job that overruns it fails on its own without starving the machine)."""
+
+    said = os.environ.get("STUDIO_MEMORY_GUARD", "").strip().lower()
+    if said in ("strict", "warn"):
+        return said
+    return "warn" if n1x() else "strict"
+
+
+def _relaxable(check_fn):
+    """A memory check whose refusal, under STUDIO_MEMORY_GUARD=warn, is a warning instead: ``fits`` True, the reason
+    kept in ``warning`` (and ``refused``), so the job is tried and fails only if the memory really runs out."""
+
+    import functools
+
+    @functools.wraps(check_fn)
+    def checked(*args, **kwargs):
+        out = check_fn(*args, **kwargs)
+        if isinstance(out, dict) and out.get("fits") is False and out.get("reason") and guard_mode() == "warn":
+            out = dict(out, fits=True, refused=out["reason"],
+                       warning=out["reason"].replace(", so it is refused", "").rstrip(".") +
+                       ". It is tried anyway (STUDIO_MEMORY_GUARD=warn) and fails if the memory runs out.")
+        return out
+    return checked
 
 
 def device_room_mb() -> int | None:
@@ -255,8 +529,33 @@ def device_room_mb() -> int | None:
     if card is None:
         return None
     pid = server_pid()
-    held = processes_mb().get(pid, 0) if pid else 0
+    used = processes_mb()
+    if n1x() and not used and not card.get("simulated"):
+        # WSL's nvidia-smi names no process's memory, so what the Studio's own ComfyUI, Bolt or Music hold cannot be
+        # counted back: the card is the Studio's alone, all of it the job's (a chained part 2 no longer refuses
+        # because part 1's models are still loaded)
+        return max(0, card["total_mb"] - VRAM_MARGIN_MB)
+    # what the server holds, its own processes too (the second card's rank of a two-GPU pass): all of it is the job's
+    held = sum(used.get(one, 0) for one in family(pid)) if pid else 0
     return max(0, card["free_mb"] + held - VRAM_MARGIN_MB)
+
+
+def card_room_for_job(raw_befores: list | None = None) -> int | None:
+    """The card's room for a job that unloads Drama 3, Music, or Bolt first (MB, the 2 GB margin already out).
+
+    ``device_room_mb`` adds back only the ComfyUI server. Each engine's ``room_mb`` is the card's raw free memory
+    just before that engine loaded, which the job gets back. The room is the larger of those, and the margin is
+    taken out once. None on a Spark (``device_room_mb`` is None). The checks hold it to the RAM (``card_pool``). A
+    caller that already holds an after-margin room (Bolt beside the job) does not use this."""
+
+    base = device_room_mb()
+    if base is None:
+        return None
+    raw = base + VRAM_MARGIN_MB
+    for one in raw_befores or ():
+        if one:
+            raw = max(raw, int(one))
+    return max(0, raw - VRAM_MARGIN_MB)
 
 
 def room_mb() -> int | None:
@@ -265,8 +564,30 @@ def room_mb() -> int | None:
     wrote that down). A server from before the guard has no such note: the machine is then taken as otherwise
     idle. None where there is no /proc/meminfo.
 
-    On a discrete card the smaller of that and the card's room. The checks keep ``floor_mb`` of the machine's RAM
-    free; on the card only VRAM_MARGIN_MB, so the card's room is given here with the floor added back."""
+    On a discrete card, that card's room (``device_room_mb``, the 2 GB margin already taken out). The checks still
+    hold it to the machine's RAM (``card_pool``): the models are read through RAM and ComfyUI's guard kills on it.
+    The Spark branch, ``device_room_mb`` None, returns the RAM figure above and is not mixed.
+
+    STUDIO_ROOM_MB (MB) stands in for the card's room on a discrete card, for a card smaller than the video models
+    when ComfyUI offloads them to RAM and streams blocks to the card (docs/rtx-5090.md). It is a budget of the
+    machine's RAM, so it never gives more than the RAM room above; unset, empty or not a number, it is ignored.
+    A Spark has no card to stand in for."""
+
+    ram = ram_room_mb()
+    if ram is None:
+        return None
+    card = device_room_mb()
+    if card is None:
+        return ram
+    asked = room_budget_mb()
+    if asked:
+        return min(ram, asked)
+    return card
+
+
+def ram_room_mb() -> int | None:
+    """The machine's RAM for a render (``room_mb`` on a Spark): MemAvailable now, or, while the ComfyUI server runs,
+    what was available when it started. None where there is no /proc/meminfo."""
 
     info = meminfo()
     now = info.get("MemAvailable")
@@ -283,8 +604,7 @@ def room_mb() -> int | None:
     except (OSError, ValueError):
         if server_pid():
             ram = max(now, info["MemTotal"] - IDLE_MB)
-    card = device_room_mb()
-    return ram if card is None else min(ram, card + floor_mb(info.get("MemTotal")))
+    return ram
 
 
 # ---------- layer 1: the estimate ----------
@@ -332,9 +652,52 @@ def says(frames: int) -> str:
     return f"{frames} frames ({frames / FPS:.1f} s)"
 
 
+def card_pool(card_mb: int, total_mb: int | None = None) -> tuple[int, int, bool]:
+    """(available MB, floor MB, whether the sentence names the GPU) for a job on a discrete card whose room is
+    ``card_mb`` (after the 2 GB margin), held to the machine's RAM as ``min(ram, card + floor)`` held it.
+
+    The card's side compares its room plus the margin against the margin as the floor; the RAM side compares
+    ``ram_room_mb`` against ``floor_mb``. Whichever runs out first is the pool, and the sentence names that one:
+    the GPU, or the machine. A job fits exactly where it fitted under ``min(ram, card + floor)``."""
+
+    if n1x():
+        # the weights live in the GPU's carve-out, not in WSL's small leftover RAM: the card is the pool
+        return card_mb + VRAM_MARGIN_MB, VRAM_MARGIN_MB, True
+    ram = ram_room_mb()
+    if total_mb is None:
+        total_mb = meminfo().get("MemTotal", 0)
+    if ram is not None and total_mb:
+        floor = floor_mb(total_mb)
+        if ram - floor < card_mb:
+            return ram, floor, False
+    return card_mb + VRAM_MARGIN_MB, VRAM_MARGIN_MB, True
+
+
+def _pool(available_mb: int | None, total_mb: int, card: bool = False) -> tuple[int, int, bool]:
+    """(available MB, floor MB, whether the sentence names the GPU).
+
+    A caller that omits ``available_mb`` on a discrete card gets the card's free memory, with what the studio's
+    ComfyUI server holds counted back, and the 2 GB margin as the floor (``card_pool``, held to the RAM).
+
+    ``card`` is for a caller that already passed that after-margin room (a job beside Bolt, or one that unloads an
+    engine first). A passed ``available_mb`` without it keeps the Spark arithmetic, so a test that names a Spark's
+    pool stays on it even when this machine has a card. With STUDIO_ROOM_MB the Spark arithmetic is kept too: the
+    budget is the machine's RAM (``room_mb``).
+    """
+
+    if card_room_applies() and available_mb is None:
+        return card_pool(device_room_mb(), total_mb)
+    if card and available_mb is not None:
+        return card_pool(available_mb, total_mb)
+    if available_mb is None:
+        available_mb = room_mb() or total_mb - IDLE_MB
+    return available_mb, floor_mb(total_mb), False
+
+
+@_relaxable
 def check(width: int, height: int, frames: int, lora: bool = False, references: bool = False, base: bool = False,
           engine: bool = True, pictures: int = 0, reference_frames: int = 0, available_mb: int | None = None,
-          total_mb: int | None = None) -> dict:
+          total_mb: int | None = None, card: bool = False, adapter: bool = False) -> dict:
     """Whether this clip fits this machine. ``available_mb`` is what the machine has with none of the Studio's own
     models loaded (default: all of it less what an idle Spark keeps). Returns {"fits", "reason", "need_mb",
     "error_mb", "left_mb", "floor_mb", "available_mb", "route", "rows", "nearest"}; on a machine without
@@ -344,9 +707,8 @@ def check(width: int, height: int, frames: int, lora: bool = False, references: 
         total_mb = meminfo().get("MemTotal", 0)
     if not total_mb:
         return {"fits": True, "reason": "", "route": None}
-    if available_mb is None:
-        available_mb = room_mb() or total_mb - IDLE_MB
-    floor = floor_mb(total_mb)
+    measured_here = available_mb is None and not card
+    available_mb, floor, on_card = _pool(available_mb, total_mb, card)
     route = route_of(lora, references, base, engine)
     patched = lora and route in MEASURED_PIXELS  # a LoRA or the Turbo adapter merged into the weights as they load
 
@@ -368,7 +730,9 @@ def check(width: int, height: int, frames: int, lora: bool = False, references: 
     smaller = next(((w, h) for w, h in reversed(SIZES) if w * h < width * height and one(w, h, frames)[0]), None)
     out["nearest"] = {"frames": shorter, "seconds": round(shorter / FPS, 3) if shorter else None,
                       "size": list(smaller) if smaller else None}
-    what = ("a clip with a LoRA" if lora else "a clip from references" if references else "this clip")
+    # `adapter`: the reference clip's own Turbo 4-pass speed-up, which the guard counts as a LoRA but the person never picked
+    what = ("a clip from references with the Turbo 4-pass speed-up" if adapter and references else
+            "a clip with a LoRA" if lora else "a clip from references" if references else "this clip")
     how = {"bf16": "ComfyUI's own blocks with the full-precision (bfloat16) weights", "int8": "TensorFold's int8 engine",
            "int8-lora": "TensorFold's int8 engine with the LoRA merged into it"}[route]
     if why == "unmeasured":
@@ -379,13 +743,18 @@ def check(width: int, height: int, frames: int, lora: bool = False, references: 
                 "is not known, and a clip with a LoRA on the bfloat16 weights (1376x768, 124 frames) took a Spark down, "
                 "so it is refused")
     else:
+        who = "GPU" if on_card else "machine"
         said = (f"{what} renders on {how} and needs about {need / 1000:.0f} GB at its peak (give or take {ERROR_MB / 1000:g}); this "
-                f"machine has {available_mb / 1000:.0f} GB for it and keeps {floor / 1000:.0f} GB free as its floor, so it is refused")
+                f"{who} has {available_mb / 1000:.0f} GB for it and keeps {floor / 1000:.0f} GB free as its floor, so it is refused")
     fit = [f"{says(shorter)} at this size" if shorter else "", f"{smaller[0]}x{smaller[1]} at this length" if smaller else ""]
     fit = " or ".join(bit for bit in fit if bit)
     out["reason"] = said + (f". What fits: {fit}." if fit else ". No smaller size or shorter length of this kind fits either.")
     if lora and why == "memory" and route == "bf16":
         out["reason"] += " Without the LoRA the clip runs on the int8 engine, which needs less."
+    if adapter and references and why == "unmeasured":
+        out["reason"] += " To keep this size, choose 20 passes (the model as released) instead of Turbo: that setting is not held to this limit."
+    if why == "memory" and measured_here and not on_card:
+        out["reason"] += held_note()
     return out
 
 
@@ -399,7 +768,8 @@ MUSIC_ESTIMATE = (27_800, 11)
 MUSIC_MEASURED = ((30, 30.0, 28_070), (60, 60.0, 28_665), (120, 55.6, 28_617), (120, 120.0, 29_078),
                   (300, 189.8, 28_996), (60, 60.0, 29_299))  # the last: through the app, from an empty page cache
 MUSIC_LONGEST = 300  # the app's longest song
-# MiniMax Music 3 on TensorFold's CUDA engine (music3-generate, branch music3-cuda 6b714531), int8 and bf16 weights:
+# MiniMax Music 3 on TensorFold's CUDA engine (music3-generate, branch music3-cuda 6b714531), int8 and bf16 weights
+# (the TensorFold 1.1.5 build, music3-cuda-115 5505dbfa, peaked at the same 16.46 GB for a 30 s int8 song):
 # (MB, MB per second of song asked for), the same way, measured 2026-10-16 on worker .2 (5.1 GB in use before each
 # song, one process a song, MemTotal - MemAvailable twice a second, less those 5.1 GB; hiphop seed 7, and a 120 s
 # song of longer lyrics). The weights are on the GPU throughout; the length adds the AR cache and the DiT's windows.
@@ -408,30 +778,53 @@ MUSIC_CUDA_ESTIMATE = {"music-cuda-int8": (15_900, 30), "music-cuda-bf16": (23_2
 MUSIC_CUDA_MEASURED = {"music-cuda-int8": ((30, 30.0, 16_632), (60, 60.0, 17_928), (120, 63.3, 18_885), (120, 120.0, 19_291),
                                            (60, 55.2, 18_656)),  # the last: through the app (Studio 2.9.1), Whisper after it
                        "music-cuda-bf16": ((30, 30.0, 24_012), (60, 60.0, 25_485), (120, 61.3, 25_683), (120, 120.0, 26_647))}
+# YuE2 (app/music_yue2.py, spark/yue2_server.py: YuE2-3B and YuE2-Vae in YuE2's own environment, PyTorch 2.14.1), bf16
+# and with the int8 weight-only token loop: (MB, MB per second of song asked for). Measured 2026-10-27 on a GB10 Spark:
+# the server's own peak through each song, its GPU memory (nvidia-smi, per process) and its resident memory, sampled
+# twice a second; the machine's MemTotal - MemAvailable above idle rose by the same give or take 0.5 GB. The weights and
+# the decoder stay on the GPU throughout (7.5 GB bf16, 9.3 GB with the int8 copies); the length adds the KV cache and
+# the flow matching's frames. A load peaks at 15.1 GB (the file read once into memory beside its copy on the GPU).
+# Songs over 120 s are not measured: the line goes on at the same slope.
+MUSIC_YUE2_ESTIMATE = {"music-yue2-bf16": (14_100, 45), "music-yue2-int8": (15_600, 30),
+                       # the tokens on TensorFold's decode engine (its own int8 copy, 2.6 GB, beside the bf16 model)
+                       "music-yue2-blocks": (18_200, 30)}
+# (seconds asked, seconds made, MB): English pop lyrics seed 21 at 30, 60, 120 s; the int8 65 and 70 s rows are the two
+# A/B instrumentals at seed 42 and 43
+MUSIC_YUE2_MEASURED: dict = {"music-yue2-bf16": ((30, 30.0, 12_193), (60, 60.0, 15_809), (120, 120.0, 19_438)),
+                             "music-yue2-int8": ((30, 30.0, 13_495), (60, 60.0, 17_031), (120, 120.0, 19_149),
+                                                 (65, 65.0, 16_752), (70, 70.0, 17_079)),
+                             "music-yue2-blocks": ((30, 30.0, 17_048), (60, 60.0, 19_930), (120, 120.0, 21_035))}
 
 
-def music_check(seconds: float, available_mb: int | None = None, total_mb: int | None = None, route: str = "music") -> dict:
+@_relaxable
+def music_check(seconds: float, available_mb: int | None = None, total_mb: int | None = None, route: str = "music",
+                card: bool = False) -> dict:
     """Whether a MiniMax Music 3 song of up to ``seconds`` fits this machine, as ``check`` answers for a clip:
-    ``route`` "music" (ComfyUI's nodes) or "music-cuda-int8" / "music-cuda-bf16" (TensorFold's CUDA engine);
-    everything fits where there is no /proc/meminfo."""
+    ``route`` "music" (ComfyUI's nodes), "music-cuda-int8" / "music-cuda-bf16" (TensorFold's CUDA engine) or
+    "music-yue2-bf16" / "music-yue2-int8" (YuE2); everything fits where there is no /proc/meminfo."""
 
     if total_mb is None:
         total_mb = meminfo().get("MemTotal", 0)
     if not total_mb:
         return {"fits": True, "reason": "", "route": None}
-    if available_mb is None:
-        available_mb = room_mb() or total_mb - IDLE_MB
-    floor = floor_mb(total_mb)
-    fixed, per_second = MUSIC_CUDA_ESTIMATE.get(route) or MUSIC_ESTIMATE
-    route = route if route in MUSIC_CUDA_ESTIMATE else "music"
+    measured_here = available_mb is None and not card
+    available_mb, floor, on_card = _pool(available_mb, total_mb, card)
+    fixed, per_second = MUSIC_CUDA_ESTIMATE.get(route) or MUSIC_YUE2_ESTIMATE.get(route) or MUSIC_ESTIMATE
+    route = route if route in MUSIC_CUDA_ESTIMATE or route in MUSIC_YUE2_ESTIMATE else "music"
     need = int(fixed + per_second * float(seconds))
     left = available_mb - need - ERROR_MB
     out = {"fits": left >= floor, "reason": "", "need_mb": need, "error_mb": ERROR_MB, "left_mb": left, "floor_mb": floor,
            "available_mb": available_mb, "route": route, "rows": None, "nearest": None}
     if not out["fits"]:
-        out["reason"] = (f"a song of up to {seconds:g} s needs about {need / 1000:.0f} GB at its peak (give or take "
-                         f"{ERROR_MB / 1000:g}); this machine has {available_mb / 1000:.0f} GB for it and keeps "
-                         f"{floor / 1000:.0f} GB free as its floor, so it is refused. Something outside the studio holds the rest")
+        named = card_name() if on_card else ""
+        who = (f"GPU ({named})" if named else "GPU") if on_card else "machine"
+        out["reason"] = (f"a song of up to {seconds:g} s needs about {need / 1000:.1f} GB at its peak (give or take "
+                         f"{ERROR_MB / 1000:g}); this {who} has {available_mb / 1000:.1f} GB for it and keeps "
+                         f"{floor / 1000:.1f} GB free as its floor, so it is refused. " +
+                         ("Choose a shorter song, or on a card smaller than the models set STUDIO_ROOM_MB (docs/rtx-5090.md)"
+                          if on_card else "Something outside the studio holds the rest"))
+        note = held_note() if measured_here and not on_card else ""
+        out["reason"] += "." + note if note else ""
     return out
 
 
@@ -448,7 +841,9 @@ SOUND_LONGEST = {"sfx": 47.0, "foley": 15.0}  # the app's longest of each (app/s
 SOUND_NAMES = {"sfx": "a sound effect (Stable Audio Open 1.0)", "foley": "foley (MMAudio)"}
 
 
-def sound_check(kind: str, seconds: float, available_mb: int | None = None, total_mb: int | None = None) -> dict:
+@_relaxable
+def sound_check(kind: str, seconds: float, available_mb: int | None = None, total_mb: int | None = None,
+                card: bool = False) -> dict:
     """Whether a sound effect or a clip's foley of ``seconds`` fits this machine, as ``music_check`` answers for a song;
     a kind not measured here is refused with that reason. Everything fits where there is no /proc/meminfo."""
 
@@ -456,14 +851,17 @@ def sound_check(kind: str, seconds: float, available_mb: int | None = None, tota
         total_mb = meminfo().get("MemTotal", 0)
     if not total_mb:
         return {"fits": True, "reason": "", "route": None}
-    if available_mb is None:
-        available_mb = room_mb() or total_mb - IDLE_MB
-    floor = floor_mb(total_mb)
+    measured_here = available_mb is None and not card
+    available_mb, floor, on_card = _pool(available_mb, total_mb, card)
     out = {"fits": False, "reason": "", "need_mb": None, "error_mb": ERROR_MB, "left_mb": None, "floor_mb": floor,
            "available_mb": available_mb, "route": f"sound-{kind}", "rows": None, "nearest": None}
     if kind not in SOUND_ESTIMATE:
-        out["reason"] = (f"{SOUND_NAMES.get(kind, kind)} has not been measured on a DGX Spark yet, and nothing renders on a "
-                         "Spark without a measured memory estimate (spark/memory_guard.py), so it is refused here")
+        if on_card:
+            out["reason"] = (f"{SOUND_NAMES.get(kind, kind)} has not been measured on this GPU yet, and nothing renders "
+                             "here without a measured memory estimate")
+        else:
+            out["reason"] = (f"{SOUND_NAMES.get(kind, kind)} has not been measured on a DGX Spark yet, and nothing renders on a "
+                             "Spark without a measured memory estimate (spark/memory_guard.py), so it is refused here")
         return out
     if seconds > SOUND_LONGEST.get(kind, 0):
         out["reason"] = f"{SOUND_NAMES[kind]} is at most {SOUND_LONGEST[kind]:g} s here, the longest measured"
@@ -473,10 +871,93 @@ def sound_check(kind: str, seconds: float, available_mb: int | None = None, tota
     left = available_mb - need - ERROR_MB
     out.update(fits=left >= floor, need_mb=need, left_mb=left)
     if not out["fits"]:
+        who = "GPU" if on_card else "machine"
         out["reason"] = (f"{SOUND_NAMES[kind]} of {seconds:g} s needs about {need / 1000:.0f} GB at its peak (give or take "
-                         f"{ERROR_MB / 1000:g}); this machine has {available_mb / 1000:.0f} GB for it and keeps "
+                         f"{ERROR_MB / 1000:g}); this {who} has {available_mb / 1000:.0f} GB for it and keeps "
                          f"{floor / 1000:.0f} GB free as its floor, so it is refused. Something outside the studio holds the rest")
+        note = held_note() if measured_here and not on_card else ""
+        out["reason"] += "." + note if note else ""
     return out
+
+# Character Swap (app/swap.py, spark/spark_swap.py): SAM 3.1, the anchor's picture model (FLUX3-K Fast) and MiniMax H3
+# Ref2VA with its two LoRAs in one ComfyUI, the windows at most 124 frames however long the part, so its peak is one per
+# quality. Measured 2026-10-27 through the app on a DGX Spark (GB10, 121.7 GB), a 5 s part of an 864x480 clip with one
+# person, int8 Ref2VA, each from a stopped ComfyUI, MemAvailable and every CUDA process's memory sampled once a second;
+# the need is what the machine had before the job less its lowest point (the GPU's share is in it: one pool): 480p
+# 55.4 GiB (347 s), 768p (1376x768) 60.6 GiB (811 s).
+SWAP_ESTIMATE = {480: 56_800, 768: 62_100}
+# On a card the models are on the card. Measured the same way under a CUDA MPS limit of 96 GB (an RTX Pro 6000 imitated,
+# STUDIO_VRAM_GB=96): the studio's processes' peak on the card, 49.4 GiB at 480p and 52.7 GiB at 768p (the machine
+# fell by 55.4 and 60.1, as on the Spark).
+SWAP_CARD_ESTIMATE = {480: 50_600, 768: 54_000}
+# With STUDIO_ROOM_MB on a card smaller than the models (docs/rtx-5090.md), ComfyUI keeps them in RAM and streams them
+# to the card. Measured under a 32 GB limit (an RTX 5090 imitated) with STUDIO_ROOM_MB=84000: the machine's drop, the
+# card's share included (one pool on the Spark it was measured on, so a card's own RAM is held to more than it uses):
+# 480p 37.8 GiB with 32.1 GiB on the card (349 s), 768p 39.5 GiB with 32.1 on the card (800 s): ComfyUI no longer keeps
+# every model resident, so the machine gives less than on a Spark.
+SWAP_OFFLOAD_ESTIMATE = {480: 38_800, 768: 40_500}
+# the bf16 Ref2VA (ComfyUI's own blocks on its 40.2 GB file) was not measured: its weights are 19.3 GB more than the
+# int8 file's 21.0 GB, and they are held throughout, so that is added
+SWAP_BF16_EXTRA_MB = 19_300
+SWAP_NAMES = {480: "Fast (480p)", 768: "High (768p)"}
+
+
+def card_name() -> str:
+    """The studio's card as nvidia-smi names it ("" when it says nothing)."""
+
+    found = smi("--query-gpu=name")
+    return found[0][0] if found and found[0] else ""
+
+
+@_relaxable
+def swap_check(quality: int, available_mb: int | None = None, total_mb: int | None = None, card: bool = False,
+               weights: str = "int8") -> dict:
+    """Whether a Character Swap at ``quality`` (480 or 768) fits this machine, as ``check`` answers for a clip: on a
+    Spark the machine's measured peak, on a card the card's (or, with STUDIO_ROOM_MB, the RAM's with the models
+    offloaded). A refusal names the GPU and what fits instead. Everything fits where there is no /proc/meminfo."""
+
+    if total_mb is None:
+        total_mb = meminfo().get("MemTotal", 0)
+    if not total_mb:
+        return {"fits": True, "reason": "", "route": None}
+    measured_here = available_mb is None and not card
+    available_mb, floor, on_card = _pool(available_mb, total_mb, card)
+    offloaded = not on_card and room_budget_mb() is not None and discrete()
+    table = SWAP_CARD_ESTIMATE if on_card else SWAP_OFFLOAD_ESTIMATE if offloaded else SWAP_ESTIMATE
+    extra = SWAP_BF16_EXTRA_MB if weights == "bf16" else 0
+
+    def need_of(q: int) -> int:
+        return table[q] + extra
+
+    def fits(q: int) -> bool:
+        return available_mb - need_of(q) - ERROR_MB >= floor
+
+    need = need_of(quality)
+    left = available_mb - need - ERROR_MB
+    out = {"fits": left >= floor, "reason": "", "need_mb": need, "error_mb": ERROR_MB, "left_mb": left, "floor_mb": floor,
+           "available_mb": available_mb, "route": f"swap-{quality}" + ("-card" if on_card else "-offload" if offloaded else ""),
+           "rows": None, "nearest": None}
+    if out["fits"]:
+        return out
+    named = card_name() if on_card or offloaded else ""
+    who = (f"this GPU ({named})" if named else "this GPU") if on_card else "this machine"
+    where = ("of the card's memory with the models on the card" if on_card else
+             "of RAM with ComfyUI keeping the models in RAM (STUDIO_ROOM_MB)" if offloaded else "at its peak")
+    said = (f"Character Swap at {SWAP_NAMES.get(quality, quality)} needs about {need / 1000:.0f} GB {where} (give or take "
+            f"{ERROR_MB / 1000:g}); {who} has {available_mb / 1000:.0f} GB for it and keeps {floor / 1000:.0f} GB free as its "
+            "floor, so it is refused")
+    smaller = [q for q in sorted(SWAP_NAMES) if q < quality and fits(q)]
+    if smaller:
+        out["nearest"] = {"quality": smaller[-1]}
+        said += f". {SWAP_NAMES[smaller[-1]]} fits: choose it in the panel"
+    elif on_card:
+        said += (". On a card smaller than the models, set STUDIO_ROOM_MB (docs/rtx-5090.md) and ComfyUI keeps them in RAM "
+                 "and streams them to the card")
+    out["reason"] = said + "."
+    if measured_here and not on_card:
+        out["reason"] += held_note()
+    return out
+
 
 # ---------- layer 2: the floor under a running server ----------
 
@@ -567,6 +1048,8 @@ def release_cache(paths: list[str]) -> int:
     pages not yet written stay). Returns how many files were done."""
 
     done = 0
+    if not hasattr(os, "posix_fadvise"):  # Windows and macOS: no per-file release; nothing is done
+        return 0
     for path in paths:
         try:
             handle = os.open(path, os.O_RDONLY)

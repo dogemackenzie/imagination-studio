@@ -6,11 +6,13 @@ on the first request, held while it is used, unloaded after ``BOLT_IDLE_S`` idle
 machine's queue needs its memory, before that job. Four backends, ``BOLT_BACKEND=cuda|metal|llamacpp|external``:
 
 - ``cuda`` (a DGX Spark, the default on Linux where it is built): TensorFold's native engine, ``tensorfold-native
-  serve``, with Mia's Bolt lane backend (libbolt.so and NVIDIA's LiLiCorr drafter), from MiaAI-Lab's
-  Nemotron-3.5-Bolt-TensorFold-DGX-Spark recipe on TensorFold 46a08c18 and its patches; ``spark/build-bolt.sh``
-  puts it in ``$PREFIX/bolt``. No Docker at run time.
+  serve``, with Mia's Bolt lane backend (libbolt.so and NVIDIA's LiLiCorr drafter): MiaAI-Lab's
+  Nemotron-3.5-Bolt-TensorFold-DGX-Spark recipe (89e1c8a, with ChriZzn's speed work) rebased onto TensorFold 1.1.8,
+  drowzeys/TensorFold branch ``bolt-lilicorr-118``; ``spark/build-bolt.sh`` puts it in ``$PREFIX/bolt`` (a release
+  archive pinned by sha256, the carrier, or a build from source). No Docker at run time.
 - ``metal`` (a Mac, the default there when built): TensorFold's Metal port of the same engine (fork branch
-  ``nemotron-bolt-metal``, not released yet), the same ``tensorfold-native serve`` command line.
+  ``bolt-metal-118`` on TensorFold 1.1.8, a release asset installed by ``scripts/setup-bolt.sh``), the same
+  ``tensorfold-native serve`` command line.
 - ``llamacpp`` (a Mac, when ``BOLT_BACKEND`` says so): llama.cpp's ``llama-server`` with NVIDIA's GGUF, until the
   Metal engine lands. Never chosen by itself (a Mac may already run Bolt in a llama.cpp service of its own).
 - ``external``: a server the Studio does not manage (the address in Settings → Connections), as before.
@@ -35,8 +37,9 @@ Lifecycle (``Engine``), mirroring voice.Served:
 - **idle unload** after ``BOLT_IDLE_S`` (600) seconds without a request; ``never`` (or 0) keeps it, for a head that
   never renders;
 - **memory**: before it loads, ``NEED_GB`` must be free; while it is loaded, its memory counts as a job's
-  (``room_mb``, server.held_room), since the job unloads it; a kill-guard reads the available memory (MemAvailable on
-  Linux, vm_stat on a Mac) and kills the engine's process group under ``BOLT_GUARD_GB`` (8 GB);
+  (``room_mb``, server.held_room), since the job unloads it; a kill-guard reads the available memory (that card's
+  free memory on a discrete GPU, MemAvailable on a DGX Spark, vm_stat on a Mac) and kills the engine's process group
+  under ``BOLT_GUARD_GB`` (8 GB);
 - it dies with the app: it runs under a leash (bolt_leash.py) that ends it when the app's pipe closes.
 
 It never takes the studio's GPU lock: a brain is not a render, it is held to the machine's memory by measurement, and a
@@ -44,8 +47,8 @@ loaded brain must not keep the updater or a render script waiting for the lock.
 
 The weights are NVIDIA's (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB and its LiLiCorr drafter) under the OpenMDW
 License Agreement 1.1: use, modification and redistribution are free, commercial use included; a copy that is passed
-on keeps the agreement and NVIDIA's notices; no warranty. The CUDA engine is Mia's (MiaAI-Lab, MIT) on TensorFold (Ash
-Hart and the TensorFold contributors, Apache 2.0).
+on keeps the agreement and NVIDIA's notices; no warranty. The CUDA engine is Mia's (MiaAI-Lab, MIT, with ChriZzn's speed work)
+on TensorFold 1.1.5 (Ash Hart and the TensorFold contributors, Apache 2.0).
 """
 
 from __future__ import annotations
@@ -64,8 +67,12 @@ import urllib.request
 from pathlib import Path
 
 import voice  # mem_available_gb, settle, located, found_hint: the same readings Drama 3's engine uses
+import model_catalog
+import windows_cuda  # the native Windows CUDA tier (False off Windows without a look)
 
-SPARK = sys.platform.startswith("linux")
+# native Windows with the CUDA tier installed runs the same CUDA backend: tensorfold-native.exe with bolt.dll
+WINCUDA = windows_cuda.native_os()
+SPARK = sys.platform.startswith("linux") or WINCUDA
 MAC = sys.platform == "darwin"
 PACK = Path(__file__).resolve().parent.parent
 PREFIX = Path(os.environ.get("PREFIX", Path.home() / ".local/opt/tensorfold-studio")).expanduser()
@@ -179,7 +186,8 @@ class Engine:
         if not why:
             free = voice.mem_available_gb()
             if 0 <= free < self.NEED_GB and not self.holds_room():
-                why = (f"{NAME} needs about {self.NEED_GB:.0f} GB of free memory to load and this machine has {free:.0f} GB "
+                who = "GPU" if voice.has_card_memory() else "machine"
+                why = (f"{NAME} needs about {self.NEED_GB:.0f} GB of free memory to load and this {who} has {free:.0f} GB "
                        "available now (a render or a model outside the Studio holds the rest).")
         self.known = (time.time(), why)
         return why
@@ -251,7 +259,10 @@ class Engine:
         while process.poll() is None:
             free = voice.mem_available_gb()
             if 0 <= free < self.guard_gb:
-                self.killed = f"available memory {free:.1f} GB < {self.guard_gb:g} GB: the memory guard killed {NAME} (pid {process.pid})"
+                if voice.has_card_memory():
+                    self.killed = f"GPU memory {free:.1f} GB < {self.guard_gb:g} GB: the memory guard killed {NAME} (pid {process.pid})"
+                else:
+                    self.killed = f"available memory {free:.1f} GB < {self.guard_gb:g} GB: the memory guard killed {NAME} (pid {process.pid})"
                 kill_group(process)
                 return
             time.sleep(0.25 if SPARK else 1.0)
@@ -292,9 +303,16 @@ class Engine:
         self.changed.notify_all()
         began, self.before_gb = time.time(), voice.mem_available_gb()
         try:
-            self.process = subprocess.Popen([sys.executable, "-I", str(Path(__file__).with_name("bolt_leash.py")), "--", *self.argv(self.port)],
-                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                            bufsize=1, env=self.environment(), start_new_session=True)
+            leash = [sys.executable, "-I", str(Path(__file__).with_name("bolt_leash.py")), "--", *self.argv(self.port)]
+            if sys.platform == "win32":
+                # Windows has no process groups: the leash and the engine run in a job object of their own, ended as one
+                # (kill_group) and when this app's handle to it closes
+                from windows_process import OwnedJob
+                self.process = OwnedJob().spawn(leash, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                                text=True, encoding="utf-8", errors="replace", bufsize=1, env=self.environment())
+            else:
+                self.process = subprocess.Popen(leash, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                                bufsize=1, env=self.environment(), start_new_session=True)
             threading.Thread(target=self.read, args=(self.process,), daemon=True).start()
             threading.Thread(target=self.guard, args=(self.process,), daemon=True).start()
             if self.idler is None:
@@ -344,8 +362,8 @@ class Engine:
         if free < 0 or free >= self.NEED_GB:
             return
         if SPARK and voice.comfy_up() and not busy():
-            subprocess.run(["bash", str(PACK / "spark" / "comfy.sh"), "stop"], capture_output=True, text=True, timeout=30,
-                           env={**os.environ, "PREFIX": str(PREFIX)})
+            subprocess.run(windows_cuda.comfy_argv("stop") if WINCUDA else ["bash", str(PACK / "spark" / "comfy.sh"), "stop"],
+                           capture_output=True, text=True, timeout=30, env={**os.environ, "PREFIX": str(PREFIX)})
             for _ in range(60):
                 if not voice.comfy_up():
                     break
@@ -354,7 +372,8 @@ class Engine:
             free = voice.mem_available_gb()
             self.note("stopped ComfyUI before loading", available_gb=round(free, 1))
         if 0 <= free < self.NEED_GB:
-            raise RuntimeError(f"{NAME} needs about {self.NEED_GB:.0f} GB of free memory to load and this machine has "
+            who = "GPU" if voice.has_card_memory() else "machine"
+            raise RuntimeError(f"{NAME} needs about {self.NEED_GB:.0f} GB of free memory to load and this {who} has "
                                f"{free:.0f} GB available")
 
     def stop(self, why: str) -> None:
@@ -378,6 +397,10 @@ class Engine:
                             process.wait(timeout=10)
                         except subprocess.TimeoutExpired:
                             pass
+                owned = getattr(process, "_studio_job", None) if sys.platform == "win32" else None
+                if owned is not None:  # Windows: the job object goes with the process (nothing of it outlives the stop)
+                    with contextlib.suppress(OSError, RuntimeError):
+                        owned.close()
                 voice.settle()
                 if was != "unloaded":
                     self.note("unloaded", why=why, available_gb=round(voice.mem_available_gb(), 1))
@@ -478,6 +501,13 @@ def group_rss_gb(group: int) -> float | None:
 
 
 def kill_group(process: subprocess.Popen) -> None:
+    owned = getattr(process, "_studio_job", None) if sys.platform == "win32" else None
+    if owned is not None:  # Windows: the leash's job object, the engine in it
+        try:
+            owned.terminate()
+        except (OSError, RuntimeError):
+            pass
+        return
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except (OSError, ProcessLookupError):
@@ -510,24 +540,28 @@ MODELS = Path(os.environ.get("BOLT_MODELS", Path(os.environ.get("SPARK_MODELS", 
 
 
 class Cuda(Engine):
-    """TensorFold's native engine with Mia's Bolt lane backend on a DGX Spark (``tensorfold-native serve``, Zig + CUDA,
-    libbolt.so, NVIDIA's LiLiCorr drafter; no Python, no Docker at run time), from ``$PREFIX/bolt``
-    (spark/build-bolt.sh). The Studio's settings, trimmed from Mia's defaults to sit beside renders: 4 streams, a
-    65,536-token window each, 2 GiB of prompt cache, pictures and video on, thinking off. Measured on .4 (GB10) with
-    those settings in Mia's image: 28 GB resident, about 40 s to answer with the files in the page cache, 57 to 60
-    tokens a second for one stream."""
+    """TensorFold 1.1.8's native engine with Mia's Bolt lane backend on a DGX Spark (``tensorfold-native serve``, Zig +
+    CUDA, libbolt.so, NVIDIA's LiLiCorr drafter; no Python, no Docker at run time), from ``$PREFIX/bolt``
+    (spark/build-bolt.sh, branch bolt-lilicorr-118). The Studio's settings, trimmed from Mia's defaults to sit beside renders: 4 streams, a
+    65,536-token window each, 2 GiB of prompt cache, pictures and video on, thinking off. Measured on a GB10 with
+    those settings (3.3.3): 30.7 GB held, 32 to 74 s to answer (files in the page cache or not), 66 tokens a second
+    for one stream in chat, 76 on a 600-token plan, 138 on an edit, 204 for four plans at once (the 1.0.12 engine
+    before it: 28 GB, 57, 68, 118 and 140)."""
 
-    name, label = "cuda", "TensorFold CUDA · DGX Spark (Mia's Bolt recipe)"
+    name, label = "cuda", "TensorFold 1.1.8 CUDA · DGX Spark (Mia's Bolt recipe)"
     load_s = 40.0
     # free memory wanted before it loads: Mia's start check for these settings (weights 23, vision 3, recurrent state
     # 2, attention 1, TensorFold's reserve 10, 2, prompt cache 2 GiB)
-    NEED_GB = 43.0
-    RESIDENT_GB = 28.0
+    NEED_GB = model_catalog.required_free_gib("bolt")
+    RESIDENT_GB = 31.0  # 30.7 GB held, measured on a GB10 with the settings below (3.3.3; 28 with the 1.0.12 engine)
     folder_name = "bolt"
 
     def __init__(self) -> None:
         super().__init__()
         here = PREFIX / self.folder_name
+        self.windows = WINCUDA and self.folder_name == "bolt"  # tensorfold-native.exe and bolt.dll (TensorFold 1.2.2, studio-1.2.2)
+        if self.windows:
+            self.label = "TensorFold 1.2.2 CUDA · native Windows (Mia's Bolt recipe)"
         self.bin = Path(os.environ.get("BOLT_BIN", here / "native" / "bin" / "tensorfold-native")).expanduser()
         self.lib = Path(os.environ.get("BOLT_LIB", self.bin.parent.parent / "lib")).expanduser()
         self.model = Path(os.environ.get("BOLT_MODEL", MODELS / "Nemotron-3.5-Bolt-24GB")).expanduser()
@@ -537,6 +571,8 @@ class Cuda(Engine):
         self.context = int(os.environ.get("BOLT_CONTEXT", 65536))
         self.prompt_cache = os.environ.get("BOLT_PROMPT_CACHE_GIB", "2")
         self.vision = os.environ.get("BOLT_VISION", "1") != "0"
+        if self.windows:  # the Windows build is not measured with its vision tower (no libturbojpeg): BOLT_VISION=1 asks
+            self.vision = os.environ.get("BOLT_VISION") == "1"
         self.thinking = os.environ.get("BOLT_THINKING", "0") == "1"
         self.drafts = os.environ.get("BOLT_DRAFTS", "1") != "0"
 
@@ -546,7 +582,9 @@ class Cuda(Engine):
         self.bin = voice.located("bolt-binary", self.bin, lambda p: os.access(p, os.X_OK))
         if not os.access(self.bin, os.X_OK):
             return (f"No {NAME} engine at {self.bin} (bash {self.build_hint()}; BOLT_BIN names another)." + voice.found_hint("bolt-binary"))
-        if self.name == "cuda" and not (self.lib / "libbolt.so").is_file():
+        if self.windows and not (self.lib / "bolt.dll").is_file():
+            return f"No bolt.dll in {self.lib} (the same build puts it beside tensorfold-native.exe; BOLT_LIB names another folder)."
+        if self.name == "cuda" and not self.windows and not (self.lib / "libbolt.so").is_file():
             return f"No libbolt.so in {self.lib} (the same build puts it there; BOLT_LIB names another folder)."
         if not has_checkpoint(self.model):
             self.model = snapshot(MODEL_REPO, MODEL_REVISION, has_checkpoint) or voice.located("bolt-checkpoint", self.model, has_checkpoint)
@@ -561,9 +599,13 @@ class Cuda(Engine):
         return ""
 
     def build_hint(self) -> str:
+        if self.windows:
+            return "oneshot-setup-rtx-spark-n1x.ps1 -Native builds TensorFold's studio-1.2.2 engine"
         return "spark/build-bolt.sh, or oneshot-setup-spark.sh --bolt"
 
     def setup_hint(self) -> str:
+        if self.windows:
+            return "oneshot-setup-rtx-spark-n1x.ps1 -Native -Bolt"
         return "bash oneshot-setup-spark.sh --bolt"
 
     def environment(self) -> dict:
@@ -572,12 +614,20 @@ class Cuda(Engine):
         self.cache.mkdir(parents=True, exist_ok=True)
         env.update(HF_HUB_OFFLINE="1", TENSORFOLD_NO_UPDATE_CHECK="1", BOLT_KV=os.environ.get("BOLT_KV", "bf16"),
                    BOLT_KV_PIN=os.environ.get("BOLT_KV_PIN", "0"), CUDA_CACHE_PATH=str(self.cache / "nv"),
+                   # Mia's defaults: one Mamba state copy a stream (replies identical, 3 to 8 % faster at 4+ streams)
+                   BOLT_SSM_LAZY=os.environ.get("BOLT_SSM_LAZY", "1"),
                    TENSORFOLD_MEMORY_RESERVE_GIB=os.environ.get("TENSORFOLD_MEMORY_RESERVE_GIB", "10"),
                    TENSORFOLD_BOLT_LIB=str(self.lib / "libbolt.so"), TENSORFOLD_LIBTURBOJPEG=str(self.lib / "libturbojpeg.so.0"))
         if self.drafts:
             env["BOLT_DRAFT"] = str(self.draft)
         else:
             env.pop("BOLT_DRAFT", None)
+        if self.windows:  # the DLLs are found on PATH (bolt.dll's folder, CUDA's arm64 runtime), not LD_LIBRARY_PATH
+            env.pop("LD_LIBRARY_PATH", None)
+            env.pop("TENSORFOLD_LIBTURBOJPEG", None)
+            env["TENSORFOLD_BOLT_LIB"] = str(self.lib / "bolt.dll")
+            cuda = windows_cuda.paths()["cuda_bin"]
+            env["PATH"] = os.pathsep.join([str(self.lib), *([str(cuda), str(cuda.parent)] if cuda.is_dir() else []), env.get("PATH", "")])
         return env
 
     def argv(self, port: int) -> list[str]:
@@ -594,7 +644,7 @@ class Cuda(Engine):
 
 
 class Metal(Cuda):
-    """TensorFold's Metal port of the Bolt engine on a Mac (fork branch ``nemotron-bolt-metal``, the same
+    """TensorFold's Metal port of the Bolt engine on a Mac (fork branch ``bolt-metal-118`` on TensorFold 1.1.8, the same
     ``tensorfold-native serve`` command line), from ``$PREFIX/bolt-metal``. Not released yet: until it is built there,
     a Mac runs Bolt through llama.cpp (``Llamacpp``, BOLT_BACKEND=llamacpp). Swapping it in is building it into that
     folder (or naming it with BOLT_BIN) and setting BOLT_BACKEND=metal, or leaving it unset: nothing else changes."""
@@ -605,7 +655,7 @@ class Metal(Cuda):
 
     def __init__(self) -> None:
         super().__init__()
-        # the Metal build (nemotron-bolt-metal b4edaea5) has no vision tower and its server refuses the --vision-* flags
+        # the Metal build (bolt-metal-115 be300c4d, as nemotron-bolt-metal b4edaea5 before it) has no vision tower; b4edaea5's server refused the --vision-* flags
         # ("unrecognized arguments: --vision-max-videos": the fresh 3.1.0 install's first load); BOLT_VISION=1 asks anyway
         self.vision = os.environ.get("BOLT_VISION") == "1"
 
@@ -615,14 +665,14 @@ class Metal(Cuda):
         return super().present()
 
     def build_hint(self) -> str:
-        return "TensorFold's nemotron-bolt-metal branch, built into $PREFIX/bolt-metal (not released yet)"
+        return "scripts/setup-bolt.sh (TensorFold's bolt-metal-118 engine, a release download into $PREFIX/bolt-metal)"
 
     def setup_hint(self) -> str:
         return "bash oneshot-setup.sh --bolt"
 
     def environment(self) -> dict:
         env = super().environment()
-        for key in ("CUDA_CACHE_PATH", "TENSORFOLD_BOLT_LIB", "TENSORFOLD_LIBTURBOJPEG"):
+        for key in ("CUDA_CACHE_PATH", "TENSORFOLD_BOLT_LIB", "TENSORFOLD_LIBTURBOJPEG", "BOLT_SSM_LAZY"):
             env.pop(key, None)
         env["DYLD_LIBRARY_PATH"] = env.pop("LD_LIBRARY_PATH", str(self.lib))
         return env
@@ -718,7 +768,7 @@ def choose() -> tuple[type, str]:
         return BACKENDS[told], ""
     if SPARK:
         why = Cuda().present()
-        if why and platform.machine() not in ("aarch64", "arm64"):  # TensorFold's Bolt engine is built for a DGX Spark only
+        if why and platform.machine().lower() not in ("aarch64", "arm64"):  # TensorFold's Bolt engine is built for a DGX Spark only
             why += " On an x86_64 CUDA workstation BOLT_BACKEND=llamacpp runs it through a CUDA build of llama.cpp (docs/rtx-pro-6000.md)."
         return (External, why) if why else (Cuda, "")
     if MAC:
@@ -727,11 +777,25 @@ def choose() -> tuple[type, str]:
     return External, "no Studio engine for this platform"
 
 
+RECHOOSE_S = 30.0  # how often an engine chosen as external (nothing installed) looks again for one installed since
+_chosen_at = 0.0
+_choosing = threading.Lock()  # one choice at a time: two threads never each make an engine
+
+
 def engine():
-    global _engine, _chosen_why
-    if _engine is None:
-        route, _chosen_why = choose()
-        _engine = route()
+    """The engine the brains use. One chosen as external because nothing was installed yet is chosen again (at most
+    every RECHOOSE_S): ``oneshot-setup-spark.sh --bolt`` run beside a running app is picked up without a restart.
+    ``BOLT_BACKEND`` set is never chosen again, and a managed engine stays the one it is."""
+
+    global _engine, _chosen_why, _chosen_at
+    again = lambda: isinstance(_engine, External) and not (os.environ.get("BOLT_BACKEND") or "").strip() and time.time() - _chosen_at >= RECHOOSE_S
+    if _engine is None or again():
+        with _choosing:
+            if _engine is None or again():
+                _chosen_at = time.time()
+                route, why = choose()
+                if _engine is None or route is not External:
+                    _engine, _chosen_why = route(), why
     return _engine
 
 
@@ -752,7 +816,12 @@ def serves(endpoint: str) -> bool:
 
 
 def request(stopped=lambda: False, wait: bool = True, say=None):
-    return engine().request(stopped, wait, say)
+    one = engine()
+    if WINCUDA and not isinstance(one, External) and not one.present():
+        from windows_runtime import mode
+        if mode()["enabled"]:
+            raise RuntimeError("The native Bolt recipe has no Windows verification check yet. See Machine > Feature checks.")
+    return one.request(stopped, wait, say)
 
 
 FORWARD_FAILED = "Bolt's forward failed"  # the engine's 500 when one of its forward passes failed (bolt_native.zig)
@@ -846,6 +915,12 @@ def state() -> dict:
            "managed": not isinstance(one, External), "fallback": _chosen_why or None, "licence": LICENCE, "credit": CREDIT,
            "endpoint": ENDPOINT, "model": SERVED, **one.status()}
     out["backend_label"] = one.label
+    if WINCUDA and not isinstance(one, External):
+        from windows_runtime import gate_native_state
+        operational_state = out.get("state")
+        out = gate_native_state("Bolt", out)
+        out["qualification_state"] = out.get("state")
+        out["state"] = operational_state
     return out
 
 
@@ -860,6 +935,10 @@ def load_async() -> dict:
     why = one.present()
     if why:
         raise RuntimeError(why)
+    if WINCUDA:
+        from windows_runtime import mode
+        if mode()["enabled"]:
+            raise RuntimeError("The native Bolt recipe has no Windows verification check yet. See Machine > Feature checks.")
 
     def run() -> None:
         try:

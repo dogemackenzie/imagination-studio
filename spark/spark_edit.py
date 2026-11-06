@@ -24,6 +24,7 @@ import time
 import subprocess
 import argparse
 import json
+import signal
 import sys
 import tempfile
 import uuid
@@ -172,6 +173,7 @@ def workflow(args, pictures: list[str], prompt: str, seed: int, loras: list[tupl
 
 
 def main() -> None:
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # a cancelled job still runs the cleanup below
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--image", required=True, action="append", help="the picture to edit; repeat for further pictures the prompt draws on (image 2, image 3, ...)")
     parser.add_argument("--prompt", default="", help="what to change (one picture, written to -o)")
@@ -217,7 +219,7 @@ def main() -> None:
     last = sg.side("kind").read_text().strip() if sg.side("kind").exists() else ""
     if sg.up() and last.startswith("workflow"):
         print("[tensorfold] restarting ComfyUI: a picture edit after a Library action starts from a server with nothing loaded", flush=True)
-        subprocess.run(["bash", str(sg.HERE / "comfy.sh"), "stop"], check=False)
+        subprocess.run(sg.comfy_control("stop"), check=False)
         for _ in range(60):
             if not sg.up():
                 break

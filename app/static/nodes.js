@@ -18,7 +18,7 @@ const ND_TYPES = {
   clip: { label: "Clip", line: "Video Engine: a clip with sound", inputs: { prompt: { types: ["text"], required: true }, first_frame: { types: ["image"] },
     refs: { types: ["image", "video", "audio"], many: true } }, outputs: { video: "video" }, params: { preset: "small", quality: "fh8", seconds: 5, seed: 1, look: "" } },
   voice: { label: "Voice", line: "Fish Audio Drama 3: a spoken line", inputs: { text: { types: ["text"], required: true } }, outputs: { audio: "audio" }, params: { seed: 1 } },
-  song: { label: "Song", line: "MiniMax-Music3: a song from a style", inputs: { style: { types: ["text"], required: true }, lyrics: { types: ["text"] } },
+  song: { label: "Song", line: "YuE2 or MiniMax-Music3: a song from a style", inputs: { style: { types: ["text"], required: true }, lyrics: { types: ["text"] } },
     outputs: { audio: "audio" }, params: { seconds: 30, seed: 1 } },
   reference: { label: "Reference", line: "A file from the Library", inputs: {}, outputs: { file: "image" }, params: { path: "", kind: "image" } },
   timeline: { label: "Timeline", line: "Clips in order, a song under them", inputs: { clips: { types: ["video"], many: true, required: true }, song: { types: ["audio"] } },
@@ -126,16 +126,22 @@ async function ndDelete() {
   if (!ND.graph.id || !confirm("Delete " + ND.graph.name + "? It goes to the trash folder (nodes/.trash), not erased.")) return;
   try { await api("/api/nodes/graphs/" + encodeURIComponent(ND.graph.id), undefined, "DELETE"); } catch (e) { return toast(e.message); }
   ND.graph.id = null; ND.saved = null; ND.dirty = true; ndList(); ndPaintBar(); }
-// the memory guard's answer and the expected time for a clip card, before anything is queued (/api/estimate)
+// The server chooses the video worker (including saved placement) before estimating its memory and time.
 async function ndEstimate(node) {
   const refs = ND.graph.edges.filter(e => e.to === node.id && e.in === "refs").length;
-  try { ND.est[node.id] = await api("/api/estimate", { preset: node.params.preset, quality: node.params.quality, seconds: Number(node.params.seconds),
+  try { ND.est[node.id] = await api("/api/estimate", { kind: "video", preset: node.params.preset, quality: node.params.quality, seconds: Number(node.params.seconds),
     referenced: refs > 0, references: refs, with_lora: !!node.params.look, loras: node.params.look ? [{ id: node.params.look }] : [] }); }
   catch { delete ND.est[node.id]; }
   ndPaintOut(node.id); }
+const ndEstimateWhere = est => {
+  const name = est && est.worker ? (typeof est.worker === "string" ? est.worker : est.worker.name || est.worker.address) : "";
+  return name ? " on " + (name.startsWith("local:") ? "local GPU" : name) : "";
+};
+const ndMemoryReason = est => est.memory.reason || "the selected worker's available memory" + ndEstimateWhere(est);
 // Run is held off from the first click until the server has answered (a double click starts one run; the server
 // answers 409 to a second all the same)
 async function ndRun() {
+  if (S && S.platform === "windows") return toast(capWhy("nodes"));
   if (ndPhone() || ndBusy()) return;
   if (!ND.graph.nodes.some(n => n.type !== "note")) return toast("Add a card first: right-click the canvas");
   ND.starting = true; ndPaintBar();
@@ -146,7 +152,7 @@ async function ndStart() {
   if (!said.ok) { ndPaint(); return toast(said.problems[0].message + (said.problems.length > 1 ? " (and " + (said.problems.length - 1) + " more)" : "")); }
   const clips = ND.graph.nodes.filter(n => n.type === "clip"); await Promise.all(clips.map(ndEstimate));
   const full = clips.find(n => ND.est[n.id] && ND.est[n.id].memory && ND.est[n.id].memory.fits === false);
-  if (full) { ND.sel = { node: full.id }; ndPaint(); return toast(ndTitle(full) + ": " + (ND.est[full.id].memory.reason || "it does not fit this machine's memory")); }
+  if (full) { ND.sel = { node: full.id }; ndPaint(); return toast(ndTitle(full) + ": " + (ND.est[full.id].memory.reason || "it does not fit " + ndMemoryReason(ND.est[full.id]))); }
   try { ND.run = await api("/api/nodes/run", { graph: ndSerialize(), ...(ND.graph.id && !ND.dirty ? { id: ND.graph.id } : {}) }); } catch (e) { return toast(e.message); }
   toast("Running " + ND.graph.name + ": its jobs are in the queue"); ndPaintStatus(); ndWatch(); }
 async function ndCancel() {
@@ -239,8 +245,8 @@ function ndFields(node) {
 function ndOut(node) {
   const st = ND.run && ND.run.nodes && ND.run.nodes[node.id], out = [];
   const est = ND.est[node.id];
-  if (est && est.memory && est.memory.fits === false) out.push(el("div", { class: "nd-err" }, "Does not fit: " + (est.memory.reason || "this machine's memory")));
-  else if (est && est.seconds && !st) out.push(el("div", { class: "nd-meta" }, "About " + mmss(est.seconds)));
+  if (est && est.memory && est.memory.fits === false) out.push(el("div", { class: "nd-err" }, "Does not fit: " + ndMemoryReason(est)));
+  else if (est && est.seconds && !st && (est.worker || typeof cardFace !== "function" || !cardFace() || est.where === "card")) out.push(el("div", { class: "nd-meta" }, "About " + mmss(est.seconds) + ndEstimateWhere(est)));
   if (ND.problems[node.id]) out.push(el("div", { class: "nd-err" }, ND.problems[node.id]));
   if (!st) return out;
   if (st.status === "running") { const pr = st.progress;
@@ -302,7 +308,7 @@ function ndBar() {
     ro ? null : el("button", { class: "small", title: "Save (⌘S)", onclick: ndSave }, "Save"),
     ro ? null : ND.starting ? el("button", { class: "primary", disabled: true, "aria-busy": "true", title: "Checking the graph and starting its run" }, "Starting…")
       : busy ? el("button", { class: "small", title: "Stop the job that renders and the cards after it (Esc stops a link, not the run)", onclick: ndCancel }, "Cancel run")
-      : el("button", { class: "primary", title: "Run (⌘Enter): the cards' jobs go into the queue one after another", onclick: ndRun }, "Run")]; }
+      : el("button", { class: "primary", disabled: !!(S && S.platform === "windows"), title: S && S.platform === "windows" ? capWhy("nodes") : "Run (⌘Enter): the cards' jobs go into the queue one after another", onclick: ndRun }, "Run")]; }
 function ndEmpty() {
   if (ND.graph.nodes.length) return null;
   return el("div", { class: "nd-empty" }, el("b", {}, "An empty canvas"), el("p", {}, ndPhone() ? "Open a saved graph above." : "Right-click or double-click to add a card, or start from one of these:"),

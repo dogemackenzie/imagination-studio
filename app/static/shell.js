@@ -3,10 +3,12 @@
 // with its own tabs, Back and Home in the top bar, the render bay docked along the bottom, the ⌘K palette and the
 // machine chip. Every view is still drawn by its own module; this file only decides where it sits. Settings → Studio
 // layout hides and orders the rooms (settings.js roomsShown); a hidden room stays in ⌘K.
-const GROUPS = [{ id: "engines", name: "Creative Engines" }, { id: "agent", name: "" }, { id: "vaults", name: "Studio Vaults" }];
+const GROUPS = [{ id: "apps", name: "", label: "Apps" }, { id: "engines", name: "Creative Engines" }, { id: "agent", name: "" }, { id: "vaults", name: "Studio Vaults" }];
 const ROOMS = [
+  // every tool as a one-click app (apps.js), above the engines
+  { id: "apps", group: "apps", name: "Apps", key: "", tabs: ["Apps"], says: "every tool as a one-click app" },
   { id: "video", group: "engines", name: "Video", key: "1", tabs: ["Video", "Create"], says: "clips with sound, long takes, references" },
-  { id: "image", group: "engines", name: "Image", key: "2", tabs: ["Image", "Create"], says: "stills, scouts, edit a picture" },
+  { id: "image", group: "engines", name: "Image", key: "2", tabs: ["Image", "Create", "Quick Edit"], says: "stills, scouts, edit a picture, Quick Edit" },
   { id: "sound", group: "engines", name: "Sound", key: "3", tabs: ["Sound", "Voice", "Music", "Foley"], says: "voices, score and sound effects" },
   { id: "story", group: "engines", name: "Story", key: "4", tabs: ["Story", "Production"], says: "the film: board, Wasserman Slate, First AD" },
   // a room of its own for a part that also sits inside a bigger page; `fold`: in the More sheet on a phone, not the bar
@@ -38,9 +40,9 @@ function localRender() {
   const caps = (typeof S !== "undefined" && S && S.capabilities) || null;
   return !caps || caps.local_render !== false;
 }
-const TAB_NAMES = { Home: "Home", Story: "Overview", Production: "Film", Image: "Overview", Video: "Overview", Create: "Create", Previs: "Overview", "Motion Previs": "Motion Previs",
+const TAB_NAMES = { Home: "Home", Story: "Overview", Production: "Film", Image: "Overview", Video: "Overview", Create: "Create", "Quick Edit": "Quick Edit", Previs: "Overview", "Motion Previs": "Motion Previs",
   Agent: "Ask your agent", Sound: "Overview", Voice: "Voice", Music: "Music", Foley: "Sound effects", Edit: "Overview", Editor: "Timeline", Graphics: "Graphics", Finish: "Finish",
-  "Cast & Places": "Cast & Places", Director: "Director", "Motion graphics": "Motion graphics", "Night shift": "Night shift", Library: "Library", Looks: "Looks", Import: "Bring in & send out",
+  Apps: "Apps", "Cast & Places": "Cast & Places", Director: "Director", "Motion graphics": "Motion graphics", "Night shift": "Night shift", Library: "Library", Looks: "Looks", Import: "Bring in & send out",
   Machine: "Telemetry", Models: "Models & weights", Sparks: "Sparks", Brains: "Brains & tools", Updates: "Updates", Tutorial: "Learn", Nodes: "Nodes", Settings: "Settings" };
 // Create is shared by Image and Video: it sits in the room of what the prompt goes to
 const roomOf = t => t === "Create" ? ROOMS.find(r => r.id === (typeof C !== "undefined" && C.goes === "video" ? "video" : "image"))
@@ -80,11 +82,12 @@ const ICON = {
   graphics: KIT("M18 12H46 M32 12V44 M8 22H20 M8 30H24 M8 38H20"),
   night: KIT("M44 33A18 18 0 1 1 23 12A14 14 0 0 0 44 33Z"),
   train: KIT("M24 8L28 20L40 24L28 28L24 40L20 28L8 24L20 20Z M42 34L44 40L50 42L44 44L42 50L40 44L34 42L40 40Z"),
+  apps: KIT("M8 8H24V24H8Z M32 8H48V24H32Z M8 32H24V48H8Z M32 32H48V48H32Z"),
   more: SVG('<circle cx="5.5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18.5" cy="12" r="1.2"/>'),
 };
 const icon = (name, cls) => { const n = el("span", { class: cls || "ico" }); n.innerHTML = ICON[name] || ICON.home; return n; };
 // the marks of the models and tools the Studio runs (app/static/brand, THIRD-PARTY-MARKS.md): identification only
-const MARKS = { qwen: ["brand/qwen.svg", "Qwen"], flux: ["brand/bfl-white.svg", "FLUX3-K"], minimax: ["brand/minimax.svg", "MiniMax H3"], music3: ["brand/minimax.svg", "MiniMax-Music3"],
+const MARKS = { qwen: ["brand/qwen.svg", "Qwen"], flux: ["brand/bfl-white.svg", "FLUX3-K"], minimax: ["brand/minimax.svg", "MiniMax H3"], music3: ["brand/minimax.svg", "MiniMax-Music3"], yue: ["brand/yue.png", "YuE2"],
   fish: ["brand/fish-audio.svg", "Fish Audio Drama 3"], comfy: ["brand/comfyui.svg", "ComfyUI"], tensorfold: ["brand/tensorfold.webp", "TensorFold"],
   claude: ["brand/claude.svg", "Claude"], openai: ["brand/openai.svg", "ChatGPT"], codex: ["brand/codex.svg", "Codex"], gemini: ["brand/gemini.svg", "Gemini"], grok: ["brand/grok.svg", "Grok"],
   hermes: ["brand/hermes-agent.png", "Hermes Agent"], nvidia: ["brand/nvidia.svg", "NVIDIA"] };
@@ -107,6 +110,10 @@ function goBack() { const h = SHELL.history; while (h.length && (h[h.length - 1]
   h.pop(); go(prev, { back: true }); }
 function goHome() { if (tab !== "Home") go("Home"); }
 function goRoom(id) { const r = ROOMS.find(x => x.id === id); if (r) go(r.tabs[0]); }
+function capWhy(kind) { if (!kind || !S) return "";
+  if (S.platform !== "windows") return routeBlock(kind) || "";
+  const c = (S.capabilities || {})[kind];
+  return c && c.available ? "" : c && c.why || "This action is not qualified in the Windows preview."; }
 
 const shown = list => typeof roomsShown === "function" ? roomsShown(list) : list;
 const aboutOn = () => tab === "Settings" && typeof SET !== "undefined" && SET.section === "about";
@@ -143,7 +150,7 @@ function moreOpen() { if ($("#moresheet")) return moreClose(); const now = tab =
     icon(ico, "ico"), el("span", { class: "t" }, el("b", {}, label, kbd ? el("kbd", {}, kbd) : null), el("small", {}, hint)));
   const sheet = el("div", { id: "moresheet", onclick: e => { if (e.target.id === "moresheet") moreClose(); } },
     el("div", { class: "box", role: "dialog", "aria-label": "More" },
-      shown(ROOMS.filter(r => r.group === "agent")).map(r => row(r.id, r.name, r.says, () => goRoom(r.id), now === r)),
+      shown(ROOMS.filter(r => r.group === "apps" || r.group === "agent")).map(r => row(r.id, r.name, r.says, () => goRoom(r.id), now === r)),
       // the engines' rooms of their own, which the bar has no room for
       shown(ROOMS.filter(r => r.fold)).length ? el("div", { class: "grp" }, "Creative Engines") : null,
       shown(ROOMS.filter(r => r.fold)).map(r => row(r.id, r.name, r.says, () => goRoom(r.id), now === r)),
@@ -169,7 +176,7 @@ function jobShare(job) { const p = job.progress, elapsed = job.elapsed != null ?
 function bayUpdate() { const sum = $("#baysum"); if (!sum) return;
   const running = jobs.filter(j => j.status === "running"), queued = jobs.filter(j => j.status === "queued"), done = jobs.filter(j => j.status === "done").length, failed = jobs.filter(j => j.status === "failed").length;
   const lanes = running.map(j => { const { share, left } = jobShare(j);
-    return el("div", { class: "lane r", title: j.title }, el("span", { class: "onair" }, "ROLLING"), j.spark ? el("span", { class: "tcode" }, j.spark) : null, el("b", {}, j.title),
+    return el("div", { class: "lane r", title: j.title }, el("span", { class: "onair" }, "ROLLING"), j.spark ? el("span", { class: "tcode" }, typeof spkLabel === "function" ? spkLabel(j.spark) : j.spark) : null, el("b", {}, j.title),
       el("span", { class: "mini" }, el("i", { style: "width:" + share + "%" })), el("span", { class: "tcode" }, left == null ? share + "%" : left > 5 ? mmss(left) : "almost")); });
   if (!lanes.length) lanes.push(el("div", { class: "lane" }, el("span", { class: "dotl" + (queued.length ? " t" : "") }), el("span", { class: "tcode" }, queued.length ? "Next up: " + queued[0].title : "Ready. Nothing rolling.")));
   sum.replaceChildren(...lanes);
@@ -198,15 +205,49 @@ const platName = () => {
   if (S.platform !== "spark") return "Linux";
   const label = S.platform_label || "";
   if (!label || label.startsWith("DGX SPARK")) return "DGX Spark";
-  const raw = (label.split(" · ")[1] || "").replace(/^NVIDIA\s+/, "");
+  const raw = (label.split(" · ")[1] || "").replace(/^(\d+×\s*)?NVIDIA\s+/, "$1");  // paired cards: "2× RTX PRO 5000"
   const card = raw.split(/\s+(?:BLACKWELL|ADA|AMPERE|MAX-Q|WORKSTATION)\b/)[0].trim();
   if (!card) return "DGX Spark";
   return S.gpu_index ? card + " · " + S.gpu_index : card;
 };
+// Unified vs card, from the banner machine() already wrote. Unified starts with "DGX SPARK"
+// (a GB10, and the nvidia-smi failure banner). A card is the CUDA build and starts with "CUDA · ".
+function cardFace() {
+  return !!(S && S.platform === "spark" && (S.platform_label || "").startsWith("CUDA · "));
+}
+const estimateWorkerName = r => {
+  const name = r && r.worker ? (typeof r.worker === "string" ? r.worker : r.worker.name || r.worker.address) : "";
+  return name && name.startsWith("local:") ? "local GPU" : name;
+};
+// Local-card times need a warm sample of this canvas. A selected worker supplies its own estimate.
+// Without a worker, GB10 and Mac keep their existing measured-machine labels.
+function estimateWhere(r) {
+  const seconds = r && r.seconds;
+  if (!seconds) return "";
+  if (r.worker) return "≈ " + mmss(seconds) + " on " + estimateWorkerName(r);
+  if (cardFace()) return r.where === "card" ? "≈ " + mmss(seconds) + " on this card" : "";
+  if (S && S.platform === "spark") return "≈ " + mmss(seconds) + " on a DGX Spark, models loaded";
+  return "≈ " + mmss(seconds) + " on an M5 Ultra";
+}
+// Voice, Music, and Bolt keep the GB10 identity in the data. On a card the label says where that was measured.
+function measuredLabel(label) {
+  if (!cardFace()) return label || "";
+  if (label === "TensorFold CUDA · DGX Spark") return "TensorFold CUDA · measured on a DGX Spark";
+  if (label === "ComfyUI · DGX Spark (CUDA)") return "ComfyUI · measured on a DGX Spark (CUDA)";
+  if (label === "TensorFold CUDA · DGX Spark (Mia's Bolt recipe)") return "TensorFold CUDA · measured on a DGX Spark (Mia's Bolt recipe)";
+  return label || "";
+}
+// The pool a card's meters lead with. A GB10 has no memory.card, so the RAM reading stays.
+function cardMem(t) {
+  const c = t && t.memory && t.memory.card;
+  return cardFace() && c && c.total_mb ? c : null;
+}
 function telApply(t) { SHELL.tel = t; SHELL.telAt = Date.now();
-  SHELL.samples.push({ t: Date.now(), gpu: t.gpu ? t.gpu.util_pct : null, mem: t.memory ? 100 - pct(t.memory.available_mb, t.memory.total_mb) : null, temp: t.gpu ? t.gpu.temp_c : null, power: t.gpu ? t.gpu.power_w : null });
+  const card = cardMem(t);
+  const memPct = card ? pct(card.used_mb, card.total_mb) : (t.memory ? 100 - pct(t.memory.available_mb, t.memory.total_mb) : null);
+  SHELL.samples.push({ t: Date.now(), gpu: t.gpu ? t.gpu.util_pct : null, mem: memPct, temp: t.gpu ? t.gpu.temp_c : null, power: t.gpu ? t.gpu.power_w : null });
   if (SHELL.samples.length > 300) SHELL.samples.shift();
-  const used = t.memory ? 100 - pct(t.memory.available_mb, t.memory.total_mb) : 0, gpu = t.gpu && t.gpu.util_pct != null ? t.gpu.util_pct : null;
+  const used = memPct == null ? 0 : memPct, gpu = t.gpu && t.gpu.util_pct != null ? t.gpu.util_pct : null;
   const busy = t.jobs && t.jobs.running, warn = (t.warnings || []).length;
   // the chip is green when the machine is ready and red while it rolls; a warning (a full disk) is a small amber mark
   // beside it and in the title, never the chip's own colour
@@ -214,9 +255,10 @@ function telApply(t) { SHELL.tel = t; SHELL.telAt = Date.now();
   $("#mtxt").textContent = gpu != null ? gpu + "% GPU" : t.gpu && t.gpu.vram_free_mb != null ? Math.round(t.gpu.vram_free_mb / 1024) + " GB VRAM" : t.memory ? Math.round(t.memory.available_mb / 1024) + " GB free" : "";
   const gb = mb => (mb / 1024).toFixed(mb >= 102400 ? 0 : 1);
   const say = [(S && S.platform_label) || platName(), busy ? "rolling" : "ready", "GPU " + gpuSay(t),
-    t.memory ? "memory " + gb(t.memory.total_mb - t.memory.available_mb) + " of " + gb(t.memory.total_mb) + " GB (" + used + "%)" : "",
-    // a card with memory of its own (an RTX Pro 6000): its memory, beside the machine's
-    t.memory && t.memory.card ? "card " + gb(t.memory.card.used_mb) + " of " + gb(t.memory.card.total_mb) + " GB" : "",
+    t.gpu && t.gpu.cards ? t.gpu.cards.map(c => "GPU " + c.index + " " + (c.util_pct == null ? "n/a" : c.util_pct + "%") + (c.temp_c != null ? " at " + c.temp_c + "°C" : "")).join(", ") : "",
+    card ? "memory " + gb(card.used_mb) + " of " + gb(card.total_mb) + " GB (" + used + "%)" + (card.cards ? " over " + card.cards + " cards" : "") : (t.memory ? "memory " + gb(t.memory.total_mb - t.memory.available_mb) + " of " + gb(t.memory.total_mb) + " GB (" + used + "%)" : ""),
+    // a card's memory is the memory clause above; this second clause is only where the page still leads with RAM
+    !card && t.memory && t.memory.card ? "card " + gb(t.memory.card.used_mb) + " of " + gb(t.memory.card.total_mb) + " GB" : "",
     // the Studio's Bolt brain (app/bolt.py) while it holds memory
     t.engines && t.engines.bolt && t.engines.bolt.state === "loaded" ? "Bolt brain " + (t.engines.bolt.memory_gb != null ? t.engines.bolt.memory_gb + " GB" : "loaded") : "",
     t.disk ? Math.round(t.disk.free_gb) + " GB disk free" : "",
@@ -259,10 +301,12 @@ function palActions() { const a = (ico, label, hint, run, words = "") => ({ ico,
     a("settings", "Settings", "looks, layout, presets · ⌥,", () => typeof goSettings === "function" ? goSettings("appearance") : go("Settings"), "preferences appearance type size glow poster accent"),
     a("settings", "Studio layout", "Settings · show, hide, order rooms", () => typeof goSettings === "function" ? goSettings("layout") : go("Settings"), "sidebar rooms hide show order"),
     a("settings", "Connections", "Settings · subscriptions, local models", () => typeof goSettings === "function" ? goSettings("connections") : go("Settings"), "local model ollama lm studio vllm llama hermes oauth sign in"),
+    a("apps", "Apps", "every tool as a one-click app", () => go("Apps"), "apps gallery tools swap angles lipsync upscale captions"),
+    ...(typeof appsPalette === "function" ? appsPalette(a) : []),
     a("nodes", "Nodes", "a canvas of jobs", () => go("Nodes"), "graph comfyui canvas pipeline"),
     a("previs", "Motion Previs", "Previs", () => go("Motion Previs"), "pose depth skeleton motion reference"),
     a("sound", "Record a voice line", "Sound · Fish Audio Drama 3", () => go("Voice"), "fish drama speech"),
-    a("sound", "Write a song", "Sound · MiniMax-Music3", () => go("Music"), "minimax music score"),
+    a("sound", "Write a song", "Sound · YuE2 or MiniMax-Music3", () => go("Music"), "yue2 minimax music score"),
     a("story", "Plan a film", "Story", () => go("Production"), "slate bible shots first ad"),
     a("cast", "Cast & Places", "Creative Engines · characters and locations", () => go("Cast & Places"), "bible characters cast locations places faces sheets dialogue"),
     a("director", "Director", "Creative Engines · a logline to a cut film", () => go("Director"), "direct logline whole film automatic"),
@@ -316,6 +360,11 @@ function palClose() { const p = $("#palette"); if (p) { p.remove(); releaseMedia
 // ⌥1 to ⌥9 and ⌥0: the rooms that carry a key, in the sidebar's order
 const roomForKey = d => ROOMS.find(r => r.key === d) || null;
 function shellStart() {
+  if (S && S.platform_note) {
+    const warning = $("#warnbar");
+    warning.textContent = [S.platform_note, S.ffmpeg_note].filter(Boolean).join(" ");
+    warning.classList.remove("hide");
+  }
   const up = $("#studio-updates-open"); up.replaceChildren(icon("update", "ic"), el("span", { class: "t" }, "Updates")); up.onclick = () => go("Updates");
   $("#helpbtn").innerHTML = ICON.learn; $("#baychev").innerHTML = ICON.chev;
   $("#helpbtn").onclick = () => go("Tutorial");
@@ -369,10 +418,27 @@ function takeSheet() {
 }
 // what the prompt goes to, as one small control over Create: the Image and Video rooms open it already set
 function intentBar() { const opts = { video: "Video with sound", image: "Image", edit: "Edit a picture" };
-  const marks = C.goes === "video" ? [mark("minimax"), S && S.platform === "spark" ? mark("comfy") : null, mark("tensorfold")] : [mark("qwen", "Qwen 2.1"), mark("flux")];
+  let marks = [mark("minimax"), S && S.platform === "spark" ? mark("comfy") : null, mark("tensorfold")], selected = "", backend = "";
+  if (C.goes !== "video") {
+    const editing = C.goes === "edit" && typeof edModel === "function";
+    const rows = typeof imageModels === "function" ? imageModels()
+      : S && (S.image_model_options || S.windows_runtime?.image_models || S.image_models) || [];
+    const models = rows.map(m => typeof m === "string" ? { id: m } : m);
+    if (editing || C.imageModel || models.length || typeof imageModelName === "function" || S?.windows_stills?.available) {
+      selected = editing ? edModel() : C.imageModel || (typeof imageModel === "function" && typeof imageModelName === "function" ? imageModel()
+        : models.find(m => m.available !== false)?.id || S?.windows_stills?.model || "qwen");
+      const model = { ...models.find(m => m.id === selected),
+        ...(editing && typeof edModels === "function" ? edModels().find(m => m.id === selected) : {}) };
+      const label = model.label || model.title || (!editing && typeof imageModelName === "function" ? imageModelName(selected)
+        : selected === "sd-turbo" ? "SD-Turbo" : selected === "qwen" ? "Qwen 2.1" : selected);
+      backend = model.backend || (selected === "sd-turbo" ? "bounded" : "");
+      marks = [/^(qwen|flux)/.test(selected) ? mark(/^flux/.test(selected) ? "flux" : "qwen", label) : el("span", {}, label),
+        backend ? el("span", { class: "tag2" }, backend + " backend") : null];
+    } else marks = [mark("qwen", "Qwen 2.1"), mark("flux")];
+  }
   return el("div", { class: "createbar" }, el("span", { class: "eyebrow" }, "The prompt goes to"),
     el("div", { class: "seg-ctl", role: "tablist", "aria-label": "The prompt goes to" }, Object.entries(opts).map(([k, label]) => el("button", { type: "button", role: "tab", "aria-selected": C.goes === k ? "true" : "false", class: C.goes === k ? "on" : "",
       onclick: () => { if (C.goes === k) return; C.goes = k; C.step = 0; changed(); } }, label))),
-    el("div", { class: "marks" }, marks)); }
+    el("div", { class: "marks", ...(selected ? { "data-image-model": selected, "data-image-backend": backend || false } : {}) }, marks)); }
 function createLayout(node) { const bar = intentBar(); if (C.goes === "edit") return el("div", {}, bar, node);
   return el("div", {}, bar, el("div", { class: "split", style: "grid-template-columns:minmax(0,1fr) 330px" }, node, takeSheet())); }

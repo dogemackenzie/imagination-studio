@@ -11,12 +11,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 FILES = ["shell.js", "captions.js", "home.js", "engines.js", "machine.js", "agent.js", "suite.js", "suitelinks.js", "updates.js", "settings.js", "sound.js",
-         "slate.js", "director.js", "nightshift.js", "looks.js", "train.js", "finish.js", "graphics.js", "roughcut.js", "rooms.js"]
+         "slate.js", "director.js", "nightshift.js", "looks.js", "train.js", "finish.js", "graphics.js", "roughcut.js", "rooms.js", "quick.js"]
 HARNESS = r"""
 const vm = require("vm"), fs = require("fs");
 globalThis.S = { platform: "spark", platform_label: "DGX SPARK · NVIDIA GB10 · H3-CUDA", presets: { small: { size: [864, 480] }, p720: { size: [1280, 720] }, sharp: { size: [1376, 768] } },
   sharp: { seed: 42, seconds: [8, 10], quality: "fh8" }, long: { 30: "30 s" }, ref2va: true, ref_media: true, reference_total: 12, sparks: { supported: true } };
-globalThis.TABS = ["Home", "Story", "Image", "Video", "Previs", "Sound", "Edit", "Create", "Production", "Import", "Motion Previs", "Agent", "Voice", "Music", "Foley", "Editor", "Graphics", "Finish", "Cast & Places", "Director", "Motion graphics", "Night shift", "Library", "Looks", "Machine", "Sparks", "Brains", "Updates", "Tutorial", "Nodes", "Settings"];
+globalThis.TABS = ["Home", "Story", "Image", "Video", "Previs", "Sound", "Edit", "Create", "Quick Edit", "Production", "Import", "Motion Previs", "Agent", "Voice", "Music", "Foley", "Editor", "Graphics", "Finish", "Cast & Places", "Director", "Motion graphics", "Night shift", "Library", "Looks", "Machine", "Sparks", "Brains", "Updates", "Tutorial", "Nodes", "Settings"];
 globalThis.tab = "Home"; globalThis.renders = 0; globalThis.render = () => { renders++; };
 globalThis.toasts = []; globalThis.toast = t => toasts.push(String(t));
 globalThis.calls = []; globalThis.answers = {};
@@ -32,6 +32,7 @@ globalThis.sharpOn = () => false; globalThis.sharpCreate = () => { C.res = "shar
 globalThis.lorasOf = () => []; globalThis.refCount = () => 0; globalThis.framesOf = () => 124; globalThis.exact = f => f + " frames"; globalThis.showEstimate = () => {};
 globalThis.mmss = s => Math.round(s) + " s"; globalThis.count = (n, w) => n + " " + w + (n === 1 ? "" : "s"); globalThis.file = p => "/files/" + p;
 globalThis.media = p => el("img", { src: p }); globalThis.addToTimeline = () => {}; globalThis.ensureProject = async () => project; globalThis.imageModel = () => "qwen";
+globalThis.stillParams = params => params;
 globalThis.bayOpenCalls = 0;
 const text = node => node == null || node === false ? "" : typeof node !== "object" ? String(node) : Array.isArray(node) ? node.map(text).join(" ") : [node.attrs && node.attrs.placeholder, node.attrs && node.attrs.title, text(node.kids)].filter(Boolean).join(" ");
 globalThis.text = text;
@@ -66,14 +67,79 @@ def run(code: str) -> dict:
     return json.loads(done.stdout.strip().splitlines()[-1])
 
 
+def test_the_memory_guard_fold_refuses_on_a_card_and_still_stops_a_spark():
+    out = run("""document.createElementNS = () => ({ setAttribute() {}, append() {}, style: {} });
+      answers["/api/storage"] = { buckets: [], free_gb: 10, total_gb: 20, used_pct: 50, computing: false };
+      answers["/api/telemetry/history"] = { samples: [] };
+      S.platform = "spark"; S.platform_label = "CUDA · NVIDIA RTX PRO 6000 BLACKWELL MAX-Q · H3-CUDA";
+      out.card = text(viewMachine());
+      S.platform_label = "DGX SPARK · NVIDIA GB10 · H3-CUDA"; out.spark = text(viewMachine());
+      S.platform = "mac"; S.platform_label = "MAC · APPLE SILICON MX · H3-METAL"; out.mac = text(viewMachine());""")
+    assert "refuses a clip that would leave the GPU under its floor" in out["card"]
+    assert "stops the renderer" not in out["card"]
+    for face in ("spark", "mac"):
+        assert "stops the renderer if memory falls under its floor" in out[face]
+        assert "leave the GPU" not in out[face]
+
+
 def test_the_chip_names_the_card_and_a_spark_stays_a_spark():
-    out = run("""out.spark = platName();
+    out = run("""out.spark = platName(); out.sparkCard = cardFace();
+      S.platform_label = "DGX SPARK · CUDA · H3-CUDA";
+      out.failed = platName(); out.failedCard = cardFace();
       S.platform_label = "CUDA · NVIDIA RTX PRO 6000 BLACKWELL MAX-Q WORKSTATION EDITION · H3-CUDA"; S.gpu_index = "1";
-      out.rtx = platName(); delete S.gpu_index; out.rtxBare = platName();
-      S.platform = "mac"; S.platform_label = "MAC · APPLE SILICON MX · H3-METAL"; out.mac = platName();""")
-    assert out["spark"] == "DGX Spark"
-    assert out["rtx"] == "RTX PRO 6000 · 1" and out["rtxBare"] == "RTX PRO 6000"
-    assert out["mac"] == "Mac"
+      out.rtx = platName(); out.rtxCard = cardFace(); delete S.gpu_index; out.rtxBare = platName(); out.rtxBareCard = cardFace();
+      S.platform = "mac"; S.platform_label = "MAC · APPLE SILICON MX · H3-METAL"; out.mac = platName(); out.macCard = cardFace();""")
+    assert out["spark"] == "DGX Spark" and out["sparkCard"] is False
+    assert out["failed"] == "DGX Spark" and out["failedCard"] is False
+    assert out["rtx"] == "RTX PRO 6000 · 1" and out["rtxCard"] is True
+    assert out["rtxBare"] == "RTX PRO 6000" and out["rtxBareCard"] is True
+    assert out["mac"] == "Mac" and out["macCard"] is False
+
+
+def test_a_card_shows_no_video_number_until_that_canvas_is_sampled():
+    """A GB10 label keeps the Spark suffix. A card shows a number only when the answer is that canvas's own sample."""
+
+    out = run("""out.sparkLine = estimateWhere({ seconds: 73 });
+      out.sparkVoice = measuredLabel("TensorFold CUDA · DGX Spark");
+      out.sparkMusic = measuredLabel("ComfyUI · DGX Spark (CUDA)");
+      S.platform_label = "DGX SPARK · CUDA · H3-CUDA";
+      out.failedLine = estimateWhere({ seconds: 73 });
+      S.platform_label = "CUDA · NVIDIA RTX PRO 6000 BLACKWELL MAX-Q WORKSTATION EDITION · H3-CUDA";
+      out.cardBlank = estimateWhere({ seconds: 420 });
+      out.cardSample = estimateWhere({ seconds: 40, where: "card" });
+      out.cardNone = estimateWhere({ seconds: null });
+      out.cardVoice = measuredLabel("TensorFold CUDA · DGX Spark");
+      out.cardMusic = measuredLabel("ComfyUI · DGX Spark (CUDA)");
+      out.cardBolt = measuredLabel("TensorFold CUDA · DGX Spark (Mia's Bolt recipe)");
+      S.platform = "mac"; S.platform_label = "MAC · APPLE SILICON MX · H3-METAL";
+      out.macLine = estimateWhere({ seconds: 64 });
+      out.macVoice = measuredLabel("Metal · Apple Silicon");
+      S.platform = "spark"; S.platform_label = "CUDA · NVIDIA RTX PRO 6000 · H3-CUDA";
+      answers["/api/estimate"] = { seconds: 420 };
+      HC.recipe = "quick"; HC.seconds = 5; HC.est = {};
+      hcEstimate(); await new Promise(r => setTimeout(r, 20));
+      out.homeHidden = HC.est["small|fh4|5"];
+      answers["/api/estimate"] = { seconds: 40, where: "card" };
+      delete HC.est["small|fh4|5"];
+      hcEstimate(); await new Promise(r => setTimeout(r, 20));
+      out.homeSample = HC.est["small|fh4|5"];
+      S.platform_label = "DGX SPARK · NVIDIA GB10 · H3-CUDA";
+      answers["/api/estimate"] = { seconds: 73 };
+      delete HC.est["small|fh4|5"];
+      hcEstimate(); await new Promise(r => setTimeout(r, 20));
+      out.homeSpark = HC.est["small|fh4|5"];""")
+    assert out["sparkLine"] == "≈ 73 s on a DGX Spark, models loaded"
+    assert out["failedLine"] == "≈ 73 s on a DGX Spark, models loaded"
+    assert out["cardBlank"] == "" and out["cardNone"] == ""
+    assert out["cardSample"] == "≈ 40 s on this card"
+    assert out["macLine"] == "≈ 64 s on an M5 Ultra"
+    assert out["sparkVoice"] == "TensorFold CUDA · DGX Spark"
+    assert out["sparkMusic"] == "ComfyUI · DGX Spark (CUDA)"
+    assert out["cardVoice"] == "TensorFold CUDA · measured on a DGX Spark"
+    assert out["cardMusic"] == "ComfyUI · measured on a DGX Spark (CUDA)"
+    assert out["cardBolt"] == "TensorFold CUDA · measured on a DGX Spark (Mia's Bolt recipe)"
+    assert out["macVoice"] == "Metal · Apple Silicon"
+    assert out["homeHidden"] is None and out["homeSample"] == 40 and out["homeSpark"] == 73
 
 
 def test_every_tab_has_one_room_and_old_links_still_work():
@@ -82,13 +148,13 @@ def test_every_tab_has_one_room_and_old_links_still_work():
       go("Voice"); out.voice = tab; goRoom("edit"); out.edit = tab; goRoom("library"); out.lib = tab; go("Nowhere"); out.still = tab; out.names = TABS.map(t => TAB_NAMES[t] || "");
       C.goes = "video"; out.createVideo = roomOf("Create").id; C.goes = "edit"; out.createEdit = roomOf("Create").id; C.goes = "image"; out.createImage = roomOf("Create").id;
       out.keys = ROOMS.map(r => r.key);""")
-    assert out["rooms"] == ["Video", "Image", "Sound", "Story", "Cast & Places", "Director", "Previs", "Motion graphics", "Edit", "Night shift", "Agent", "Library", "Looks", "Wasserman's Filmmaker Suite", "Nodes", "Machine", "Learn", "Settings"]
-    assert out["groups"] == ["Creative Engines:Video,Image,Sound,Story,Cast & Places,Director,Previs,Motion graphics,Edit,Night shift", ":Agent", "Studio Vaults:Library,Looks,Wasserman's Filmmaker Suite,Nodes,Machine,Learn,Settings"]
+    assert out["rooms"] == ["Apps", "Video", "Image", "Sound", "Story", "Cast & Places", "Director", "Previs", "Motion graphics", "Edit", "Night shift", "Agent", "Library", "Looks", "Wasserman's Filmmaker Suite", "Nodes", "Machine", "Learn", "Settings"]
+    assert out["groups"] == [":Apps", "Creative Engines:Video,Image,Sound,Story,Cast & Places,Director,Previs,Motion graphics,Edit,Night shift", ":Agent", "Studio Vaults:Library,Looks,Wasserman's Filmmaker Suite,Nodes,Machine,Learn,Settings"]
     assert out["homeless"] == ["Home", "Create"]  # home sits outside the rooms; Create is in Image and in Video
     assert (out["createVideo"], out["createEdit"], out["createImage"]) == ("video", "image", "image")
     assert out["voice"] == "Voice" and out["edit"] == "Edit" and out["lib"] == "Library" and out["still"] == "Library"
     assert all(out["names"])
-    assert out["keys"] == ["1", "2", "3", "4", "", "", "5", "", "6", "", "", "7", "8", "9", "", "0", "", ","]  # ⌥1 to ⌥9, ⌥0 and ⌥, for Settings
+    assert out["keys"] == ["", "1", "2", "3", "4", "", "", "5", "", "6", "", "", "7", "8", "9", "", "0", "", ","]  # ⌥1 to ⌥9, ⌥0 and ⌥, for Settings
 
 
 def test_the_sidebar_shows_both_groups_and_marks_the_room():
@@ -109,7 +175,7 @@ def test_each_engine_opens_on_a_landing_whose_cards_open_the_views():
     out = run("""const landings = { Story: viewStory, Image: viewImage, Video: viewVideo, Previs: viewPrevis, Sound: viewSound, Edit: viewEditHub };
       out.pages = Object.fromEntries(Object.entries(landings).map(([k, f]) => [k, text(f())]));
       const click = (f, words) => { const b = button(f(), words); b.attrs.onclick(); return [tab, C.goes, C.start]; };
-      out.still = click(viewImage, "A still"); out.edit = click(viewImage, "Edit a picture"); out.clip = click(viewVideo, "A clip with sound");
+      out.still = click(viewImage, "A still"); out.edit = click(viewImage, "Edit a picture"); out.quick = click(viewImage, "Quick Edit")[0]; out.clip = click(viewVideo, "A clip with sound");
       out.refs = click(viewVideo, "References"); out.voice = click(viewSound, "A voice line")[0]; out.song = click(viewSound, "A song")[0];
       out.motion = click(viewPrevis, "Motion Previs")[0]; out.timeline = click(viewEditHub, "Timeline")[0];
       button(viewStory(), "Wasserman Slate").attrs.onclick(); out.slate = [tab, SL.mode];
@@ -121,10 +187,34 @@ def test_each_engine_opens_on_a_landing_whose_cards_open_the_views():
     assert "Fish Audio Drama 3" in out["pages"]["Sound"] and "MiniMax-Music3" in out["pages"]["Sound"]
     assert out["still"] == ["Create", "image", "text"] and out["edit"][:2] == ["Create", "edit"] and out["clip"] == ["Create", "video", "text"]
     assert out["refs"] == ["Create", "video", "refs"]
+    assert out["quick"] == "Quick Edit"  # the Image room's one-box edit (quick.js)
     assert (out["voice"], out["song"], out["motion"], out["timeline"]) == ("Voice", "Music", "Motion Previs", "Editor")
     assert out["slate"] == ["Production", "slate"] and out["board"] == ["Production", "board"]
     assert [out["land_" + k] for k in ("story", "image", "video", "previs", "sound", "edit")] == ["Story", "Image", "Video", "Previs", "Sound", "Edit"]
     assert out["art"] == "slot" and not out["img"]  # no art is ready in the manifest: a plain panel, never a broken image
+
+
+def test_the_composer_offers_flux_and_yue_only_where_they_are_installed():
+    out = run("""const chips = () => homeComposer().kids[0].kids.map(n => n.attrs["data-mode"]);
+      const logos = () => homeComposer().kids[0].kids.map(n => find(n, k => k.tag === "img").attrs.src);
+      out.bare = chips();
+      S.image_models = [{ id: "qwen", label: "Qwen 2.1 Turbo" }, { id: "flux3k-fast", label: "FLUX3-K Fast" }, { id: "flux3k-full", label: "FLUX3-K Full" }];
+      S.music = { available: true, engine: "yue2", engines: { yue2: { installed: true, available: true }, music3: { available: true } } };
+      out.chips = chips(); out.logos = logos(); out.words = text(homeComposer().kids[0]);
+      out.flux = (await hcRequest("flux", "a lens", 1))[1].params.image_model;
+      out.qwen = (await hcRequest("picture", "a lens", 1))[1].params.image_model;
+      out.yue = (await hcRequest("yue", "slow blues", 1))[1].engine;
+      out.music3 = (await hcRequest("song", "[Verse] words", 1))[1].engine;
+      HC.mode = "flux"; hcMore(); out.more = [tab, C.goes, C.imageModel];
+      globalThis.MU = {}; HC.mode = "yue"; hcMore(); out.moreSong = [tab, MU.engine];
+      HC.mode = null; S.music.engines.music3.available = false; out.onlyYue = chips();""")
+    assert out["bare"] == ["clip", "picture", "voice", "song"]
+    assert out["chips"] == ["clip", "picture", "flux", "voice", "song", "yue"]
+    assert "brand/bfl-white.svg" in out["logos"] and "brand/yue.png" in out["logos"]
+    assert "FLUX3 Klein" in out["words"] and "YuE2" in out["words"] and "Music 3" in out["words"]
+    assert (out["flux"], out["qwen"], out["yue"], out["music3"]) == ("flux3k-fast", "qwen", "yue2", "music3")
+    assert out["more"] == ["Create", "image", "flux3k-fast"] and out["moreSong"] == ["Music", "yue2"]
+    assert "song" not in out["onlyYue"] and "yue" in out["onlyYue"]
 
 
 def test_create_carries_what_the_prompt_goes_to_as_one_small_control():
@@ -133,6 +223,52 @@ def test_create_carries_what_the_prompt_goes_to_as_one_small_control():
       button(bar, "Video with sound").attrs.onclick(); out.goes = [C.goes, C.step];""")
     assert "The prompt goes to" in out["bar"] and "Qwen 2.1" in out["bar"] and "FLUX3-K" in out["bar"]
     assert out["on"] == ["Image"] and out["goes"] == ["video", 0]
+
+
+def test_create_branding_follows_selected_model_and_backend_without_borrowed_logos():
+    out = run("""
+      S.platform = "windows"; C.goes = "image";
+      S.image_models = ["sd-turbo", "qwen", "flux3k-full", "moss-image"];
+      S.image_model_options = [
+        {id:"sd-turbo",label:"SD-Turbo storyboard drafts",backend:"bounded",available:true},
+        {id:"qwen",label:"Qwen-Image 2.1 Turbo",backend:"native",available:true},
+        {id:"flux3k-full",title:"FLUX3-K Full",backend:"native",available:false},
+        {id:"moss-image",label:"MOSS-Image",backend:"native",available:true}];
+      const snapshot = () => { const bar = intentBar(), marks = find(bar,n=>n.attrs?.class==="marks"), logos=[];
+        find(marks,n=>{if(n.tag==="img") logos.push(n.attrs.src);return false;});
+        return {text:text(marks),model:marks.attrs["data-image-model"],backend:marks.attrs["data-image-backend"],
+          logos};
+      };
+      out.models = {};
+      for (const id of S.image_models) { C.imageModel=id; out.models[id]=snapshot(); }
+      delete S.image_model_options;
+      S.image_models=[{id:"qwen",label:"Legacy Qwen label"},{id:"flux3k-full",label:"Legacy FLUX label"}];
+      C.imageModel="flux3k-full"; out.legacy=snapshot();
+      delete S.image_models; S.windows_stills={available:true,model:"sd-turbo"};
+      C.imageModel=""; out.oldDraft=snapshot();
+      C.imageModel="qwen-full"; out.missing=snapshot();
+      S.windows_runtime={image_models:[{id:"moss-image",label:"MOSS runtime label",backend:"native",available:true}]};
+      C.imageModel="moss-image"; out.alias=snapshot();
+      globalThis.edModel=()=>"flux3k-full";
+      globalThis.edModels=()=>[{id:"flux3k-full",label:"FLUX3-K Full edit",backend:"native"}];
+      C.goes="edit"; C.imageModel="sd-turbo"; out.edit=snapshot();
+      C.goes="video"; out.video=text(intentBar()); out.calls=calls;
+    """)
+    draft = out["models"]["sd-turbo"]
+    assert draft["model"] == "sd-turbo" and draft["backend"] == "bounded" and draft["logos"] == []
+    assert "SD-Turbo storyboard drafts" in draft["text"] and "bounded backend" in draft["text"]
+    assert "Qwen" not in draft["text"] and "FLUX" not in draft["text"]
+    assert out["models"]["qwen"]["logos"] == ["brand/qwen.svg"]
+    assert "Qwen-Image 2.1 Turbo" in out["models"]["qwen"]["text"] and "native backend" in out["models"]["qwen"]["text"]
+    assert out["models"]["flux3k-full"]["logos"] == ["brand/bfl-white.svg"]
+    assert "FLUX3-K Full" in out["models"]["flux3k-full"]["text"]
+    assert out["models"]["moss-image"]["logos"] == [] and "MOSS-Image" in out["models"]["moss-image"]["text"]
+    assert out["legacy"]["model"] == "flux3k-full" and "Legacy FLUX label" in out["legacy"]["text"]
+    assert out["oldDraft"]["model"] == "sd-turbo" and out["oldDraft"]["logos"] == []
+    assert out["missing"]["model"] == "qwen-full" and "qwen-full" in out["missing"]["text"]
+    assert out["alias"]["model"] == "moss-image" and "MOSS runtime label" in out["alias"]["text"]
+    assert out["edit"]["model"] == "flux3k-full" and "FLUX3-K Full edit" in out["edit"]["text"]
+    assert "MiniMax H3" in out["video"] and out["calls"] == []
 
 
 def test_the_updates_panel_shows_the_followed_branch_and_the_latest_release():
@@ -478,6 +614,49 @@ def test_connect_ticks_find_signin_verify_and_default_by_itself():
     assert out["s2"] == {"find": "done", "signin": "done", "verify": "done", "default": "done"} and "Answered “ok” in 2.1 s" in out["done"] and "is ready" in out["done"]
 
 
+def test_copilot_terminal_login_can_be_checked_while_auth_status_is_unknown():
+    out = run(CONNECT + """
+      const b = { id: "copilot", label: "GitHub Copilot CLI", kind: "cli", found: true, where: "here",
+        signin_flow: "terminal", signin_command: "copilot login" };
+      BR.data = { default: "local", settings: {}, backends: [b] }; BR.tools = { tools: [] };
+      answers["/api/brains/copilot/connect"] = base("copilot", { signin: { state: "unknown" }, default_ready: true });
+      await connectStart(b); await settle();
+      out.word = brainWord(b)[0]; out.initial = steps("copilot"); out.instructions = text(panel("copilot"));
+      out.automaticChecks = calls.filter(c => c[0] === "/api/brains/copilot/verify").length;
+      answers["/api/brains/copilot/verify"] = { ok: true, text: "ok", elapsedMs: 120 };
+      await button(panel("copilot"), "Check").attrs.onclick();
+      out.checked = CN.data.copilot.verify.ok;
+      answers["/api/brains/copilot/connect"] = base("copilot", { signin: { state: "signed_in" },
+        verify: CN.data.copilot.verify, default_ready: true });
+      await cnLoad("copilot");
+      out.finished = steps("copilot"); out.readyWord = brainWord(b)[0];
+      out.signinRequests = calls.filter(c => c[0] === "/api/brains/copilot/signin").length;
+    """)
+    assert out["word"] == "Not checked" and out["initial"]["verify"] == "wait"
+    assert "If you already signed in, press Check" in out["instructions"]
+    assert out["automaticChecks"] == 0 and out["signinRequests"] == 0
+    assert out["checked"] and out["readyWord"] == "Ready"
+    assert out["finished"]["signin"] == out["finished"]["verify"] == "done"
+
+
+def test_copilot_failed_login_offers_check_after_terminal_login_not_an_app_signin():
+    out = run(CONNECT + """
+      const b = { id: "copilot", label: "GitHub Copilot CLI", kind: "cli", found: true, where: "here",
+        signin_flow: "terminal", signin_command: "copilot login" };
+      BR.data = { default: "local", settings: {}, backends: [b] }; BR.tools = { tools: [] };
+      CN.open = "copilot"; CN.data.copilot = base("copilot", { signin: { state: "unknown" },
+        verify: { ok: false, error: "Run copilot login, then Check again.", fix: { action: "signin", label: "Sign in again" } } });
+      answers["/api/brains/copilot/verify"] = { ok: false, error: "Still not signed in." };
+      await button(panel("copilot"), "Check again after copilot login").attrs.onclick();
+      out.verify = calls.some(c => c[0] === "/api/brains/copilot/verify");
+      out.signin = calls.some(c => c[0] === "/api/brains/copilot/signin");
+      CN.data.copilot = base("copilot", { find: { found: false }, signin: { state: "unknown" } });
+      out.missingCheck = !!button(panel("copilot"), "Check");
+    """)
+    assert out["verify"] and not out["signin"]
+    assert not out["missingCheck"]
+
+
 def test_connect_installs_a_missing_cli_shows_a_device_code_and_the_fix_for_a_failed_answer():
     out = run(CONNECT + """
       const b = { id: "codex", label: "Codex", kind: "cli", found: false, where: "ssh:mac", signin_flow: "pty" };
@@ -564,6 +743,72 @@ def test_home_and_the_agent_room_offer_connect_until_an_agent_is_signed_in():
     assert "Connect your agent" in out["home"] and out["primary"].endswith("Connect Codex")  # the one that is installed first
     assert out["went"][:3] == ["Home", "codex", "codex"] and out["went"][3] == 1  # Connect opens over the page: nothing to go and find
     assert out["room"] and out["dismissed"] and out["roomStill"] and out["gone"]
+
+
+def test_selected_copilot_is_not_asked_to_reconnect_after_server_restart():
+    out = run(CONNECT + """
+      const copilot = { id: "copilot", label: "GitHub Copilot CLI", kind: "cli", found: true, where: "here", signin_flow: "terminal" };
+      BR.data = { default: "copilot", settings: { agent: "copilot" }, backends: [copilot] };
+      BR.status = { copilot: { state: "unknown" } };
+      out.home = connectNudge("home"); out.agent = connectNudge("agent");
+      out.verifications = calls.filter(c => /\\/verify$/.test(c[0])).length;
+      out.word = brainWord(copilot)[0];
+      BR.data.default = "claude"; BR.data.settings.agent = "claude";
+      const card = connectNudge("home");
+      out.unselected = text(card); out.primary = text(find(card, n => n.tag === "button" && n.attrs.class === "primary"));
+      BR.data.default = "copilot"; BR.data.settings.agent = "copilot";
+      BR.status.copilot = { state: "signed_out" };
+      out.signedOut = text(connectNudge("home"));
+      BR.status.copilot = { state: "broken" };
+      out.broken = !!connectNudge("home");""")
+    assert out["home"] is None and out["agent"] is None
+    assert out["verifications"] == 0 and out["word"] == "Not checked"
+    assert "Check your agent" in out["unselected"] and "terminal sign-in separately" in out["unselected"]
+    assert out["primary"].endswith("Check GitHub Copilot CLI")
+    assert "Connect your agent" in out["signedOut"] and out["broken"]
+
+
+def test_windows_home_and_engine_cards_honor_the_qualified_capabilities():
+    out = run("""
+      S.platform = "windows"; S.capabilities = { scout: { available: true }, sfx: { available: true }, graphics: { available: true },
+        video: { available: false, why: "Video not qualified on Windows" }, edit: { available: false, why: "Picture edits not qualified" } };
+      HC.mode = "clip"; out.mode = hcMode(); out.cards = STARTS().map(c => [c.id, !!c.off]);
+      out.blocked = 0; try { await hcRequest("clip", "A test", 0); } catch (e) { out.blocked = e.message; }
+      out.sent = calls.length;
+      out.video = text(viewVideo()); out.videoButton = !!find(viewVideo(), n => n.tag === "button" && n.attrs.class === "primary").attrs.disabled;
+      out.image = text(viewImage()); out.sound = text(viewSound());
+      const description = capButton({ path: "uploads/test.png", kind: "image" });
+      CAP.map = {}; out.descriptionDisabled = !!capButton({ path: "uploads/test.png", kind: "image" }).attrs.disabled;
+      S.platform = "mac"; HC.mode = "clip"; out.mac = hcMode(); out.macImage = text(viewImage());""")
+    assert out["mode"] == "picture" and out["blocked"] == "Video not qualified on Windows" and out["sent"] == 0
+    cards = dict(out["cards"])
+    assert cards["clip"] and cards["voice"] and cards["song"]
+    assert not any(cards[c] for c in ("still", "sfx", "graphics", "film", "script", "agent"))
+    assert out["videoButton"] and "Video not qualified" in out["video"]
+    assert "512" in out["image"] and "Qwen 2.1 or" not in out["image"]
+    assert "Stable Audio Open" in out["sound"] and "Each backend has its own recipe" in out["sound"]
+    assert out["descriptionDisabled"]
+    assert out["mac"] == "clip" and "Qwen 2.1" in out["macImage"]
+
+
+def test_upstream_flux_and_yue_chips_cannot_bypass_windows_limits():
+    out = run("""
+      S.platform = "windows";
+      S.image_models = [{ id: "sd-turbo", label: "SD-Turbo" }];
+      S.capabilities = { scout: { available: true }, flux: { available: false, why: "FLUX is unqualified" },
+        music: { available: false, why: "Music is unqualified" } };
+      S.music = { available: false, engine: "yue2", engines: { yue2: { installed: true, available: true }, music3: { available: false } } };
+      HC.mode = "yue"; out.mode = hcMode(); out.model = hcPictureModel();
+      const chips = homeComposer().kids[0].kids;
+      out.fluxHidden = !chips.some(n => n.attrs["data-mode"] === "flux");
+      out.yueDisabled = chips.find(n => n.attrs["data-mode"] === "yue").attrs.disabled;
+      out.errors = [];
+      for (const mode of ["flux", "yue"]) { try { await hcRequest(mode, "A test", 0); } catch (e) { out.errors.push(e.message); } }
+      out.requests = calls.length;
+    """)
+    assert out["mode"] == "picture" and out["model"] == "sd-turbo"
+    assert out["fluxHidden"] and out["yueDisabled"]
+    assert out["errors"] == ["FLUX is unqualified", "Music is unqualified"] and out["requests"] == 0
 
 
 def test_the_connect_card_offers_the_local_brain_and_hermes_asks_which_account():
@@ -767,6 +1012,7 @@ def test_each_search_result_can_be_ticked_on_its_own():
 def test_the_pages_inline_script_and_every_module_parse(tmp_path):
     """index.html's own script and every static module must parse: a merge that leaves a stray line blanks the whole page."""
     import re
+    need_node()
     html = (ROOT / "app/static/index.html").read_text()
     scripts = [m.group(1) for m in re.finditer(r"<script(?![^>]*src=)[^>]*>(.*?)</script>", html, re.S)]
     assert scripts, "index.html has inline scripts"
@@ -903,3 +1149,106 @@ def test_the_palette_and_the_more_sheet_name_every_new_room():
     for words in ("Creative Engines", "Cast & Places", "Director", "Motion graphics", "Night shift", "Studio Vaults"):
         assert words in out["sheet"], words
     assert out["fromSheet"] == "Night shift"
+
+
+def test_selected_worker_estimates_bypass_only_the_heads_card_sample_filter():
+    out = run("""S.platform_label = "CUDA · NVIDIA synthetic GPU · H3-CUDA";
+      const worker = { address: "worker@example.invalid", name: "Selected Spark" };
+      out.selected = estimateWhere({ seconds: 73, worker });
+      out.noSample = estimateWhere({ seconds: 73 });
+      answers["/api/estimate"] = { seconds: 73, worker, memory: { fits: true } };
+      HC.est = {}; HC.estInfo = {}; HC.seconds = 5; HC.recipe = "quick";
+      hcEstimate(); await new Promise(r => setTimeout(r, 20));
+      out.home = text(hcLength()); out.body = calls.find(c => c[0] === "/api/estimate")[1];
+      answers["/api/estimate"] = { worker, seconds: null, memory: { fits: false, reason: "Selected GPU needs more free VRAM" } };
+      HC.est = {}; HC.estInfo = {}; hcEstimate(); await new Promise(r => setTimeout(r, 20));
+      out.refused = text(hcLength());""")
+    assert out["selected"] == "≈ 73 s on Selected Spark" and out["noSample"] == ""
+    assert "about 73 s on Selected Spark" in out["home"]
+    assert out["body"]["kind"] == "video" and "placement" not in out["body"]
+    assert "Selected GPU needs more free VRAM" in out["refused"] and "Selected Spark" in out["refused"]
+
+
+def test_home_estimates_follow_saved_video_placement_but_long_jobs_identify_their_kind():
+    out = run("""globalThis.SPK = { data: { placement: { worker: "head", policy: "require" } } };
+      HC.est = {}; HC.estInfo = {}; HC.seconds = 5; HC.recipe = "quick"; calls.length = 0;
+      answers["/api/estimate"] = { seconds: 12, worker: { address: "head", name: "Head GPU" } };
+      hcEstimate(); await new Promise(r => setTimeout(r, 20)); out.first = text(hcLength());
+      SPK.data.placement = { worker: "worker@example.invalid", policy: "require" };
+      answers["/api/estimate"] = { seconds: 24, worker: { address: "worker@example.invalid", name: "Video worker" } };
+      hcEstimate(); await new Promise(r => setTimeout(r, 20)); out.second = text(hcLength());
+      HC.seconds = 30; hcEstimate(); await new Promise(r => setTimeout(r, 20));
+      out.requests = calls.filter(c => c[0] === "/api/estimate").map(c => c[1]);""")
+    assert "12 s on Head GPU" in out["first"] and "24 s on Video worker" in out["second"]
+    assert [body["kind"] for body in out["requests"]] == ["video", "video", "long"]
+    assert all("placement" not in body for body in out["requests"])
+
+
+def test_create_estimate_uses_actual_kind_and_preserves_worker_memory_refusals():
+    source = (ROOT / "app/static/index.html").read_text()
+    start = source.index("async function showEstimate(")
+    function = source[start:source.index("\n\n", start)]
+    out = run(function + r"""
+      globalThis.lengthOf = obj => ({ seconds: Number(obj.seconds) }); globalThis.noFrame = () => true;
+      globalThis.refMedia = () => false; globalThis.isLong = () => Number(C.seconds) > 15;
+      C.preset = "small"; C.quality = "fh4"; C.seconds = 5;
+      S.platform_label = "CUDA · NVIDIA synthetic GPU · H3-CUDA";
+      const worker = { address: "worker@example.invalid", name: "Video worker" };
+      answers["/api/estimate"] = { seconds: 22, worker, memory: { fits: true, need_mb: 16000 } };
+      const first = el("div"); await showEstimate(C, first); out.time = first.textContent; out.memory = text(first);
+      answers["/api/estimate"] = { seconds: null, worker, memory: { fits: false, reason: "Worker VRAM is full" } };
+      const refused = el("div"); await showEstimate(C, refused); out.refused = text(refused);
+      C.seconds = 30; await showEstimate(C, el("div")); out.kinds = calls.filter(c => c[0] === "/api/estimate").map(c => c[1].kind);""")
+    assert out["time"] == "≈ 22 s on Video worker"
+    assert "16 GB of Video worker's available memory" in out["memory"] and "this GPU's memory" not in out["memory"]
+    assert "Worker VRAM is full" in out["refused"] and "memory on Video worker" in out["refused"]
+    assert out["kinds"] == ["video", "video", "long"]
+
+
+def test_home_memory_refusal_clears_when_preferred_worker_is_ready_without_telemetry_refetch_storms():
+    out = run("""globalThis.SPK = { data: {
+        placement: { worker: "worker@example.invalid", policy: "prefer" },
+        this: { state: "ready", memory_gb: 8, guard: true },
+        workers: [{ address: "worker@example.invalid", state: "busy", working: "job-old", enabled: true, usable: false, memory_gb: 40, guard: true }],
+        local_gpus: { devices: [{ id: "local:GPU-00000000-0000-0000-0000-000000000001", free_mb: 8000, temp_c: 40, util_pct: 0, power_w: 30, reason: "" }] }
+      } };
+      HC.seconds = 5; HC.recipe = "quick"; HC.est = {}; calls.length = 0;
+      answers["/api/estimate"] = { memory: { fits: false, reason: "Head cannot fit while preferred worker is busy" } };
+      hcLength(); await new Promise(r => setTimeout(r, 20)); out.before = text(hcLength());
+      const gpu = SPK.data.local_gpus.devices[0]; gpu.temp_c = 80; gpu.util_pct = 95; gpu.power_w = 250;
+      for (let i = 0; i < 10; i++) hcLength();
+      out.telemetryRequests = calls.filter(c => c[0] === "/api/estimate").length;
+      const worker = SPK.data.workers[0]; worker.state = "ready"; worker.working = ""; worker.usable = true;
+      answers["/api/estimate"] = { seconds: 34, worker: { address: worker.address, name: "Preferred GPU" }, memory: { fits: true } };
+      out.refreshing = text(hcLength()); for (let i = 0; i < 10; i++) hcLength();
+      await new Promise(r => setTimeout(r, 20)); out.after = text(hcLength());
+      out.readyRequests = calls.filter(c => c[0] === "/api/estimate").length;
+      worker.guard = false; worker.memory_gb = 4;
+      answers["/api/estimate"] = { worker: { address: worker.address, name: "Preferred GPU" }, memory: { fits: false, reason: "Preferred GPU no longer has enough memory" } };
+      hcLength(); await new Promise(r => setTimeout(r, 20)); out.lowMemory = text(hcLength());""")
+    assert "Head cannot fit" in out["before"] and "will be refused" in out["before"]
+    assert out["telemetryRequests"] == 1 and out["readyRequests"] == 2
+    assert "will be refused" not in out["refreshing"] and "will be refused" not in out["after"]
+    assert "about 34 s on Preferred GPU" in out["after"]
+    assert "Preferred GPU no longer has enough memory" in out["lowMemory"]
+
+
+def test_home_ignores_inflight_memory_answer_for_an_obsolete_worker_state():
+    out = run("""globalThis.SPK = { data: {
+        placement: { worker: "worker@example.invalid", policy: "prefer" }, this: { state: "ready" },
+        workers: [{ address: "worker@example.invalid", state: "busy", enabled: true, usable: false }]
+      } };
+      HC.seconds = 5; HC.recipe = "quick"; HC.est = {}; let release, requests = 0;
+      const gate = new Promise(resolve => { release = resolve; }), original = api;
+      globalThis.api = async (path, body) => {
+        if (path !== "/api/estimate") return original(path, body);
+        requests++; if (requests === 1) { await gate; return { memory: { fits: false, reason: "Obsolete head refusal" } }; }
+        return { seconds: 18, worker: { address: "worker@example.invalid", name: "Ready GPU" }, memory: { fits: true } };
+      };
+      hcLength(); SPK.data.workers[0].state = "ready"; SPK.data.workers[0].usable = true;
+      for (let i = 0; i < 10; i++) hcLength(); out.pendingRequests = requests;
+      release(); await new Promise(r => setTimeout(r, 20)); out.between = text(hcLength());
+      await new Promise(r => setTimeout(r, 20)); out.after = text(hcLength()); out.requests = requests;""")
+    assert out["pendingRequests"] == 1 and out["requests"] == 2
+    assert "Obsolete head refusal" not in out["between"] and "Obsolete head refusal" not in out["after"]
+    assert "about 18 s on Ready GPU" in out["after"]

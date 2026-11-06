@@ -39,7 +39,11 @@ def studio(monkeypatch):
             raise mcp.StudioError(f"the Studio said: {answer.json().get('error')} ({answer.status_code})")
         return answer.json()
     monkeypatch.setattr(mcp, "call", call)
-    monkeypatch.setattr(mcp.time, "sleep", lambda s: None)
+    # Speed up only this client's polling. Patching the shared time module wakes every
+    # resident-engine idle loop and can starve the API in a full-suite run.
+    from types import SimpleNamespace
+    monkeypatch.setattr(mcp, "time", SimpleNamespace(time=mcp.time.time, sleep=lambda s: None,
+                                                    strftime=mcp.time.strftime, gmtime=mcp.time.gmtime))
     return queued
 
 
